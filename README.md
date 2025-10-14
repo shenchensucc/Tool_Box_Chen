@@ -36,11 +36,18 @@ Tool_Box_Chen/
 │   ├── models.py                  # Pydantic models
 │   └── __init__.py
 ├── tests/                         # Test files
+├── docs/                          # 📚 Comprehensive documentation
+│   ├── README.md                  # Documentation hub
+│   ├── AI_DEVELOPMENT_RULES.md    # ⚠️ CRITICAL for AI development
+│   ├── CODE_REVIEW_CHECKLIST.md   # Code review standards
+│   └── functions/                 # Function-specific guides
 ├── pyproject.toml                 # Project configuration
 ├── .pre-commit-config.yaml        # Pre-commit hooks
 ├── .gitignore
 └── README.md
 ```
+
+> 📚 **New!** Comprehensive documentation is now available in the [`docs/`](docs/) folder. See [`docs/README.md`](docs/README.md) for the documentation hub.
 
 ## 🚀 Quick Start
 
@@ -142,6 +149,8 @@ Your Excel file should contain columns such as:
 
 ## 🧪 Development
 
+> 📚 **For comprehensive development guidelines**, see [`docs/DEVELOPMENT_GUIDE.md`](docs/DEVELOPMENT_GUIDE.md)
+
 ### Code Quality
 
 **Format code:**
@@ -173,6 +182,14 @@ uv run pytest
 # Using pip:
 pytest
 ```
+
+### 🤖 AI-Assisted Development
+
+**⚠️ CRITICAL**: If using AI assistance for development, **MUST READ** [`docs/AI_DEVELOPMENT_RULES.md`](docs/AI_DEVELOPMENT_RULES.md) before making any code changes to prevent over-modification and scope creep.
+
+### 📋 Code Reviews
+
+Use [`docs/CODE_REVIEW_CHECKLIST.md`](docs/CODE_REVIEW_CHECKLIST.md) for consistent, senior-level code reviews across all functions.
 
 ## 📝 Configuration
 
@@ -227,13 +244,41 @@ DEBUG=true
 - [ ] Report generation (PDF export)
 - [ ] Multi-user collaboration features
 
+## 📚 Documentation
+
+Comprehensive documentation is available in the [`docs/`](docs/) folder:
+
+### For Developers
+- 📖 [**Documentation Hub**](docs/README.md) - Start here for all documentation
+- 🏗️ [**Architecture Guide**](docs/ARCHITECTURE.md) - System design and tech stack
+- 🛠️ [**Development Guide**](docs/DEVELOPMENT_GUIDE.md) - Development practices and setup
+- 🤖 [**AI Development Rules**](docs/AI_DEVELOPMENT_RULES.md) - ⚠️ **CRITICAL** for AI-assisted development
+- 📋 [**Code Review Checklist**](docs/CODE_REVIEW_CHECKLIST.md) - Senior-level review standards
+- 📁 [**Project Structure**](docs/PROJECT_STRUCTURE.md) - File organization guide
+
+### Function-Specific Guides
+- 🛢️ [**ILI Visual Tool**](docs/functions/ILI_VISUAL_TOOL.md) - ILI tool development
+- 📊 [**Dashboard**](docs/functions/DASHBOARD.md) - Dashboard functionality
+- 🏭 [**Facility Tools**](docs/functions/FACILITY.md) - Facility management
+- 🔌 [**Backend API**](docs/functions/BACKEND_API.md) - API development
+- 🎨 [**Frontend Components**](docs/functions/FRONTEND_COMPONENTS.md) - UI patterns
+
+### Quick Links
+- For quick setup: [QUICK_START.md](QUICK_START.md)
+- For project overview: [docs/DOCUMENTATION_SETUP_COMPLETE.md](docs/DOCUMENTATION_SETUP_COMPLETE.md)
+
 ## 🤝 Contributing
 
 1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
+2. **Read** [`docs/AI_DEVELOPMENT_RULES.md`](docs/AI_DEVELOPMENT_RULES.md) if using AI assistance
+3. **Read** relevant function guide in [`docs/functions/`](docs/functions/)
+4. Create a feature branch (`git checkout -b feature/AmazingFeature`)
+5. Make changes (follow scope constraints!)
+6. Write tests and update documentation
+7. **Review** changes using [`docs/CODE_REVIEW_CHECKLIST.md`](docs/CODE_REVIEW_CHECKLIST.md)
+8. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
+9. Push to the branch (`git push origin feature/AmazingFeature`)
+10. Open a Pull Request
 
 ## 📄 License
 
