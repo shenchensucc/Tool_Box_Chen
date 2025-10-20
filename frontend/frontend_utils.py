@@ -102,6 +102,11 @@ def apply_custom_styling():
             padding-top: 2rem;
         }
 
+        /* Hide default Streamlit navigation (we use custom navigation) */
+        [data-testid="stSidebarNav"] {
+            display: none;
+        }
+
         /* Card-like containers */
         .element-container div[data-testid="stMarkdownContainer"] div {
             border-radius: 8px;
@@ -194,4 +199,19 @@ def check_backend_health() -> bool:
         response = httpx.get(f"{BACKEND_URL}/health", timeout=5.0)
         return response.status_code == 200 and response.json().get("ok", False)
     except Exception:
-        return False 
+        return False
+
+
+def display_sidebar_navigation():
+    """Display custom sidebar navigation with expandable sections"""
+    with st.sidebar:
+        st.page_link("Home.py", label="🏠 Home")
+        st.page_link("pages/1_Dashboard.py", label="📊 Dashboard")
+        
+        st.markdown("---")
+        
+        with st.expander("🏭 Facility", expanded=False):
+            st.page_link("pages/2_TML_Data_Loader.py", label="⚙️ TML Data Loader")
+        
+        with st.expander("🛢️ Pipeline", expanded=False):
+            st.page_link("pages/3_ILI_Visual_Tool.py", label="📊 ILI Visual Tool") 

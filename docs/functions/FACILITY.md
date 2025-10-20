@@ -2,8 +2,9 @@
 
 ## 📍 Function Location
 
-- **Frontend**: `frontend/pages/2_Facility.py`
-- **Backend**: Not yet implemented
+- **Frontend**: `frontend/pages/Facility/` (sidebar section)
+  - TML Data Loader: `frontend/pages/Facility/TML_Data_Loader.py`
+- **Backend**: `backend/tml/` (TML processing modules)
 
 ---
 
@@ -22,28 +23,22 @@ The **Facility Tools** will provide:
 
 ## 🏗️ Current Implementation
 
-### Page Structure
+### Current Structure
 
-```python
-# frontend/pages/2_Facility.py
+Facility is now an expandable sidebar section containing specialized tools:
 
-st.title("🏭 Facility Tools")
-st.info("Facility management tools coming soon...")
-
-# Placeholder content
-st.markdown("### Planned Features")
-st.markdown("- Equipment tracking")
-st.markdown("- Maintenance scheduling")
-# ... more placeholders
-```
+**TML Data Loader** (`Facility/TML_Data_Loader.py`)
+- Processes Thickness Monitoring Location (TML) data
+- Supports 20 different workflows
+- Batch processing with multiple parameters
+- ZIP file output with all results
 
 ### Status
 
-- ✅ Page exists and navigable
-- ✅ Basic placeholder content
-- ❌ No actual functionality
-- ❌ No backend integration
-- ❌ No data models defined
+- ✅ Facility section exists as expandable sidebar
+- ✅ TML Data Loader fully implemented
+- ✅ Backend integration complete
+- ❌ Additional facility tools planned
 
 ---
 
@@ -211,7 +206,8 @@ async def list_equipment(facility_id: int):
 ### Step 3: Build Frontend UI
 
 ```python
-# frontend/pages/2_Facility.py
+# frontend/pages/Facility/ (expandable section)
+# Example for future tools:
 
 import streamlit as st
 from frontend_utils import (

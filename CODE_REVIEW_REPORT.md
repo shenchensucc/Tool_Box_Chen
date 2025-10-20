@@ -159,7 +159,7 @@ except Exception as e:
 
 **Minor issue**:
 ```python
-# frontend/pages/4_ILI_Visual_Tool.py:8-12
+# frontend/pages/Pipeline/ILI_Visual_Tool.py:8-12
 import sys
 from pathlib import Path
 
@@ -424,7 +424,7 @@ def save_temp_file(upload_file: UploadFile) -> Path:
 
 **Minor issues**:
 ```python
-# frontend/pages/4_ILI_Visual_Tool.py:8-12
+# frontend/pages/Pipeline/ILI_Visual_Tool.py:8-12
 sys.path.insert(0, str(Path(__file__).parent.parent))
 ```
 This is a workaround that should be noted if it becomes problematic.

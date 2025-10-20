@@ -1,10 +1,18 @@
 import streamlit as st
 
-from frontend_utils import apply_custom_styling, display_header, set_page_config
+from frontend_utils import (
+    apply_custom_styling,
+    display_header,
+    display_sidebar_navigation,
+    set_page_config,
+)
 
 # Page configuration
 set_page_config("Dashboard - Chen's Toolbox", "📊")
 apply_custom_styling()
+
+# Custom Sidebar Navigation
+display_sidebar_navigation()
 
 # Header
 display_header("📊 Dashboard", "Overview of your engineering projects and data")
@@ -41,13 +49,14 @@ with col2:
     )
 
 with col3:
-    st.metric(label="Active Tools", value="1", delta="+1")
+    st.metric(label="Active Tools", value="2", delta="+1")
     st.markdown(
         """
         <div style='padding: 1rem; background-color: #f8f9fa; border-radius: 5px;'>
             <h4>Available Tools</h4>
             <ul style='color: #7f8c8d;'>
                 <li>ILI Visual Tool ✅</li>
+                <li>TML Data Loader ✅</li>
                 <li>More coming soon...</li>
             </ul>
         </div>

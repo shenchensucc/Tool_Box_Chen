@@ -2,7 +2,7 @@
 
 ## 📍 Function Location
 
-- **Frontend**: `frontend/pages/4_ILI_Visual_Tool.py`
+- **Frontend**: `frontend/pages/Pipeline/ILI_Visual_Tool.py` (under Pipeline section in sidebar)
 - **Backend**: `backend/main.py` (endpoints: `/api/ili/preview`, `/api/ili/process`)
 - **Models**: `backend/models.py` (`PreviewResponse`, `ProcessResponse`, `ColumnStats`, `HistogramData`)
 
@@ -37,7 +37,7 @@ User Upload → Frontend → /api/ili/preview → Backend → Preview Data
 
 ### Component Breakdown
 
-#### Frontend (`4_ILI_Visual_Tool.py`)
+#### Frontend (`Pipeline/ILI_Visual_Tool.py`)
 
 1. **File Upload Section**
    - Streamlit file uploader

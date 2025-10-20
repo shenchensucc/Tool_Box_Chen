@@ -17,12 +17,16 @@ from frontend_utils import (
     call_process_api,
     check_backend_health,
     display_header,
+    display_sidebar_navigation,
     set_page_config,
 )
 
 # Page configuration
-set_page_config("ILI Visual Tool - Chen's Toolbox", "🛢️")
+set_page_config("ILI Visual Tool", "🛢️")
 apply_custom_styling()
+
+# Custom Sidebar Navigation
+display_sidebar_navigation()
 
 # Header
 display_header(

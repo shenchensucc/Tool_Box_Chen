@@ -104,9 +104,10 @@ Tool_Box_Chen/
 │   ├── frontend_utils.py       # Shared utilities, API calls
 │   └── pages/                  # Streamlit pages (auto-discovered)
 │       ├── 1_Dashboard.py      # Dashboard overview
-│       ├── 2_Facility.py       # Facility tools
-│       ├── 3_Pipeline.py       # Pipeline tools page
-│       └── 4_ILI_Visual_Tool.py # ILI data analysis
+│       ├── Facility/           # Facility section (expandable)
+│       │   └── TML_Data_Loader.py # TML data processing
+│       └── Pipeline/           # Pipeline section (expandable)
+│           └── ILI_Visual_Tool.py # ILI data analysis
 │
 ├── tests/                      # Test suite
 │   ├── __init__.py
@@ -180,7 +181,7 @@ User Input → Frontend Validation → API Call → Backend Validation → Proce
 
 ```
 1. User uploads Excel file
-   └─> frontend/pages/4_ILI_Visual_Tool.py
+   └─> frontend/pages/Pipeline/ILI_Visual_Tool.py
        └─> st.file_uploader()
 
 2. Frontend sends file to backend
@@ -204,7 +205,7 @@ User Input → Frontend Validation → API Call → Backend Validation → Proce
 
 ```
 1. User selects sheet + columns
-   └─> frontend/pages/4_ILI_Visual_Tool.py
+   └─> frontend/pages/Pipeline/ILI_Visual_Tool.py
 
 2. Frontend sends processing request
    └─> httpx.post(f"{BACKEND_URL}/api/ili/process",
@@ -505,7 +506,11 @@ backend/main.py
 frontend/Home.py
     └─> streamlit
 
-frontend/pages/4_ILI_Visual_Tool.py
+frontend/pages/Pipeline/ILI_Visual_Tool.py
+    ├─> streamlit
+    ├─> frontend_utils.py (API calls)
+
+frontend/pages/Facility/TML_Data_Loader.py
     ├─> streamlit
     ├─> frontend_utils.py (API calls)
     ├─> plotly (Visualization)

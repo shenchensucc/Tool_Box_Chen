@@ -41,7 +41,7 @@ This document contains **mandatory constraints** for AI-assisted development to 
    
    Files to READ ONLY (for understanding):
    - backend/models.py
-   - frontend/pages/4_ILI_Visual_Tool.py
+   - frontend/pages/Pipeline/ILI_Visual_Tool.py
    
    Files to NEVER TOUCH:
    - All other files not listed above
@@ -114,8 +114,10 @@ Files touched:
 |----------------|-------------------|
 | `Home.py` | Only modify if explicitly requested. This is a stable cover page. |
 | `pages/1_Dashboard.py` | Only modify Dashboard if requested. Do NOT add features unprompted. |
-| `pages/2_Facility.py` | Only modify Facility if requested. Do NOT implement placeholder features. |
-| `pages/4_ILI_Visual_Tool.py` | Modify only requested functionality. Do NOT change visualization style. |
+| `pages/Facility/` | Only modify Facility tools if requested. Do NOT implement features unprompted. |
+| `pages/Pipeline/` | Only modify Pipeline tools if requested. Do NOT implement features unprompted. |
+| `pages/Pipeline/ILI_Visual_Tool.py` | Modify only requested functionality. Do NOT change visualization style. |
+| `pages/Facility/TML_Data_Loader.py` | Modify only requested functionality. Do NOT change workflow logic. |
 | `frontend_utils.py` | Add new utilities ONLY if needed by requested feature. |
 
 ### Configuration & Dependencies
@@ -212,9 +214,9 @@ def process_data(distance_column: str, metal_loss_column: str):
 # ❌ BAD
 # Request: Update ILI tool error handling
 # Files modified:
-# - pages/4_ILI_Visual_Tool.py (✅ requested)
+# - pages/Pipeline/ILI_Visual_Tool.py (✅ requested)
 # - pages/1_Dashboard.py (❌ "for consistency")
-# - pages/2_Facility.py (❌ "for consistency")
+# - pages/Facility/TML_Data_Loader.py (❌ "for consistency")
 # - frontend_utils.py (❌ "for consistency")
 ```
 

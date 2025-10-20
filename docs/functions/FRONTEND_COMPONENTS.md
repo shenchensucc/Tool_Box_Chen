@@ -24,15 +24,18 @@ Streamlit automatically discovers pages in `frontend/pages/` directory:
 frontend/
 ├── Home.py                   # Main entry (cover page)
 └── pages/
-    ├── 1_Dashboard.py        # Shows as "Dashboard" in sidebar
-    ├── 2_Facility.py         # Shows as "Facility"
-    ├── 3_Pipeline.py         # Shows as "Pipeline"
-    └── 4_ILI_Visual_Tool.py  # Shows as "ILI Visual Tool"
+    ├── 1_Dashboard.py              # Shows as "Dashboard" in sidebar
+    ├── Facility/                   # Expandable "Facility" section
+    │   └── TML_Data_Loader.py      # Shows as "TML Data Loader" under Facility
+    └── Pipeline/                   # Expandable "Pipeline" section
+        └── ILI_Visual_Tool.py      # Shows as "ILI Visual Tool" under Pipeline
 ```
 
-**Naming Convention**: `N_Page_Name.py`
-- `N`: Number for ordering in sidebar
-- `Page_Name`: Display name (underscores become spaces)
+**Naming Convention**: 
+- Top-level pages: `N_Page_Name.py` where `N` orders in sidebar
+- Sections: Create a directory (e.g., `Facility/`) for expandable sidebar section
+- Sub-pages: Place files in section directory (e.g., `Facility/TML_Data_Loader.py`)
+- Display names: Underscores become spaces
 
 ### Shared Utilities
 

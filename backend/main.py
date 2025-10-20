@@ -1,5 +1,7 @@
 import os
+import shutil
 import tempfile
+import zipfile
 from pathlib import Path
 from typing import Dict, List
 
@@ -7,6 +9,7 @@ import numpy as np
 import pandas as pd
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from openpyxl import load_workbook
 
 from backend.models import (
@@ -16,6 +19,27 @@ from backend.models import (
     PreviewResponse,
     ProcessResponse,
 )
+from backend.tml.file_handler import FileHandler
+from backend.tml.workflows._01_status import process_status_indicator
+from backend.tml.workflows._02_follow_up_cml import process_follow_up_cml
+from backend.tml.workflows._03_code_year_tmin import process_code_year_tmin
+from backend.tml.workflows._04_design_code import process_design_code
+from backend.tml.workflows._05_material_spec import process_material_specification
+from backend.tml.workflows._06_material_grade import process_material_grade
+from backend.tml.workflows._07_design_temperature import process_design_temperature
+from backend.tml.workflows._08_piping_formula import process_piping_formula
+from backend.tml.workflows._09_od import process_od
+from backend.tml.workflows._10_nps import process_nps
+from backend.tml.workflows._11_schedule import process_schedule
+from backend.tml.workflows._12_design_pressure import process_design_pressure
+from backend.tml.workflows._13_temperature_coefficient import process_temperature_coefficient
+from backend.tml.workflows._14_tnom import process_tnom
+from backend.tml.workflows._15_tmin import process_tmin
+from backend.tml.workflows._16_override_allowable_stress import process_override_allowable_stress
+from backend.tml.workflows._17_allowable_stress import process_allowable_stress
+from backend.tml.workflows._18_design_factor import process_design_factor
+from backend.tml.workflows._19_joint_factor import process_joint_factor
+from backend.tml.workflows._20_location_factor import process_location_factor
 
 app = FastAPI(title="Chen's Engineer Toolbox API", version="0.1.0")
 
@@ -215,6 +239,173 @@ async def process_ili_data(
         # Clean up temp file
         if temp_path.exists():
             os.unlink(temp_path)
+
+
+@app.post("/api/tml/process")
+async def process_tml_data(
+    source_file: UploadFile = File(...),
+    template_file: UploadFile = File(...),
+    workflows: str = Form(...),
+):
+    """
+    Process TML data with selected workflows and return a ZIP file with all outputs
+    
+    Args:
+        source_file: Source Excel file
+        template_file: Template Excel file (TM_Loader.xlsx)
+        workflows: Comma-separated list of workflow IDs (1-20)
+    
+    Returns:
+        ZIP file containing all generated output files
+    """
+    # Validate file types
+    if not source_file.filename.endswith((".xlsx", ".xls")):
+        raise HTTPException(status_code=400, detail="Source file must be an Excel file (.xlsx or .xls)")
+    if not template_file.filename.endswith((".xlsx", ".xls")):
+        raise HTTPException(status_code=400, detail="Template file must be an Excel file (.xlsx or .xls)")
+    
+    validate_file_size(source_file)
+    validate_file_size(template_file)
+    
+    # Parse workflow IDs
+    try:
+        workflow_ids = [int(w.strip()) for w in workflows.split(",") if w.strip()]
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid workflow IDs format")
+    
+    if not workflow_ids:
+        raise HTTPException(status_code=400, detail="No workflows selected")
+    
+    # Create temporary directory for processing
+    temp_dir = tempfile.mkdtemp()
+    temp_source = None
+    temp_template = None
+    temp_output_dir = None
+    zip_path = None
+    
+    try:
+        # Save uploaded files
+        temp_source = save_temp_file(source_file)
+        temp_template = save_temp_file(template_file)
+        temp_output_dir = Path(temp_dir) / "output"
+        temp_output_dir.mkdir(exist_ok=True)
+        
+        # Initialize file handler
+        file_handler = FileHandler(
+            source_path=str(temp_source),
+            template_path=str(temp_template),
+            output_dir=str(temp_output_dir)
+        )
+        
+        # Read source data and filter
+        try:
+            source = file_handler.read_excel("source", "Source_Data")
+            print(f"Source data shape: {source.shape}")
+        except Exception as e:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Error reading source file. Ensure it has a sheet named 'Source_Data'. Error: {str(e)}"
+            )
+        
+        # Check for required column
+        if "AER_Status_CML" not in source.columns:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Source file missing required column 'AER_Status_CML'. Found columns: {', '.join(source.columns.tolist())}"
+            )
+        
+        # Filter source data for AER_Status_CML with value "Yes"
+        source = source[source["AER_Status_CML"].str.contains("Yes", na=False)].copy()
+        print(f"Filtered source data shape: {source.shape}")
+        
+        if source.empty:
+            raise HTTPException(
+                status_code=400,
+                detail="No records found with AER_Status_CML containing 'Yes'. Please check your source data."
+            )
+        
+        # Read template data
+        try:
+            loader_Assets = file_handler.read_excel("template", "Assets")
+            loader_TML = file_handler.read_excel("template", "TML")
+        except Exception as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Error reading template file. Ensure it has sheets named 'Assets' and 'TML'. Error: {str(e)}"
+            )
+        
+        # Copy template file to output directory as base for all workflows
+        for file_key in file_handler.output_files.keys():
+            shutil.copy(temp_template, file_handler.output_files[file_key])
+        
+        # Define workflow mapping
+        workflow_map = {
+            1: (process_status_indicator, "Status"),
+            2: (process_follow_up_cml, "FollowUp"),
+            3: (process_code_year_tmin, "CodeYearTmin"),
+            4: (process_design_code, "DesignCode"),
+            5: (process_material_specification, "MaterialSpec"),
+            6: (process_material_grade, "MaterialGrade"),
+            7: (process_design_temperature, "T"),
+            8: (process_piping_formula, "PF"),
+            9: (process_od, "OD"),
+            10: (process_nps, "NPS"),
+            11: (process_schedule, "Schedule"),
+            12: (process_design_pressure, "P"),
+            13: (process_temperature_coefficient, "TempCoef"),
+            14: (process_tnom, "Tnom"),
+            15: (process_tmin, "Tmin"),
+            16: (process_override_allowable_stress, "OAS"),
+            17: (process_allowable_stress, "AS"),
+            18: (process_design_factor, "DF"),
+            19: (process_joint_factor, "JF"),
+            20: (process_location_factor, "LF"),
+        }
+        
+        # Process selected workflows
+        processed_files = []
+        for workflow_id in workflow_ids:
+            if workflow_id not in workflow_map:
+                print(f"Warning: Invalid workflow ID {workflow_id}, skipping")
+                continue
+            
+            process_func, file_key = workflow_map[workflow_id]
+            output_file = file_handler.output_files[file_key]
+            
+            try:
+                print(f"\nProcessing workflow {workflow_id}...")
+                process_func(source, loader_Assets, loader_TML, output_file)
+                processed_files.append(output_file)
+            except Exception as e:
+                print(f"Error processing workflow {workflow_id}: {str(e)}")
+                # Continue with other workflows even if one fails
+        
+        if not processed_files:
+            raise HTTPException(status_code=400, detail="No workflows were successfully processed")
+        
+        # Create ZIP file with all processed outputs
+        zip_path = Path(temp_dir) / "TML_Output.zip"
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for file_path in processed_files:
+                if os.path.exists(file_path):
+                    zipf.write(file_path, os.path.basename(file_path))
+        
+        # Return the ZIP file
+        return FileResponse(
+            path=str(zip_path),
+            filename="TML_Output.zip",
+            media_type="application/zip",
+            headers={"Content-Disposition": f"attachment; filename=TML_Output.zip"}
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing TML data: {str(e)}")
+    finally:
+        # Note: Don't clean up temp files here since FileResponse needs them
+        # They will be cleaned up when the response is sent
+        pass
 
 
 if __name__ == "__main__":

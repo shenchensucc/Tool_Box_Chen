@@ -21,9 +21,10 @@ Tool_Box_Chen/
 │   ├── frontend_utils.py         # Shared utilities, API wrappers
 │   └── pages/                    # Streamlit pages (auto-discovered)
 │       ├── 1_Dashboard.py        # Dashboard overview
-│       ├── 2_Facility.py         # Facility tools (placeholder)
-│       ├── 3_Pipeline.py         # Pipeline tools page
-│       └── 4_ILI_Visual_Tool.py  # ILI data analysis tool
+│       ├── Facility/             # Facility section (expandable in sidebar)
+│       │   └── TML_Data_Loader.py # TML data processing tool
+│       └── Pipeline/             # Pipeline section (expandable in sidebar)
+│           └── ILI_Visual_Tool.py # ILI data analysis tool
 │
 ├── tests/                        # Test suite
 │   ├── __init__.py               # Test package init
@@ -131,9 +132,10 @@ tests/test_backend.py
 | `frontend/Home.py` | Cover page | Low |
 | `frontend/frontend_utils.py` | Shared utilities | Medium |
 | `frontend/pages/1_Dashboard.py` | Dashboard page | Medium |
-| `frontend/pages/2_Facility.py` | Facility tools | High (in dev) |
-| `frontend/pages/3_Pipeline.py` | Pipeline tools | Low |
-| `frontend/pages/4_ILI_Visual_Tool.py` | ILI analysis | Medium |
+| `frontend/pages/Facility/` | Facility section | High (in dev) |
+| `frontend/pages/Facility/TML_Data_Loader.py` | TML data processing | Medium |
+| `frontend/pages/Pipeline/` | Pipeline section | Medium |
+| `frontend/pages/Pipeline/ILI_Visual_Tool.py` | ILI analysis | Medium |
 
 ### Documentation Files
 
@@ -275,7 +277,7 @@ graph TD
 
 ```
 1. User uploads file
-   └─> frontend/pages/4_ILI_Visual_Tool.py
+   └─> frontend/pages/Pipeline/ILI_Visual_Tool.py
 
 2. File sent to backend
    └─> frontend/frontend_utils.py::process_ili_data()
@@ -288,7 +290,7 @@ graph TD
        └─> Returns backend/models.py::ProcessResponse
 
 4. Frontend displays results
-   └─> frontend/pages/4_ILI_Visual_Tool.py
+   └─> frontend/pages/Pipeline/ILI_Visual_Tool.py
        └─> plotly visualizations
 ```
 
@@ -357,7 +359,9 @@ graph TD
 | Health check | `backend/main.py::health_check()` |
 | File preview | `backend/main.py::preview_excel()` |
 | ILI processing | `backend/main.py::process_ili_data()` |
-| ILI UI | `frontend/pages/4_ILI_Visual_Tool.py` |
+| ILI UI | `frontend/pages/Pipeline/ILI_Visual_Tool.py` |
+| TML processing | `backend/tml/` (workflow modules) |
+| TML UI | `frontend/pages/Facility/TML_Data_Loader.py` |
 | Dashboard | `frontend/pages/1_Dashboard.py` |
 | File validation | `backend/main.py::validate_file_size()` |
 | Statistics | `backend/main.py::calculate_stats()` |
@@ -366,9 +370,9 @@ graph TD
 
 | Feature | Backend | Frontend | Tests |
 |---------|---------|----------|-------|
-| ILI Tool | `main.py` lines 96-217 | `4_ILI_Visual_Tool.py` | `test_backend.py` |
+| ILI Tool | `main.py` lines 96-217 | `Pipeline/ILI_Visual_Tool.py` | `test_backend.py` |
+| TML Tool | `tml/` (workflows 1-20) | `Facility/TML_Data_Loader.py` | Not yet |
 | Dashboard | N/A | `1_Dashboard.py` | Manual |
-| Facility | N/A (planned) | `2_Facility.py` | Not yet |
 
 ---
 

@@ -1,10 +1,18 @@
 import streamlit as st
 
-from frontend_utils import apply_custom_styling, check_backend_health, set_page_config
+from frontend_utils import (
+    apply_custom_styling,
+    check_backend_health,
+    display_sidebar_navigation,
+    set_page_config,
+)
 
 # Page configuration
 set_page_config("Chen's Engineer Toolbox", "🔧")
 apply_custom_styling()
+
+# Custom Sidebar Navigation with Expandable Sections
+display_sidebar_navigation()
 
 # Main content
 st.markdown(
@@ -36,6 +44,7 @@ with col2:
         - 📊 **Dashboard**: Overview of your projects and data
         - 🏭 **Facility Tools**: Facility management and analysis
         - 🛢️ **Pipeline Tools**: Pipeline inspection and visualization
+        - ⚙️ **TML Data Loader**: Batch process thickness monitoring location data
 
         ### Getting Started
 
@@ -46,6 +55,7 @@ with col2:
         ### Features
 
         - **ILI Visual Tool**: Upload and analyze in-line inspection data
+        - **TML Data Loader**: Process up to 20 TML workflows simultaneously
         - **Interactive Charts**: Powered by Plotly for rich visualizations
         - **Data Export**: Download processed results
         - **Fast API Backend**: Efficient data processing
