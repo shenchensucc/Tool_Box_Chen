@@ -3,12 +3,25 @@
 echo "Starting Chen's Engineer Toolbox - Frontend UI"
 echo "=============================================="
 echo ""
+echo "Starting frontend at http://localhost:8501"
+echo "The app will open automatically in your browser"
+echo ""
 
-# Check if uv is available
-if command -v uv &> /dev/null; then
-    echo "Using uv to run frontend..."
-    uv run streamlit run frontend/Home.py
-else
-    echo "Using streamlit directly..."
-    streamlit run frontend/Home.py
+# Change to script directory, then to frontend
+cd "$(dirname "$0")/frontend"
+
+# Run frontend using python -m (more reliable)
+python -m streamlit run Home.py
+
+# Check if command failed
+if [ $? -ne 0 ]; then
+    echo ""
+    echo "ERROR: Failed to start frontend!"
+    echo ""
+    echo "Please ensure:"
+    echo "  1. Python 3.11+ is installed: python --version"
+    echo "  2. Streamlit is installed: pip install streamlit"
+    echo "  3. You are in the project root directory"
+    echo ""
+    read -p "Press Enter to exit..."
 fi 
