@@ -117,6 +117,8 @@ streamlit run frontend/Home.py
 
 The frontend will open automatically in your browser at `http://localhost:8501`
 
+> ⚠️ **PowerShell Users**: When running commands manually with `cd`, use semicolon `;` instead of `&&` to chain commands (e.g., `cd frontend; python -m streamlit run Home.py`). PowerShell does not support the `&&` operator.
+
 ## 🛠️ API Endpoints
 
 ### Backend API
