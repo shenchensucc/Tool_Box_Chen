@@ -223,37 +223,146 @@ with st.expander("ℹ️ Help & Information"):
        - Wait for processing to complete (may take 30 seconds to a few minutes depending on data size)
        - Download the generated ZIP file containing all output files
     
-    ### Available Workflows
+    ---
     
-    Each workflow processes a specific TML parameter:
-    - **01-02**: Status and flag updates
-    - **03-06**: Code and material specifications
-    - **07-12**: Design parameters (temperature, pressure, dimensions)
-    - **13-20**: Advanced parameters (coefficients, factors, stresses)
+    ### 📋 Required File Format
     
-    ### Output Files
+    #### **Source File Requirements**
     
-    Each selected workflow generates a separate Excel file with the naming format:
-    - `XX_TM_Loader_[Parameter].xlsx` (where XX is the workflow number)
+    **Must-Have Structure:**
+    - ✅ **Sheet Name**: Must have a sheet named `"Source_Data"`
+    - ✅ **Required Core Columns** (present in ALL workflows):
+      - `Equipment ID` - Equipment identifier (preserved with leading zeros)
+      - `CML Group ID` - CML Group identifier
+      - `sub-CML ID` - Sub-CML identifier
+      - `AER_Status_CML` - **CRITICAL**: Only records containing "Yes" will be processed
     
-    All files are packaged into a single ZIP file for download.
+    **Workflow-Specific Columns** (required based on selected workflows):
     
-    ### File Requirements
+    | Workflow # | Workflow Name | Required Column(s) | Filter Logic |
+    |:-----------|:--------------|:-------------------|:-------------|
+    | **01** | Status | `AER_Status_CML` | Must contain "To be de-active" |
+    | **02** | AER Flag | `AER_Status_CML` | Must contain "Yes" |
+    | **03** | Code Year T-Min | `Code Year (T-Min Formula)` | Non-empty values |
+    | **04** | Design Code | `CorrValue_Design_Code` | Non-empty & non-zero |
+    | **05** | Material Spec | `CorrValue_Material` | Non-empty & non-zero |
+    | **06** | Material Grade | `CorrValue_Grade` | Non-empty & non-zero |
+    | **07** | Design Temperature | `CorrValue_T` | Non-empty & non-zero |
+    | **08** | Piping Formula | `Piping Formula` | Non-empty values |
+    | **09** | Outside Diameter | `CorrValue_OD` | Non-empty & non-zero |
+    | **10** | NPS | `CorrValue_NPS` | Non-empty & non-zero |
+    | **11** | Schedule | `CorrValue_Schedule` | Non-empty & non-zero |
+    | **12** | Design Pressure | `CorrValue_P` | Non-empty & non-zero |
+    | **13** | Temp Coefficient | `Temperature Coefficient` | Non-empty values |
+    | **14** | Tnom | `CorrValue_Tnom` | Non-empty & non-zero |
+    | **15** | Tmin | `CorrValue_Tmin` | Non-empty & non-zero |
+    | **16** | Override Allowable Stress | `Override Allowable Stress` | Non-empty values |
+    | **17** | Allowable Stress | `AER_SMYS` | Processes ALL values |
+    | **18** | Design Factor | `Design Factor` | Non-empty values |
+    | **19** | Joint Factor | `Joint Factor` | Non-empty values |
+    | **20** | Location Factor | `CorrValue_LocFactor` | Non-empty & non-zero |
     
-    **Source File** must contain:
-    - Sheet named "Source_Data"
-    - Column "AER_Status_CML" (records with "Yes" will be processed)
-    - Relevant columns for selected workflows
+    #### **Template File Requirements**
     
-    **Template File** must contain:
-    - Sheet named "Assets"
-    - Sheet named "TML"
+    **Must-Have Structure:**
+    - ✅ **Sheet Name**: Must have sheets named `"Assets"` and `"TML"`
+    - ✅ **Purpose**: Provides the base structure that will be populated with processed data
+    - ✅ **Columns**: The tool will automatically map source columns to template columns
     
-    ### Notes
-    - Maximum file size: 30 MB per file
-    - Supported formats: .xlsx, .xls
-    - Files are processed in memory and not stored permanently
-    - Processing time depends on file size and number of workflows selected
+    ---
+    
+    ### ⚙️ How the Tool Processes Data
+    
+    1. **Initial Filtering**: 
+       - Reads `Source_Data` sheet from source file
+       - **Filters to only process records where `AER_Status_CML` contains "Yes"**
+       - If no "Yes" records found, processing will fail with an error message
+    
+    2. **Workflow-Specific Filtering**:
+       - Each workflow applies additional filters based on its required column
+       - Empty values (NaN) are skipped
+       - Zero values are skipped (for numeric fields marked "non-zero")
+       - Only valid records are processed and added to output
+    
+    3. **Data Mapping**:
+       - Source columns are renamed to match template structure
+       - Example: `CML Group ID` → `TML Group ID`, `sub-CML ID` → `TML_ID`
+       - Adds system columns: `CMMS System = "P1R-100"`, `TML Analysis Type = "TML"`
+    
+    4. **Output Generation**:
+       - Template data is copied to output file
+       - Processed source data is appended to both `Assets` and `TML` sheets
+       - Duplicates in Assets are removed automatically
+       - Column widths are set to 20 for readability
+    
+    ---
+    
+    ### ❌ What Happens if Columns are Missing?
+    
+    **Scenario 1: Missing Core Columns**
+    - If `Equipment ID`, `CML Group ID`, or `sub-CML ID` is missing:
+      - ❌ **Workflow will fail** with a "KeyError" indicating the missing column
+    
+    **Scenario 2: Missing `AER_Status_CML`**
+    - ❌ **Processing will fail immediately** with error message:
+      - *"Source file missing required column 'AER_Status_CML'"*
+    
+    **Scenario 3: Missing Workflow-Specific Column**
+    - If a selected workflow's required column is missing:
+      - ❌ **That workflow will fail**, but other workflows continue
+      - Error logged showing which column is missing
+    
+    **Scenario 4: All Values Filtered Out**
+    - If column exists but all values are empty/zero/don't match filter:
+      - ⚠️ **Workflow completes but outputs empty results**
+      - Message: "No records found matching the criteria"
+      - Output file still generated with template structure only
+    
+    **Scenario 5: No "Yes" in `AER_Status_CML`**
+    - ❌ **All processing stops** with error:
+      - *"No records found with AER_Status_CML containing 'Yes'"*
+    
+    ---
+    
+    ### 📦 Output Files
+    
+    Each selected workflow generates a separate Excel file:
+    - **Naming Format**: `XX_TM_Loader_[Parameter].xlsx` (XX = workflow number)
+    - **Contains**: Two sheets - `Assets` and `TML` with processed data
+    - **Special Case**: Workflow 17 generates TWO files:
+      - `17_TM_Loader_AllowableStress.xlsx` (filtered: non-zero values only)
+      - `17_TM_Loader_AllowableStress_All.xlsx` (all values including zeros)
+    
+    All files are packaged into **`TML_Output.zip`** for download.
+    
+    ---
+    
+    ### 📌 Important Notes
+    
+    - **Maximum file size**: 30 MB per file
+    - **Supported formats**: .xlsx, .xls
+    - **Data Privacy**: Files are processed in memory only and deleted immediately after processing
+    - **Processing time**: 30 seconds to a few minutes (depends on file size and workflow count)
+    - **Column Names**: Must match exactly (case-sensitive)
+    - **Equipment ID**: Leading zeros are preserved (e.g., "00123" stays as "00123")
+    - **Error Handling**: If one workflow fails, others continue processing
+    
+    ---
+    
+    ### 💡 Tips for Success
+    
+    ✅ **Before uploading**, verify:
+    1. Source file has sheet named "Source_Data" (exact spelling)
+    2. Template file has sheets "Assets" and "TML"
+    3. All required columns exist with exact names (case-sensitive)
+    4. `AER_Status_CML` column has at least some "Yes" values
+    5. Selected workflows have their required columns populated with valid data
+    
+    ✅ **If you encounter errors**:
+    1. Check error message for specific missing column names
+    2. Verify sheet names are spelled correctly
+    3. Ensure data types are correct (numeric for CorrValue fields)
+    4. Check that you're not selecting workflows whose columns don't exist in your source
     """)
 
 # Footer
