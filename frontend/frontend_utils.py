@@ -214,4 +214,5 @@ def display_sidebar_navigation():
             st.page_link("pages/2_TML_Data_Loader.py", label="⚙️ TML Data Loader")
         
         with st.expander("🛢️ Pipeline", expanded=False):
-            st.page_link("pages/3_ILI_Visual_Tool.py", label="📊 ILI Visual Tool") 
+            st.page_link("pages/3_ILI_Visual_Tool.py", label="📊 ILI Visual Tool")
+            st.page_link("pages/4_Metal_Loss_Assessment.py", label="🔬 Metal Loss Assessment") 

@@ -2,6 +2,7 @@ import os
 import shutil
 import tempfile
 import zipfile
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List
 
@@ -40,6 +41,8 @@ from backend.tml.workflows._17_allowable_stress import process_allowable_stress
 from backend.tml.workflows._18_design_factor import process_design_factor
 from backend.tml.workflows._19_joint_factor import process_joint_factor
 from backend.tml.workflows._20_location_factor import process_location_factor
+from backend.pipeline.metal_loss import assess_metal_loss_feature
+from backend.pipeline.report_generator import generate_word_report
 
 app = FastAPI(title="Chen's Engineer Toolbox API", version="0.1.0")
 
@@ -406,6 +409,109 @@ async def process_tml_data(
         # Note: Don't clean up temp files here since FileResponse needs them
         # They will be cleaned up when the response is sent
         pass
+
+
+@app.post("/api/pipeline/metal-loss/assess")
+async def assess_metal_loss(
+    do: float = Form(...),
+    tp: float = Form(...),
+    YS: float = Form(...),
+    TS: float = Form(...),
+    dimp_org_percent: float = Form(...),
+    Limp_org: float = Form(...),
+    date_ILI: str = Form(...),
+    ILI_dimp_tolerance: float = Form(...),
+    ILI_Limp_tolerance: float = Form(...),
+    CR_low: float = Form(...),
+    CR_ave: float = Form(...),
+    CR_high: float = Form(...),
+    month_CR: int = Form(...),
+    feature_ID: str = Form(""),
+    vendor_ILI: str = Form(""),
+    CR_Limp: float = Form(0.0)
+):
+    """
+    Assess metal loss feature and return calculated results.
+    
+    Returns:
+        JSON with assessment results including depth/pressure arrays
+    """
+    try:
+        results = assess_metal_loss_feature(
+            do=do,
+            tp=tp,
+            YS=YS,
+            TS=TS,
+            dimp_org_percent=dimp_org_percent,
+            Limp_org=Limp_org,
+            date_ILI=date_ILI,
+            ILI_dimp_tolerance=ILI_dimp_tolerance,
+            ILI_Limp_tolerance=ILI_Limp_tolerance,
+            CR_low=CR_low,
+            CR_ave=CR_ave,
+            CR_high=CR_high,
+            month_CR=month_CR,
+            feature_ID=feature_ID,
+            vendor_ILI=vendor_ILI,
+            CR_Limp=CR_Limp
+        )
+        return results
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error in assessment: {str(e)}")
+
+
+@app.post("/api/pipeline/metal-loss/export-word")
+async def export_word_report(
+    assessment_results: str = Form(...),
+    depth_growth_chart: UploadFile = File(...),
+    sop_decay_chart: UploadFile = File(...),
+    sop_cutoff_chart: UploadFile = File(...)
+):
+    """
+    Generate and download Word document report.
+    
+    Parameters:
+        assessment_results: JSON string of assessment results
+        depth_growth_chart: PNG image of depth growth chart
+        sop_decay_chart: PNG image of SOP decay chart
+        sop_cutoff_chart: PNG image of SOP cutoff chart
+    
+    Returns:
+        Word document (.docx) file
+    """
+    try:
+        import json
+        
+        # Parse assessment results
+        results = json.loads(assessment_results)
+        
+        # Read chart images
+        chart_images = {
+            'depth_growth': await depth_growth_chart.read(),
+            'sop_decay': await sop_decay_chart.read(),
+            'sop_cutoff': await sop_cutoff_chart.read()
+        }
+        
+        # Generate Word document
+        doc_bytes = generate_word_report(results, chart_images)
+        
+        # Create temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.docx') as tmp:
+            tmp.write(doc_bytes)
+            tmp_path = tmp.name
+        
+        # Return file
+        return FileResponse(
+            path=tmp_path,
+            filename=f"Metal_Loss_Assessment_{datetime.now().strftime('%Y%m%d_%H%M%S')}.docx",
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={"Content-Disposition": f"attachment; filename=Metal_Loss_Assessment_{datetime.now().strftime('%Y%m%d_%H%M%S')}.docx"}
+        )
+    
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid assessment results JSON")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating report: {str(e)}")
 
 
 if __name__ == "__main__":
