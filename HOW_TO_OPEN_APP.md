@@ -90,7 +90,8 @@ Sidebar Navigation:
 ├─ 🏭 Facility ▶️ (click to expand)
 │   └─ ⚙️ TML Data Loader
 └─ 🛢️ Pipeline ▶️ (click to expand)
-    └─ 📊 ILI Visual Tool
+    ├─ 📊 ILI Visual Tool
+    └─ 🔬 Metal Loss Assessment
 ```
 
 ---

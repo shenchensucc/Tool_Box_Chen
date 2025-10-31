@@ -58,6 +58,16 @@ app.add_middleware(
 MAX_FILE_SIZE = 30 * 1024 * 1024  # 30 MB
 
 
+def validate_excel_file(file: UploadFile) -> None:
+    """Validate Excel file type and size"""
+    # Validate file type
+    if not file.filename.endswith((".xlsx", ".xls")):
+        raise HTTPException(status_code=400, detail="File must be an Excel file (.xlsx or .xls)")
+    
+    # Validate file size
+    validate_file_size(file)
+
+
 def validate_file_size(file: UploadFile) -> None:
     """Validate uploaded file size"""
     file.file.seek(0, 2)  # Seek to end
@@ -125,10 +135,7 @@ async def preview_excel(file: UploadFile = File(...)):
     """
     Preview an Excel file and return sheet names, columns, and row counts
     """
-    if not file.filename.endswith((".xlsx", ".xls")):
-        raise HTTPException(status_code=400, detail="File must be an Excel file (.xlsx or .xls)")
-
-    validate_file_size(file)
+    validate_excel_file(file)
 
     temp_path = save_temp_file(file)
 
@@ -173,10 +180,7 @@ async def process_ili_data(
     """
     Process ILI data from Excel file and return statistics and plot data
     """
-    if not file.filename.endswith((".xlsx", ".xls")):
-        raise HTTPException(status_code=400, detail="File must be an Excel file (.xlsx or .xls)")
-
-    validate_file_size(file)
+    validate_excel_file(file)
 
     temp_path = save_temp_file(file)
 
@@ -261,14 +265,9 @@ async def process_tml_data(
     Returns:
         ZIP file containing all generated output files
     """
-    # Validate file types
-    if not source_file.filename.endswith((".xlsx", ".xls")):
-        raise HTTPException(status_code=400, detail="Source file must be an Excel file (.xlsx or .xls)")
-    if not template_file.filename.endswith((".xlsx", ".xls")):
-        raise HTTPException(status_code=400, detail="Template file must be an Excel file (.xlsx or .xls)")
-    
-    validate_file_size(source_file)
-    validate_file_size(template_file)
+    # Validate file types and sizes
+    validate_excel_file(source_file)
+    validate_excel_file(template_file)
     
     # Parse workflow IDs
     try:
