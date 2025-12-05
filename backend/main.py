@@ -43,6 +43,7 @@ from backend.tml.workflows._19_joint_factor import process_joint_factor
 from backend.tml.workflows._20_location_factor import process_location_factor
 from backend.pipeline.metal_loss import assess_metal_loss_feature
 from backend.pipeline.report_generator import generate_word_report
+from backend.pipeline.dig_package import generate_dig_packages
 
 app = FastAPI(title="Chen's Engineer Toolbox API", version="0.1.0")
 
@@ -512,6 +513,64 @@ async def export_word_report(
         raise HTTPException(status_code=400, detail="Invalid assessment results JSON")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error generating report: {str(e)}")
+
+
+@app.post("/api/pipeline/dig-package/generate")
+async def generate_dig_package_endpoint(
+    mdl_file: UploadFile = File(..., description="Master Dig List Excel file"),
+    ili_file: UploadFile = File(..., description="ILI data Excel file"),
+    template_file: UploadFile = File(..., description="Dig package template Excel file"),
+    revision: str = Form(..., description="Revision identifier (e.g., '1', '2', 'draft', etc.)")
+):
+    """
+    Generate dig packages from MDL, ILI data, and template files.
+    
+    Parameters:
+        mdl_file: Master Dig List Excel file (.xlsx)
+        ili_file: ILI (In-Line Inspection) data Excel file (.xlsx)
+        template_file: Dig package template Excel file (.xlsx)
+        revision: Revision identifier (e.g., '1', '2', 'draft', etc.) for generated packages
+    
+    Returns:
+        ZIP file containing all generated Excel and PDF dig packages
+    """
+    try:
+        # Validate file sizes
+        validate_file_size(mdl_file)
+        validate_file_size(ili_file)
+        validate_file_size(template_file)
+        
+        # Read file contents
+        mdl_content = await mdl_file.read()
+        ili_content = await ili_file.read()
+        template_content = await template_file.read()
+        
+        # Generate dig packages
+        zip_buffer = generate_dig_packages(
+            mdl_content=mdl_content,
+            ili_content=ili_content,
+            template_content=template_content,
+            revision=revision
+        )
+        
+        # Create temporary file for ZIP
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.zip') as tmp:
+            tmp.write(zip_buffer.getvalue())
+            tmp_path = tmp.name
+        
+        # Return ZIP file
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        return FileResponse(
+            path=tmp_path,
+            filename=f"Dig_Packages_R{revision}_{timestamp}.zip",
+            media_type="application/zip",
+            headers={"Content-Disposition": f"attachment; filename=Dig_Packages_R{revision}_{timestamp}.zip"}
+        )
+    
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating dig packages: {str(e)}")
 
 
 if __name__ == "__main__":
