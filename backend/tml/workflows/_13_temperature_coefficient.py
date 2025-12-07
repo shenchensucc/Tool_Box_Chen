@@ -1,7 +1,11 @@
 from ..data_processor import DataProcessor
 
 def process_temperature_coefficient(source, loader_Assets, loader_TML, output_file):
-    """Process Temperature Coefficient updates"""
+    """Process Temperature Coefficient updates
+    
+    Returns:
+        tuple: (records_count, output_file) if successful, (0, None) if no records
+    """
     processor = DataProcessor()
     
     print("\nProcessing Temperature Coefficient...")
@@ -20,13 +24,13 @@ def process_temperature_coefficient(source, loader_Assets, loader_TML, output_fi
     print(f"Unique values in Temperature Coefficient after filtering: {source_TempCoef['Temperature Coefficient'].unique()}")
     
     if not source_TempCoef.empty:
-        print("Found records to process")
+        print(f"Found {len(source_TempCoef)} records to process")
         
         # Set all values to 1 in the filtered data
         source_TempCoef["Temperature Coefficient"] = 1
         
         # Map Temperature Coefficient to Temperature Factor in the column mapping
-        processor.append_and_save(
+        records_added = processor.append_and_save(
             loader_Assets,
             loader_TML,
             source_TempCoef,
@@ -37,6 +41,8 @@ def process_temperature_coefficient(source, loader_Assets, loader_TML, output_fi
             },
             output_file, "Assets", "TML"
         )
+        return (records_added, output_file if records_added > 0 else None)
     else:
         print("No records found matching the criteria")
+        return (0, None)
 

@@ -1,7 +1,11 @@
 from ..data_processor import DataProcessor
 
 def process_joint_factor(source, loader_Assets, loader_TML, output_file):
-    """Process Joint Factor updates"""
+    """Process Joint Factor updates
+    
+    Returns:
+        tuple: (records_count, output_file) if successful, (0, None) if no records
+    """
     processor = DataProcessor()
     print("\nProcessing Joint Factor...")
     print(f"Source data shape before filtering: {source.shape}")
@@ -13,9 +17,9 @@ def process_joint_factor(source, loader_Assets, loader_TML, output_file):
     print(f"Filtered data shape: {source_JF.shape}")
     print(f"Unique values in Joint Factor after filtering: {source_JF['Joint Factor'].unique()}")
     if not source_JF.empty:
-        print("Found records to process")
+        print(f"Found {len(source_JF)} records to process")
         source_JF["Joint Factor"] = 1
-        processor.append_and_save(
+        records_added = processor.append_and_save(
             loader_Assets,
             loader_TML,
             source_JF,
@@ -26,6 +30,8 @@ def process_joint_factor(source, loader_Assets, loader_TML, output_file):
             },
             output_file, "Assets", "TML"
         )
+        return (records_added, output_file if records_added > 0 else None)
     else:
         print("No records found matching the criteria")
+        return (0, None)
 

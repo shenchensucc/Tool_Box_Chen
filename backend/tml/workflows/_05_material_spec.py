@@ -1,7 +1,11 @@
 from ..data_processor import DataProcessor
 
 def process_material_specification(source, loader_Assets, loader_TML, output_file):
-    """Process Material Specification updates"""
+    """Process Material Specification updates
+    
+    Returns:
+        tuple: (records_count, output_file) if successful, (0, None) if no records
+    """
     processor = DataProcessor()
     
     print("\nProcessing Material Specification...")
@@ -18,13 +22,12 @@ def process_material_specification(source, loader_Assets, loader_TML, output_fil
     ].copy()
     
     print(f"Filtered data shape: {source_MaterialSpec.shape}")
-    print(f"Unique values in CorrValue_Material after filtering: {source_MaterialSpec['CorrValue_Material'].unique()}")
     
     if not source_MaterialSpec.empty:
-        print("Found records to process")
+        print(f"Found {len(source_MaterialSpec)} records to process")
         
         # Map CorrValue_Material directly to Material Specification in the column mapping
-        processor.append_and_save(
+        records_added = processor.append_and_save(
             loader_Assets,
             loader_TML,
             source_MaterialSpec,
@@ -35,6 +38,8 @@ def process_material_specification(source, loader_Assets, loader_TML, output_fil
             },
             output_file, "Assets", "TML"
         )
+        return (records_added, output_file if records_added > 0 else None)
     else:
         print("No records found matching the criteria")
+        return (0, None)
 

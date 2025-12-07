@@ -97,7 +97,7 @@ class DataProcessor:
     @staticmethod
     def append_and_save(loader_assets: pd.DataFrame, loader_tml: pd.DataFrame, 
                        additional_data: pd.DataFrame, column_map: Dict[str, str], 
-                       output_file: str, asset_sheet_name: str, tml_sheet_name: str):
+                       output_file: str, asset_sheet_name: str, tml_sheet_name: str) -> int:
         """
         Appends processed data to existing Excel files while preserving other sheets.
         
@@ -110,14 +110,24 @@ class DataProcessor:
             asset_sheet_name: Name of the Assets sheet
             tml_sheet_name: Name of the TML sheet
             
+        Returns:
+            Number of TML records added (excluding template rows)
+            
         Note:
             - Preserves all existing sheets in the output file
             - Only updates the specified Assets and TML sheets
             - Sets consistent column widths (20) for updated sheets
             - Creates output directory if it doesn't exist
             - Handles both new and existing Excel files
+            - Returns 0 if no new records to add (won't create file)
         """
+        # If no new data, don't create file
+        if additional_data.empty:
+            print(f"No new records to add, skipping file creation for {output_file}")
+            return 0
+            
         cmms_system = "P1R-100"
+        records_added = len(additional_data)
 
         # Create output directory if it doesn't exist
         os.makedirs(os.path.dirname(output_file), exist_ok=True)
@@ -161,5 +171,102 @@ class DataProcessor:
                     sheet.column_dimensions[column[0].column_letter].width = 20
         workbook.save(output_file)
 
-        print(f"Saved TML to {tml_sheet_name} and Assets to {asset_sheet_name} in {output_file}")
+        print(f"Saved {records_added} TML records to {tml_sheet_name} and Assets to {asset_sheet_name} in {output_file}")
+        return records_added
+
+    @staticmethod
+    def create_combined_output(processed_files: list, output_file: str, 
+                               template_assets: pd.DataFrame, template_tml: pd.DataFrame,
+                               asset_sheet_name: str = "Assets", 
+                               tml_sheet_name: str = "TML") -> str:
+        """
+        Create a combined Excel file with all NEW data from multiple workflow outputs.
+        
+        Args:
+            processed_files: List of paths to processed Excel files
+            output_file: Path to save the combined output file
+            template_assets: Template Assets data to exclude from combination
+            template_tml: Template TML data to exclude from combination
+            asset_sheet_name: Name of the Assets sheet (default: "Assets")
+            tml_sheet_name: Name of the TML sheet (default: "TML")
+            
+        Returns:
+            Path to the combined output file
+            
+        Note:
+            - Reads Assets and TML sheets from all processed files
+            - Excludes template rows (only combines NEW data)
+            - Concatenates all Assets data and deduplicates by Equipment ID
+            - Concatenates all TML data (preserves all rows)
+            - Sets consistent column widths (20) for all columns
+        """
+        all_assets = []
+        all_tml = []
+        
+        template_assets_len = len(template_assets)
+        template_tml_len = len(template_tml)
+        
+        # Read all Assets and TML sheets from processed files
+        for file_path in processed_files:
+            if not os.path.exists(file_path):
+                print(f"Warning: File not found: {file_path}, skipping")
+                continue
+            
+            try:
+                # Read Assets sheet
+                assets_df = pd.read_excel(file_path, sheet_name=asset_sheet_name, dtype={"Equipment ID": str})
+                
+                # Skip template rows (template is at the beginning)
+                if len(assets_df) > template_assets_len:
+                    new_assets = assets_df.iloc[template_assets_len:].copy()
+                    all_assets.append(new_assets)
+                    print(f"Read {len(new_assets)} NEW Assets records from {os.path.basename(file_path)}")
+                else:
+                    print(f"No new Assets records in {os.path.basename(file_path)} (only template)")
+                
+                # Read TML sheet
+                tml_df = pd.read_excel(file_path, sheet_name=tml_sheet_name, dtype={"Equipment ID": str})
+                
+                # Skip template rows (template is at the beginning)
+                if len(tml_df) > template_tml_len:
+                    new_tml = tml_df.iloc[template_tml_len:].copy()
+                    all_tml.append(new_tml)
+                    print(f"Read {len(new_tml)} NEW TML records from {os.path.basename(file_path)}")
+                else:
+                    print(f"No new TML records in {os.path.basename(file_path)} (only template)")
+                    
+            except Exception as e:
+                print(f"Warning: Error reading {file_path}: {str(e)}, skipping")
+                continue
+        
+        if not all_assets or not all_tml:
+            raise ValueError("No valid NEW data found in processed files (only template data)")
+        
+        # Concatenate all NEW Assets and deduplicate
+        combined_assets = pd.concat(all_assets, ignore_index=True).drop_duplicates(subset=["Equipment ID"])
+        print(f"Combined Assets: {len(combined_assets)} unique equipment records (NEW data only)")
+        
+        # Concatenate all NEW TML data
+        combined_tml = pd.concat(all_tml, ignore_index=True)
+        print(f"Combined TML: {len(combined_tml)} total TML records (NEW data only)")
+        
+        # Create output directory if it doesn't exist
+        os.makedirs(os.path.dirname(output_file), exist_ok=True)
+        
+        # Save to Excel file (NEW data only, no template)
+        with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
+            combined_assets.to_excel(writer, sheet_name=asset_sheet_name, index=False)
+            combined_tml.to_excel(writer, sheet_name=tml_sheet_name, index=False)
+        
+        # Set column widths using openpyxl
+        workbook = load_workbook(output_file)
+        for sheet_name in [asset_sheet_name, tml_sheet_name]:
+            if sheet_name in workbook.sheetnames:
+                sheet = workbook[sheet_name]
+                for column in sheet.columns:
+                    sheet.column_dimensions[column[0].column_letter].width = 20
+        workbook.save(output_file)
+        
+        print(f"Saved combined output to {output_file}")
+        return output_file
 

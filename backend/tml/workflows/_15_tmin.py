@@ -1,7 +1,11 @@
 from ..data_processor import DataProcessor
 
 def process_tmin(source, loader_Assets, loader_TML, output_file):
-    """Process Tmin (Minimum Thickness) updates"""
+    """Process Tmin (Minimum Thickness) updates
+    
+    Returns:
+        tuple: (records_count, output_file) if successful, (0, None) if no records
+    """
     processor = DataProcessor()
     
     print("\nProcessing Tmin (Minimum Thickness)...")
@@ -21,10 +25,10 @@ def process_tmin(source, loader_Assets, loader_TML, output_file):
     print(f"Unique values in CorrValue_Tmin after filtering: {source_Tmin['CorrValue_Tmin'].unique()}")
     
     if not source_Tmin.empty:
-        print("Found records to process")
+        print(f"Found {len(source_Tmin)} records to process")
         
         # Map CorrValue_Tmin directly to Minimum Thickness in the column mapping
-        processor.append_and_save(
+        records_added = processor.append_and_save(
             loader_Assets,
             loader_TML,
             source_Tmin,
@@ -35,6 +39,8 @@ def process_tmin(source, loader_Assets, loader_TML, output_file):
             },
             output_file, "Assets", "TML"
         )
+        return (records_added, output_file if records_added > 0 else None)
     else:
         print("No records found matching the criteria")
+        return (0, None)
 

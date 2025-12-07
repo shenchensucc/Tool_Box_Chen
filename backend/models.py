@@ -59,4 +59,16 @@ class ProcessResponse(BaseModel):
     total_rows: int
     stats: Dict[str, ColumnStats]  # column_name -> stats
     histograms: List[HistogramData]
-    scatter_data: Optional[Dict[str, Any]] = None  # x/y data for distance plots 
+    scatter_data: Optional[Dict[str, Any]] = None  # x/y data for distance plots
+
+
+class TMLProcessResponse(BaseModel):
+    """Response from processing TML data"""
+
+    success: bool
+    message: str
+    zip_token: str = Field(..., description="Token to download ZIP file with separate outputs")
+    combined_token: str = Field(..., description="Token to download combined Excel file")
+    workflows_processed: int
+    workflow_summary: Dict[int, int] = Field(..., description="Workflow ID -> records count mapping")
+    timestamp: str 

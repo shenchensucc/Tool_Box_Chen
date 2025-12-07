@@ -1,7 +1,11 @@
 from ..data_processor import DataProcessor
 
 def process_design_code(source, loader_Assets, loader_TML, output_file):
-    """Process Design Code updates"""
+    """Process Design Code updates
+    
+    Returns:
+        tuple: (records_count, output_file) if successful, (0, None) if no records
+    """
     processor = DataProcessor()
     
     print("\nProcessing Design Code...")
@@ -18,13 +22,12 @@ def process_design_code(source, loader_Assets, loader_TML, output_file):
     ].copy()
     
     print(f"Filtered data shape: {source_DesignCode.shape}")
-    print(f"Unique values in CorrValue_Design_Code after filtering: {source_DesignCode['CorrValue_Design_Code'].unique()}")
     
     if not source_DesignCode.empty:
-        print("Found records to process")
+        print(f"Found {len(source_DesignCode)} records to process")
         
         # Map CorrValue_Design_Code directly to Design Code in the column mapping
-        processor.append_and_save(
+        records_added = processor.append_and_save(
             loader_Assets,
             loader_TML,
             source_DesignCode,
@@ -35,6 +38,8 @@ def process_design_code(source, loader_Assets, loader_TML, output_file):
             },
             output_file, "Assets", "TML"
         )
+        return (records_added, output_file if records_added > 0 else None)
     else:
         print("No records found matching the criteria")
+        return (0, None)
 

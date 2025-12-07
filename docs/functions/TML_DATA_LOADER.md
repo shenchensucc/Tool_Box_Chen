@@ -17,6 +17,8 @@ This tool streamlines the process of updating TML data by:
 - **Batch Processing**: Process multiple workflows simultaneously
 - **20 Available Workflows**: Cover all major TML design parameters
 - **File-Based Processing**: Upload source and template files, download results
+- **Template Downloads**: Download blank templates to help prepare your data correctly
+- **Flexible Export Options**: Choose between separate files (ZIP) or combined file (XLSX)
 - **Privacy-Focused**: Files are processed in memory and not stored on the server
 - **User-Friendly Interface**: Checkbox-based workflow selection with descriptions
 - **Error Handling**: Gracefully handles errors in individual workflows
@@ -181,16 +183,21 @@ Navigate to the TML Data Loader page in the application:
 http://localhost:8501/TML_Data_Loader
 ```
 
-### 2. Upload Files
+### 2. Download Blank Templates (Optional but Recommended)
+- Click "Download Source Data Template" to get a blank template for your source data
+- Click "Download TM_Loader Template" to get a blank TM_Loader template
+- Use these templates as references to ensure your files have the correct structure and column names
+
+### 3. Upload Files
 - **Source File**: Upload your input Excel file containing TML data
 - **Template File**: Upload the TM_Loader.xlsx template file
 
-### 3. Select Workflows
+### 4. Select Workflows
 - Review the 20 available workflows
 - Check the boxes for workflows you want to process
 - Use "Select All" or "Deselect All" buttons for convenience
 
-### 4. Process Data
+### 5. Process Data
 - Click the "Process TML Data" button
 - Wait for processing to complete (typically 30 seconds to a few minutes)
 - Processing time depends on:
@@ -198,14 +205,27 @@ http://localhost:8501/TML_Data_Loader
   - Number of workflows selected
   - Number of records to process
 
-### 5. Download Results
-- Click the "Download Output Files (ZIP)" button
+### 6. Download Results
+
+You have two download options:
+
+**Option A: Download Separate Files (ZIP)**
+- Click the "Download Separate Files (ZIP)" button
 - Extract the ZIP file to access individual Excel files
 - Each file is named according to its workflow number (e.g., `01_TM_Loader_Status.xlsx`)
+- **Use this when**: You need to upload each workflow separately to your asset management system
+
+**Option B: Download Combined File (XLSX)**
+- Click the "Download Combined File (XLSX)" button
+- Get a single Excel file with all workflow data combined
+- Contains one Assets sheet and one TML sheet with all data from selected workflows
+- **Use this when**: You want a consolidated view or prefer a single file import
 
 ## Output File Structure
 
-Each output file contains:
+### Separate Files (ZIP Format)
+
+When downloading as ZIP, each workflow output file contains:
 - **Assets Sheet**: Updated equipment-level data
   - Equipment IDs (with leading zeros preserved)
   - CMMS System = "P1R-100"
@@ -216,6 +236,20 @@ Each output file contains:
   - CMMS System = "P1R-100"
   - TML Analysis Type = "TML"
   - Updated parameter values
+
+### Combined File (XLSX Format)
+
+When downloading as a combined file, you get:
+- **Assets Sheet**: All equipment IDs from all workflows combined and deduplicated
+  - Equipment IDs (with leading zeros preserved)
+  - CMMS System = "P1R-100"
+  - No duplicate entries
+  
+- **TML Sheet**: All TML records from all workflows concatenated
+  - TML Group IDs and TML IDs from all workflows
+  - CMMS System = "P1R-100"
+  - TML Analysis Type = "TML"
+  - All parameter updates from all selected workflows in one sheet
 
 ## Data Processing Details
 
@@ -235,7 +269,30 @@ Each output file contains:
 - Equipment IDs are stored as strings to preserve leading zeros
 - Numeric values maintain their precision (except where rounding is specified)
 
-## API Endpoint
+## API Endpoints
+
+### GET /api/tml/download-template/{template_type}
+
+Download blank template files.
+
+**Parameters:**
+- `template_type`: Either "source" or "tm_loader"
+
+**Response:**
+- Excel template file (.xlsx)
+- HTTP 200 on success
+- HTTP 404 if template file not found
+
+**Example using curl:**
+```bash
+# Download source data template
+curl -X GET "http://localhost:8000/api/tml/download-template/source" \
+  -o Source_Data_Template.xlsx
+
+# Download TM_Loader template
+curl -X GET "http://localhost:8000/api/tml/download-template/tm_loader" \
+  -o TM_Loader_Template.xlsx
+```
 
 ### POST /api/tml/process
 
@@ -247,7 +304,17 @@ Process TML data with selected workflows.
 - `workflows`: Comma-separated list of workflow IDs (e.g., "1,2,7,12")
 
 **Response:**
-- ZIP file containing all generated output files
+- JSON with tokens to download files:
+  ```json
+  {
+    "success": true,
+    "message": "TML data processed successfully",
+    "zip_token": "abc123...",
+    "combined_token": "def456...",
+    "workflows_processed": 4,
+    "timestamp": "2025-12-07T12:00:00"
+  }
+  ```
 - HTTP 200 on success
 - HTTP 400 on validation errors
 - HTTP 500 on processing errors
@@ -257,8 +324,30 @@ Process TML data with selected workflows.
 curl -X POST "http://localhost:8000/api/tml/process" \
   -F "source_file=@input.xlsx" \
   -F "template_file=@TM_Loader.xlsx" \
-  -F "workflows=1,2,7,12" \
+  -F "workflows=1,2,7,12"
+```
+
+### GET /api/tml/download/{file_token}
+
+Download processed TML file using a token.
+
+**Parameters:**
+- `file_token`: Token received from `/api/tml/process` response
+
+**Response:**
+- ZIP or Excel file
+- HTTP 200 on success
+- HTTP 404 if token invalid or file not found
+
+**Example using curl:**
+```bash
+# Download ZIP file
+curl -X GET "http://localhost:8000/api/tml/download/abc123..." \
   -o TML_Output.zip
+
+# Download combined file
+curl -X GET "http://localhost:8000/api/tml/download/def456..." \
+  -o TML_Combined_Output.xlsx
 ```
 
 ## Error Handling
@@ -352,9 +441,34 @@ If the ZIP file doesn't download:
 - ZIP file streaming
 - Processing summary display
 
+## Template Files Setup
+
+### For Administrators
+
+Template files must be placed in `backend/static/templates/tml/` directory:
+
+1. **Source_Data_Template.xlsx**
+   - Create a blank Excel file with "Source_Data" sheet
+   - Include all required column headers (Equipment ID, CML Group ID, sub-CML ID, AER_Status_CML, etc.)
+   - Save as `Source_Data_Template.xlsx`
+
+2. **TM_Loader_Template.xlsx**
+   - Create a blank Excel file with "Assets" and "TML" sheets
+   - Include proper column headers in both sheets
+   - Save as `TM_Loader_Template.xlsx`
+
+Once placed, these templates will be available for download through the frontend interface.
+
 ## Version History
 
-### v1.0 (Current)
+### v1.1 (Current)
+- Added blank template downloads
+- Added combined export option (single XLSX file)
+- Dual download buttons for user flexibility
+- Enhanced API with token-based file retrieval
+- Improved documentation
+
+### v1.0
 - Initial release
 - 20 workflows implemented
 - Batch processing support

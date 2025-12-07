@@ -2,6 +2,7 @@ import os
 import shutil
 import tempfile
 import zipfile
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List
@@ -19,6 +20,7 @@ from backend.models import (
     HistogramData,
     PreviewResponse,
     ProcessResponse,
+    TMLProcessResponse,
 )
 from backend.tml.file_handler import FileHandler
 from backend.tml.workflows._01_status import process_status_indicator
@@ -57,6 +59,10 @@ app.add_middleware(
 )
 
 MAX_FILE_SIZE = 30 * 1024 * 1024  # 30 MB
+
+# Temporary file storage for TML processing (token -> file_path)
+# In production, use Redis or similar
+TML_FILE_STORAGE: Dict[str, str] = {}
 
 
 def validate_excel_file(file: UploadFile) -> None:
@@ -129,6 +135,54 @@ def create_histogram(series: pd.Series, column_name: str, bins: int = 30) -> His
 async def health_check():
     """Health check endpoint"""
     return HealthResponse(ok=True)
+
+
+@app.get("/api/tml/download-template/{template_type}")
+async def download_template(template_type: str):
+    """
+    Download blank template files for TML Data Loader
+    
+    Args:
+        template_type: Type of template to download ("source" or "tm_loader")
+    
+    Returns:
+        Excel template file
+    """
+    # Define template file paths
+    template_dir = Path(__file__).parent / "static" / "templates" / "tml"
+    
+    templates = {
+        "source": {
+            "path": template_dir / "Source_Data_Template.xlsx",
+            "filename": "Source_Data_Template.xlsx"
+        },
+        "tm_loader": {
+            "path": template_dir / "TM_Loader_Template.xlsx",
+            "filename": "TM_Loader_Template.xlsx"
+        }
+    }
+    
+    if template_type not in templates:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Invalid template type. Must be 'source' or 'tm_loader'"
+        )
+    
+    template_info = templates[template_type]
+    template_path = template_info["path"]
+    
+    if not template_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Template file not found. Please ensure {template_info['filename']} exists in backend/static/templates/tml/"
+        )
+    
+    return FileResponse(
+        path=str(template_path),
+        filename=template_info["filename"],
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={template_info['filename']}"}
+    )
 
 
 @app.post("/api/ili/preview", response_model=PreviewResponse)
@@ -249,14 +303,14 @@ async def process_ili_data(
             os.unlink(temp_path)
 
 
-@app.post("/api/tml/process")
+@app.post("/api/tml/process", response_model=TMLProcessResponse)
 async def process_tml_data(
     source_file: UploadFile = File(...),
     template_file: UploadFile = File(...),
     workflows: str = Form(...),
 ):
     """
-    Process TML data with selected workflows and return a ZIP file with all outputs
+    Process TML data with selected workflows and generate both ZIP and combined outputs
     
     Args:
         source_file: Source Excel file
@@ -264,7 +318,7 @@ async def process_tml_data(
         workflows: Comma-separated list of workflow IDs (1-20)
     
     Returns:
-        ZIP file containing all generated output files
+        JSON with tokens to download ZIP file and combined file separately
     """
     # Validate file types and sizes
     validate_excel_file(source_file)
@@ -279,12 +333,13 @@ async def process_tml_data(
     if not workflow_ids:
         raise HTTPException(status_code=400, detail="No workflows selected")
     
-    # Create temporary directory for processing
+    # Create temporary directory for processing (persistent across requests)
     temp_dir = tempfile.mkdtemp()
     temp_source = None
     temp_template = None
     temp_output_dir = None
     zip_path = None
+    combined_path = None
     
     try:
         # Save uploaded files
@@ -367,9 +422,12 @@ async def process_tml_data(
         
         # Process selected workflows
         processed_files = []
+        workflow_summary = {}
+        
         for workflow_id in workflow_ids:
             if workflow_id not in workflow_map:
                 print(f"Warning: Invalid workflow ID {workflow_id}, skipping")
+                workflow_summary[workflow_id] = 0
                 continue
             
             process_func, file_key = workflow_map[workflow_id]
@@ -377,14 +435,22 @@ async def process_tml_data(
             
             try:
                 print(f"\nProcessing workflow {workflow_id}...")
-                process_func(source, loader_Assets, loader_TML, output_file)
-                processed_files.append(output_file)
+                records_count, result_file = process_func(source, loader_Assets, loader_TML, output_file)
+                workflow_summary[workflow_id] = records_count
+                
+                # Only add to processed_files if records were actually added
+                if result_file and records_count > 0:
+                    processed_files.append(result_file)
+                    print(f"Workflow {workflow_id}: Added {records_count} records")
+                else:
+                    print(f"Workflow {workflow_id}: No records to add, skipping file creation")
             except Exception as e:
                 print(f"Error processing workflow {workflow_id}: {str(e)}")
+                workflow_summary[workflow_id] = 0
                 # Continue with other workflows even if one fails
         
         if not processed_files:
-            raise HTTPException(status_code=400, detail="No workflows were successfully processed")
+            raise HTTPException(status_code=400, detail="No workflows were successfully processed. All workflows returned 0 records.")
         
         # Create ZIP file with all processed outputs
         zip_path = Path(temp_dir) / "TML_Output.zip"
@@ -393,22 +459,83 @@ async def process_tml_data(
                 if os.path.exists(file_path):
                     zipf.write(file_path, os.path.basename(file_path))
         
-        # Return the ZIP file
-        return FileResponse(
-            path=str(zip_path),
-            filename="TML_Output.zip",
-            media_type="application/zip",
-            headers={"Content-Disposition": f"attachment; filename=TML_Output.zip"}
+        # Create combined output file
+        from backend.tml.data_processor import DataProcessor
+        combined_path = Path(temp_dir) / "TML_Combined_Output.xlsx"
+        DataProcessor.create_combined_output(
+            processed_files=processed_files,
+            output_file=str(combined_path),
+            template_assets=loader_Assets,
+            template_tml=loader_TML,
+            asset_sheet_name="Assets",
+            tml_sheet_name="TML"
+        )
+        
+        # Generate unique tokens for both files
+        zip_token = str(uuid.uuid4())
+        combined_token = str(uuid.uuid4())
+        
+        # Store file paths with tokens
+        TML_FILE_STORAGE[zip_token] = str(zip_path)
+        TML_FILE_STORAGE[combined_token] = str(combined_path)
+        
+        # Return tokens and metadata
+        return TMLProcessResponse(
+            success=True,
+            message="TML data processed successfully",
+            zip_token=zip_token,
+            combined_token=combined_token,
+            workflows_processed=len(processed_files),
+            workflow_summary=workflow_summary,
+            timestamp=datetime.now().isoformat()
         )
     
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing TML data: {str(e)}")
-    finally:
-        # Note: Don't clean up temp files here since FileResponse needs them
-        # They will be cleaned up when the response is sent
-        pass
+
+
+@app.get("/api/tml/download/{file_token}")
+async def download_tml_file(file_token: str):
+    """
+    Download TML output file using a file token
+    
+    Args:
+        file_token: Unique token for the file (returned from /api/tml/process)
+    
+    Returns:
+        ZIP or Excel file based on the token
+    """
+    if file_token not in TML_FILE_STORAGE:
+        raise HTTPException(
+            status_code=404,
+            detail="File not found. The file may have expired or the token is invalid."
+        )
+    
+    file_path = TML_FILE_STORAGE[file_token]
+    
+    if not os.path.exists(file_path):
+        # Clean up the token if file doesn't exist
+        del TML_FILE_STORAGE[file_token]
+        raise HTTPException(
+            status_code=404,
+            detail="File not found on server."
+        )
+    
+    # Determine file type and set appropriate media type
+    file_name = os.path.basename(file_path)
+    if file_path.endswith('.zip'):
+        media_type = "application/zip"
+    else:
+        media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    
+    return FileResponse(
+        path=file_path,
+        filename=file_name,
+        media_type=media_type,
+        headers={"Content-Disposition": f"attachment; filename={file_name}"}
+    )
 
 
 @app.post("/api/pipeline/metal-loss/assess")

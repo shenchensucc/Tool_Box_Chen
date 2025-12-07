@@ -45,6 +45,63 @@ if not check_backend_health():
 # Privacy notice
 st.info("🔒 **Privacy Notice:** Your files are processed in memory only and are not stored on the server after processing.")
 
+
+# Cached function for template fetching
+@st.cache_data(ttl=300)  # Cache for 5 minutes
+def fetch_template(template_type: str):
+    """Fetch template from backend and cache for better performance"""
+    try:
+        response = httpx.get(
+            f"http://localhost:8000/api/tml/download-template/{template_type}",
+            timeout=10.0
+        )
+        if response.status_code == 200:
+            return {"success": True, "content": response.content}
+        else:
+            return {"success": False, "content": None}
+    except Exception as e:
+        return {"success": False, "content": None, "error": str(e)}
+
+# Template download section
+st.subheader("📥 Download Blank Templates")
+st.write("Download template files to help you prepare your data correctly:")
+
+col_t1, col_t2 = st.columns(2)
+
+with col_t1:
+    template_result = fetch_template("source")
+    if template_result["success"]:
+        st.download_button(
+            label="📄 Download Source Data Template",
+            data=template_result["content"],
+            file_name="Source_Data_Template.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            help="Download a blank template for preparing your source data"
+        )
+    else:
+        st.warning("⚠️ Source template not available. Please ensure backend is running and template file is placed in backend/static/templates/tml/")
+
+with col_t2:
+    template_result = fetch_template("tm_loader")
+    if template_result["success"]:
+        st.download_button(
+            label="📄 Download TM_Loader Template",
+            data=template_result["content"],
+            file_name="TM_Loader_Template.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            help="Download a blank TM_Loader template file"
+        )
+    else:
+        st.warning("⚠️ TM_Loader template not available. Please ensure backend is running and template file is placed in backend/static/templates/tml/")
+
+st.divider()
+
+# Initialize session state for processing results
+if 'tml_processing_result' not in st.session_state:
+    st.session_state.tml_processing_result = None
+
 # File upload section
 st.subheader("📁 Upload Files")
 col1, col2 = st.columns(2)
@@ -53,14 +110,16 @@ with col1:
     source_file = st.file_uploader(
         "Source Excel File (input.xlsx)",
         type=["xlsx", "xls"],
-        help="Upload the source data file containing TML information"
+        help="Upload the source data file containing TML information",
+        on_change=lambda: st.session_state.update({'tml_processing_result': None})
     )
 
 with col2:
     template_file = st.file_uploader(
         "Template Excel File (TM_Loader.xlsx)",
         type=["xlsx", "xls"],
-        help="Upload the template file with Assets and TML sheets"
+        help="Upload the template file with Assets and TML sheets",
+        on_change=lambda: st.session_state.update({'tml_processing_result': None})
     )
 
 # Workflow selection section
@@ -90,48 +149,60 @@ workflows = {
     20: "Location Factor",
 }
 
-# Create checkboxes in a 4-column grid
-st.write("Select the workflows you want to process:")
 
-# Select all / Deselect all buttons
-col_select_1, col_select_2, col_select_3 = st.columns([1, 1, 8])
-with col_select_1:
-    if st.button("✅ Select All"):
-        for i in range(1, 21):
-            st.session_state[f"workflow_{i}"] = True
-        st.rerun()
+# Fragment for workflow selection to prevent full page reloads
+@st.fragment
+def render_workflow_selection():
+    """Render workflow selection checkboxes with optimized performance"""
+    
+    # Create checkboxes in a 4-column grid
+    st.write("Select the workflows you want to process:")
+    
+    # Select all / Deselect all buttons
+    col_select_1, col_select_2, col_select_3 = st.columns([1, 1, 8])
+    with col_select_1:
+        if st.button("✅ Select All"):
+            for i in range(1, 21):
+                st.session_state[f"workflow_{i}"] = True
+            st.rerun()
+    
+    with col_select_2:
+        if st.button("⬜ Deselect All"):
+            for i in range(1, 21):
+                st.session_state[f"workflow_{i}"] = False
+            st.rerun()
+    
+    st.write("")  # Add spacing
+    
+    # Create 5 rows with 4 columns each for the 20 workflows
+    for row in range(5):
+        cols = st.columns(4)
+        for col_idx in range(4):
+            workflow_id = row * 4 + col_idx + 1
+            with cols[col_idx]:
+                # Initialize session state if not exists
+                if f"workflow_{workflow_id}" not in st.session_state:
+                    st.session_state[f"workflow_{workflow_id}"] = False
+                
+                st.checkbox(
+                    f"**{workflow_id:02d}**: {workflows[workflow_id]}",
+                    key=f"workflow_{workflow_id}",
+                )
+    
+    # Get selected workflows
+    selected = [i for i in range(1, 21) if st.session_state.get(f"workflow_{i}", False)]
+    
+    # Show selected count
+    if selected:
+        st.success(f"✅ Selected {len(selected)} workflow(s)")
+    else:
+        st.warning("⚠️ No workflows selected. Please select at least one workflow to process.")
+    
+    return selected
 
-with col_select_2:
-    if st.button("⬜ Deselect All"):
-        for i in range(1, 21):
-            st.session_state[f"workflow_{i}"] = False
-        st.rerun()
 
-st.write("")  # Add spacing
-
-# Create 5 rows with 4 columns each for the 20 workflows
-for row in range(5):
-    cols = st.columns(4)
-    for col_idx in range(4):
-        workflow_id = row * 4 + col_idx + 1
-        with cols[col_idx]:
-            # Initialize session state if not exists
-            if f"workflow_{workflow_id}" not in st.session_state:
-                st.session_state[f"workflow_{workflow_id}"] = False
-            
-            st.checkbox(
-                f"**{workflow_id:02d}**: {workflows[workflow_id]}",
-                key=f"workflow_{workflow_id}",
-            )
-
-# Get selected workflows
-selected_workflows = [i for i in range(1, 21) if st.session_state.get(f"workflow_{i}", False)]
-
-# Show selected count
-if selected_workflows:
-    st.success(f"✅ Selected {len(selected_workflows)} workflow(s)")
-else:
-    st.warning("⚠️ No workflows selected. Please select at least one workflow to process.")
+# Render workflow selection and get selected workflows
+selected_workflows = render_workflow_selection()
 
 # Process button
 st.write("")  # Add spacing
@@ -170,29 +241,46 @@ if process_button:
                     )
                 
                 if response.status_code == 200:
-                    st.success("✅ Processing completed successfully!")
+                    # Parse response JSON
+                    result = response.json()
+                    zip_token = result.get("zip_token")
+                    combined_token = result.get("combined_token")
                     
-                    # Provide download button
-                    st.download_button(
-                        label="📥 Download Output Files (ZIP)",
-                        data=response.content,
-                        file_name="TML_Output.zip",
-                        mime="application/zip",
-                        use_container_width=True
-                    )
+                    # Immediately fetch the files and store in session state
+                    zip_data = None
+                    combined_data = None
                     
-                    # Show summary
-                    st.info(
-                        f"""
-                        **Processing Summary:**
-                        - Source file: `{source_file.name}`
-                        - Template file: `{template_file.name}`
-                        - Workflows processed: {len(selected_workflows)}
-                        - Output files: {len(selected_workflows)} Excel files
-                        
-                        The ZIP file contains all generated output files. Extract the ZIP to access individual files.
-                        """
-                    )
+                    try:
+                        # Download ZIP file immediately
+                        zip_response = httpx.get(
+                            f"http://localhost:8000/api/tml/download/{zip_token}",
+                            timeout=60.0
+                        )
+                        if zip_response.status_code == 200:
+                            zip_data = zip_response.content
+                    except Exception as e:
+                        print(f"Error fetching ZIP: {e}")
+                    
+                    try:
+                        # Download combined file immediately
+                        combined_response = httpx.get(
+                            f"http://localhost:8000/api/tml/download/{combined_token}",
+                            timeout=60.0
+                        )
+                        if combined_response.status_code == 200:
+                            combined_data = combined_response.content
+                    except Exception as e:
+                        print(f"Error fetching combined file: {e}")
+                    
+                    # Store result and file data in session state
+                    st.session_state.tml_processing_result = {
+                        'result': result,
+                        'source_filename': source_file.name,
+                        'template_filename': template_file.name,
+                        'zip_data': zip_data,
+                        'combined_data': combined_data
+                    }
+                    
                 else:
                     error_detail = response.json().get("detail", "Unknown error")
                     st.error(f"❌ Error processing data: {error_detail}")
@@ -203,6 +291,140 @@ if process_button:
                 st.error("❌ Could not connect to the backend server. Please make sure it's running.")
             except Exception as e:
                 st.error(f"❌ An error occurred: {str(e)}")
+
+# Display results if available in session state
+if st.session_state.tml_processing_result:
+    result_data = st.session_state.tml_processing_result
+    result = result_data['result']
+    zip_token = result.get("zip_token")
+    combined_token = result.get("combined_token")
+    workflows_processed = result.get("workflows_processed", 0)
+    workflow_summary = result.get("workflow_summary", {})
+    
+    st.success("✅ Processing completed successfully!")
+    
+    # Show summary
+    st.info(
+        f"""
+        **Processing Summary:**
+        - Source file: `{result_data['source_filename']}`
+        - Template file: `{result_data['template_filename']}`
+        - Workflows processed: {workflows_processed}
+        - Output files generated: {workflows_processed} Excel files
+        
+        Choose your preferred download format below.
+        """
+    )
+    
+    # Display workflow summary table
+    if workflow_summary:
+        st.subheader("📊 Workflow Processing Details")
+        
+        # Define workflow names
+        workflow_names = {
+            1: "Sub-CML Status (deactivated)",
+            2: "AER Flag",
+            3: "Code Year T-Min Formula",
+            4: "Design Code",
+            5: "Material Specification",
+            6: "Material Grade",
+            7: "Design Temperature",
+            8: "Piping Formula",
+            9: "Outside Diameter (OD)",
+            10: "NPS (Nominal Pipe Size)",
+            11: "Schedule",
+            12: "Design Pressure",
+            13: "Temperature Coefficient",
+            14: "Tnom (Nominal Thickness)",
+            15: "Tmin (Minimum Thickness)",
+            16: "Override Allowable Stress",
+            17: "Allowable Stress",
+            18: "Design Factor",
+            19: "Joint Factor",
+            20: "Location Factor",
+        }
+        
+        # Create summary table data
+        summary_data = []
+        for workflow_id, records_count in sorted(workflow_summary.items()):
+            # Convert workflow_id to int (comes as string from JSON)
+            workflow_id_int = int(workflow_id)
+            workflow_name = workflow_names.get(workflow_id_int, f"Workflow {workflow_id}")
+            status = "✅ Processed" if records_count > 0 else "⚠️ No records"
+            summary_data.append({
+                "Workflow ID": f"{workflow_id_int:02d}",
+                "Parameter": workflow_name,
+                "Records Found": records_count,
+                "Status": status
+            })
+        
+        # Display as dataframe
+        import pandas as pd
+        summary_df = pd.DataFrame(summary_data)
+        st.dataframe(
+            summary_df,
+            use_container_width=True,
+            hide_index=True
+        )
+        
+        # Show totals
+        total_records = sum(workflow_summary.values())
+        workflows_with_data = sum(1 for count in workflow_summary.values() if count > 0)
+        
+        col_stat1, col_stat2, col_stat3 = st.columns(3)
+        with col_stat1:
+            st.metric("Total Records Processed", f"{total_records:,}")
+        with col_stat2:
+            st.metric("Workflows with Data", f"{workflows_with_data}/{len(workflow_summary)}")
+        with col_stat3:
+            st.metric("Workflows Skipped", f"{len(workflow_summary) - workflows_with_data}")
+        
+        st.write("")  # Add spacing
+    
+    # Two download buttons side by side
+    col_dl1, col_dl2 = st.columns(2)
+    
+    # Get cached file data from session state
+    zip_data = result_data.get('zip_data')
+    combined_data = result_data.get('combined_data')
+    
+    with col_dl1:
+        # Download ZIP file
+        if zip_data:
+            st.download_button(
+                label="📦 Download Separate Files (ZIP)",
+                data=zip_data,
+                file_name="TML_Output.zip",
+                mime="application/zip",
+                use_container_width=True,
+                help="Download a ZIP file containing separate Excel files for each workflow",
+                key="download_zip_btn"
+            )
+        else:
+            st.error("❌ ZIP file not available. Please process the data again.")
+    
+    with col_dl2:
+        # Download combined file
+        if combined_data:
+            st.download_button(
+                label="📊 Download Combined File (XLSX)",
+                data=combined_data,
+                file_name="TML_Combined_Output.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                help="Download a single Excel file with all workflow data combined",
+                key="download_combined_btn"
+            )
+        else:
+            st.error("❌ Combined file not available. Please process the data again.")
+    
+    # Additional info
+    st.write("")
+    st.caption("""
+    **Download Options:**
+    - **Separate Files (ZIP)**: Contains individual Excel files for each workflow - use this if you need to upload each workflow separately to your system
+    - **Combined File (XLSX)**: Contains all workflow data in one Excel file with Assets and TML sheets - use this for a consolidated view or single import
+    """)
 
 # Help section
 with st.expander("ℹ️ Help & Information"):

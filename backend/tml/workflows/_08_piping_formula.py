@@ -1,7 +1,11 @@
 from ..data_processor import DataProcessor
 
 def process_piping_formula(source, loader_Assets, loader_TML, output_file):
-    """Process Piping Formula updates"""
+    """Process Piping Formula updates
+    
+    Returns:
+        tuple: (records_count, output_file) if successful, (0, None) if no records
+    """
     processor = DataProcessor()
     
     print("\nProcessing Piping Formula...")
@@ -20,13 +24,13 @@ def process_piping_formula(source, loader_Assets, loader_TML, output_file):
     print(f"Unique values in Piping Formula after filtering: {source_PipingFormula['Piping Formula'].unique()}")
     
     if not source_PipingFormula.empty:
-        print("Found records to process")
+        print(f"Found {len(source_PipingFormula)} records to process")
         
         # Set all values to "E" in the filtered data
         source_PipingFormula["Piping Formula"] = "E"
         
         # Map Piping Formula to the output column
-        processor.append_and_save(
+        records_added = processor.append_and_save(
             loader_Assets,
             loader_TML,
             source_PipingFormula,
@@ -37,6 +41,8 @@ def process_piping_formula(source, loader_Assets, loader_TML, output_file):
             },
             output_file, "Assets", "TML"
         )
+        return (records_added, output_file if records_added > 0 else None)
     else:
         print("No records found matching the criteria")
+        return (0, None)
 

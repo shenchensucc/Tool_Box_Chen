@@ -1,7 +1,11 @@
 from ..data_processor import DataProcessor
 
 def process_design_pressure(source, loader_Assets, loader_TML, output_file):
-    """Process Design Pressure updates"""
+    """Process Design Pressure updates
+    
+    Returns:
+        tuple: (records_count, output_file) if successful, (0, None) if no records
+    """
     processor = DataProcessor()
     
     print("\nProcessing Design Pressure...")
@@ -21,11 +25,11 @@ def process_design_pressure(source, loader_Assets, loader_TML, output_file):
     print(f"Unique values in CorrValue_P after filtering: {source_DesignPressure['CorrValue_P'].unique()}")
     
     if not source_DesignPressure.empty:
-        print("Found records to process")
+        print(f"Found {len(source_DesignPressure)} records to process")
         # Round CorrValue_P to integer (no decimals)
         source_DesignPressure["CorrValue_P"] = source_DesignPressure["CorrValue_P"].round(0).astype(int)
         # Map CorrValue_P directly to Design Pressure in the column mapping
-        processor.append_and_save(
+        records_added = processor.append_and_save(
             loader_Assets,
             loader_TML,
             source_DesignPressure,
@@ -36,6 +40,8 @@ def process_design_pressure(source, loader_Assets, loader_TML, output_file):
             },
             output_file, "Assets", "TML"
         )
+        return (records_added, output_file if records_added > 0 else None)
     else:
         print("No records found matching the criteria")
+        return (0, None)
 

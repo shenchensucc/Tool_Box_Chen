@@ -193,8 +193,9 @@ async def call_process_api(
         return None
 
 
+@st.cache_resource(ttl=30)  # Cache for 30 seconds
 def check_backend_health() -> bool:
-    """Check if backend is running"""
+    """Check if backend is running (cached for 30 seconds)"""
     try:
         response = httpx.get(f"{BACKEND_URL}/health", timeout=5.0)
         return response.status_code == 200 and response.json().get("ok", False)
