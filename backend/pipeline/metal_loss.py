@@ -308,9 +308,13 @@ def assess_metal_loss_feature(
     cutoff_ave = np.where(dimp_ave >= wall_thickness_80)[0]
     cutoff_high = np.where(dimp_high >= wall_thickness_80)[0]
     
-    cutoff_month_low = cutoff_low[0] if len(cutoff_low) > 0 else month_CR
-    cutoff_month_ave = cutoff_ave[0] if len(cutoff_ave) > 0 else month_CR
-    cutoff_month_high = cutoff_high[0] if len(cutoff_high) > 0 else month_CR
+    # Return -1 to indicate "safe" (no cutoff found within period)
+    # This avoids ambiguity where "month_CR" could mean it failed exactly at the last month
+    safe_indicator = -1
+    
+    cutoff_month_low = cutoff_low[0] if len(cutoff_low) > 0 else safe_indicator
+    cutoff_month_ave = cutoff_ave[0] if len(cutoff_ave) > 0 else safe_indicator
+    cutoff_month_high = cutoff_high[0] if len(cutoff_high) > 0 else safe_indicator
     
     return {
         'inputs': {

@@ -263,9 +263,13 @@ def generate_word_report(
     # Cutoff information
     add_heading_with_style(doc, "80% Wall Thickness Cutoff Information", level=2)
     cutoff_months = assessment_results['cutoff_months']
-    doc.add_paragraph(f"Low corrosion rate: Month {cutoff_months['low']}")
-    doc.add_paragraph(f"Average corrosion rate: Month {cutoff_months['ave']}")
-    doc.add_paragraph(f"High corrosion rate: Month {cutoff_months['high']}")
+    month_CR = assessment_results['inputs']['month_CR']  # Extract month_CR from inputs
+    for rate_name, rate_key in [("Low", "low"), ("Average", "ave"), ("High", "high")]:
+        cutoff = cutoff_months[rate_key]
+        if cutoff == -1:
+            doc.add_paragraph(f"{rate_name} corrosion rate: Safe for full projection period ({month_CR} months)")
+        else:
+            doc.add_paragraph(f"{rate_name} corrosion rate: Reaches 80% wall thickness at Month {cutoff}")
     
     # Save or return bytes
     if output_path:

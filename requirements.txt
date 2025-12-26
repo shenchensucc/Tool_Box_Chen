@@ -19,7 +19,9 @@ python-dotenv>=1.0.1
 
 # Visualization
 plotly>=5.24.1
-kaleido>=0.2.1
+matplotlib>=3.7.0  # Reliable fallback for image export
+kaleido==0.2.1  # Use 0.2.1 (stable version with chromium binary included)
+# plotly-orca  # Alternative image export engine (optional fallback if kaleido fails)
 
 # Document Generation (Metal Loss Assessment)
 python-docx>=1.1.0

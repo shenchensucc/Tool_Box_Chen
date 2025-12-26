@@ -10,30 +10,98 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-# Check if kaleido is available for image export
-try:
-    import kaleido
-    KALEIDO_AVAILABLE = True
-except ImportError:
-    KALEIDO_AVAILABLE = False
-
-# Alternative: Use plotly's built-in image export without kaleido
-def export_plot_as_image(fig, format="png", width=1200, height=600):
-    """Export plotly figure as image, trying multiple methods"""
-    # Try default engine first (no kaleido requirement)
+# Matplotlib-based fallback for image export (more reliable than kaleido)
+def export_plot_as_image_matplotlib(fig, format="png", width=1200, height=600):
+    """Export plotly figure using matplotlib fallback - much more reliable"""
+    import matplotlib
+    matplotlib.use('Agg')  # Use non-GUI backend
+    import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
+    from datetime import datetime
+    
     try:
-        return fig.to_image(format=format, width=width, height=height)
-    except Exception as e1:
-        # If default fails, try kaleido if available
-        if KALEIDO_AVAILABLE:
-            try:
-                return fig.to_image(format=format, width=width, height=height, engine="kaleido")
-            except Exception as e2:
-                st.warning(f"Could not export chart as image (tried both engines): {str(e2)}")
-                return None
-        else:
-            st.warning(f"Could not export chart as image: {str(e1)}")
-            return None
+        # Extract data from plotly figure
+        traces = fig.data
+        layout = fig.layout
+        
+        # Create matplotlib figure
+        fig_mpl, ax = plt.subplots(figsize=(width/100, height/100), dpi=100)
+        
+        # Plot each trace
+        for trace in traces:
+            x_data = trace.x if hasattr(trace, 'x') else []
+            y_data = trace.y if hasattr(trace, 'y') else []
+            name = trace.name if hasattr(trace, 'name') else ''
+            
+            # Handle line color
+            color = None
+            if hasattr(trace, 'line') and hasattr(trace.line, 'color'):
+                color = trace.line.color
+            
+            # Plot the trace
+            if hasattr(trace, 'mode') and 'markers' in trace.mode:
+                ax.plot(x_data, y_data, marker='o', label=name, color=color, linewidth=2)
+            else:
+                ax.plot(x_data, y_data, label=name, color=color, linewidth=2)
+        
+        # Add horizontal lines if present
+        if hasattr(layout, 'shapes'):
+            for shape in layout.shapes:
+                if shape.type == 'line' and shape.y0 == shape.y1:
+                    shape_label = getattr(shape, 'name', None) or ''
+                    ax.axhline(y=shape.y0, linestyle='--', color='red', linewidth=1.5,
+                              label=shape_label)
+        
+        # Set labels and title
+        if hasattr(layout, 'title') and hasattr(layout.title, 'text'):
+            ax.set_title(layout.title.text, fontsize=14, fontweight='bold')
+        if hasattr(layout, 'xaxis') and hasattr(layout.xaxis, 'title'):
+            ax.set_xlabel(layout.xaxis.title.text if hasattr(layout.xaxis.title, 'text') else '', fontsize=12)
+        if hasattr(layout, 'yaxis') and hasattr(layout.yaxis, 'title'):
+            ax.set_ylabel(layout.yaxis.title.text if hasattr(layout.yaxis.title, 'text') else '', fontsize=12)
+        
+        # Add legend
+        if len(traces) > 0:
+            ax.legend(loc='best', fontsize=10)
+        
+        # Format x-axis if dates
+        if len(traces) > 0 and len(traces[0].x) > 0:
+            if isinstance(traces[0].x[0], (datetime, str)):
+                ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+                plt.xticks(rotation=45)
+        
+        # Add grid
+        ax.grid(True, alpha=0.3)
+        
+        # Tight layout
+        plt.tight_layout()
+        
+        # Save to bytes
+        buffer = io.BytesIO()
+        plt.savefig(buffer, format=format, dpi=100, bbox_inches='tight')
+        plt.close(fig_mpl)
+        buffer.seek(0)
+        return buffer.read()
+        
+    except Exception as e:
+        st.error(f"❌ Matplotlib export failed: {str(e)}")
+        return None
+
+# Multi-engine fallback for plotly image export
+def export_plot_as_image(fig, format="png", width=1200, height=600):
+    """Export plotly figure as image - tries kaleido first, falls back to matplotlib"""
+    import plotly.io as pio
+    
+    # Method 1: Try kaleido (fastest if it works)
+    try:
+        result = fig.to_image(format=format, width=width, height=height)
+        if result and len(result) > 0:
+            return result
+    except:
+        pass
+    
+    # Method 2: Use matplotlib fallback (more reliable)
+    return export_plot_as_image_matplotlib(fig, format, width, height)
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -137,123 +205,200 @@ PRESET_SCENARIOS = {
 # Information section
 st.info("📋 **About This Tool**: Assess pipeline metal loss features over time using industry-standard modified B31G methodology.")
 
-# Test Cases Section
-with st.expander("🧪 Load R Package Test Cases", expanded=False):
-    st.markdown("""
-    **Quick Test**: Load parameters from R package test cases to verify Python implementation matches R results.
-    
-    These test cases are from the R package `mla` file `test-fmla.R`.
-    """)
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        if st.button("📊 Test Case 1: z > 50", use_container_width=True):
-            st.session_state['test_case'] = 1
-            st.session_state['scenario'] = 'Customized'
-            st.rerun()
-    
-    with col2:
-        if st.button("📊 Test Case 2: z ≤ 50", use_container_width=True):
-            st.session_state['test_case'] = 2
-            st.session_state['scenario'] = 'Customized'
-            st.rerun()
-    
-    with col3:
-        if st.button("📊 R Markdown Example", use_container_width=True):
-            st.session_state['test_case'] = 3
-            st.session_state['scenario'] = 'NPS 10 - Sch 40 - Grade X52'
-            st.rerun()
-    
-    st.caption("After clicking a test case button, scroll down to review parameters and click 'Run Assessment'")
-
 # Main content area
 st.subheader("📝 Assessment Parameters")
 
-# Check if test case was loaded
-if 'test_case' in st.session_state and 'scenario' in st.session_state:
-    default_scenario_idx = list(PRESET_SCENARIOS.keys()).index(st.session_state['scenario'])
+# Reset button
+if st.button("🔄 Reset All Parameters", help="Clear all inputs and reset to default state"):
+    # Clear session state keys related to this page
+    keys_to_clear = [
+        'test_case', 
+        'scenario', 
+        'selected_scenario',
+        'selected_test_case',
+        'metal_loss_results', 
+        'assessment_complete', 
+        'word_doc', 
+        'doc_filename',
+        'fig_depth',
+        'fig_sop',
+        'fig_cutoff',
+        'feature_ID',
+        'do_input',
+        'tp_input',
+        'YS_input',
+        'TS_input'
+    ]
+    for key in keys_to_clear:
+        if key in st.session_state:
+            del st.session_state[key]
+    st.rerun()
+
+# Initialize selected scenario if not present
+if 'selected_scenario' not in st.session_state:
+    st.session_state['selected_scenario'] = 'Customized'
+if 'selected_test_case' not in st.session_state:
+    st.session_state['selected_test_case'] = None
+
+# Combined Preset Scenarios and Test Cases selection
+st.markdown("### Select Configuration")
+st.caption("Choose a preset scenario, test case, or 'Customized' to input all parameters manually")
+
+# Define all configurations in one unified grid
+all_configs = []
+
+# Add test cases first with visual distinction
+all_configs.append({
+    'name': '🧪 Test Case 1: z > 50',
+    'key': 'test_case_1',
+    'type': 'test',
+    'test_num': 1,
+    'params': {'do': 273.1, 'tp': 5.16, 'YS': 359.0, 'TS': 455.0},
+    'description': 'R Package Test: Long defect (Linear Folias factor)'
+})
+all_configs.append({
+    'name': '🧪 Test Case 2: z ≤ 50',
+    'key': 'test_case_2',
+    'type': 'test',
+    'test_num': 2,
+    'params': {'do': 273.1, 'tp': 5.16, 'YS': 359.0, 'TS': 455.0},
+    'description': 'R Package Test: Short defect (Polynomial Folias factor)'
+})
+all_configs.append({
+    'name': '🧪 R Markdown Example',
+    'key': 'test_case_3',
+    'type': 'test',
+    'test_num': 3,
+    'params': {'do': 273.1, 'tp': 6.35, 'YS': 359.0, 'TS': 455.0},
+    'description': 'R Package Test: Complete assessment scenario'
+})
+
+# Add all preset scenarios
+for scenario_name, scenario_data in PRESET_SCENARIOS.items():
+    all_configs.append({
+        'name': scenario_name,
+        'key': f'scenario_{scenario_name}',
+        'type': 'scenario',
+        'params': {'do': scenario_data['do'], 'tp': scenario_data['tp'], 
+                   'YS': scenario_data['YS'], 'TS': scenario_data['TS']},
+        'description': scenario_data['description']
+    })
+
+# Create button grid (3 columns per row)
+num_cols = 3
+rows = [all_configs[i:i+num_cols] for i in range(0, len(all_configs), num_cols)]
+
+for row in rows:
+    cols = st.columns(num_cols)
+    for idx, config in enumerate(row):
+        with cols[idx]:
+            # Determine if this config is selected
+            if config['type'] == 'test':
+                is_selected = st.session_state['selected_test_case'] == config['test_num']
+            else:
+                is_selected = (st.session_state['selected_scenario'] == config['name'] and 
+                              st.session_state['selected_test_case'] is None)
+            
+            button_type = "primary" if is_selected else "secondary"
+            
+            if st.button(
+                config['name'],
+                key=config['key'],
+                type=button_type,
+                use_container_width=True
+            ):
+                # Handle test case selection
+                if config['type'] == 'test':
+                    st.session_state['test_case'] = config['test_num']
+                    st.session_state['selected_test_case'] = config['test_num']
+                    st.session_state['selected_scenario'] = 'Customized'
+                    # Set pipe parameters
+                    st.session_state.do_input = config['params']['do']
+                    st.session_state.tp_input = config['params']['tp']
+                    st.session_state.YS_input = config['params']['YS']
+                    st.session_state.TS_input = config['params']['TS']
+                else:
+                    # Handle scenario selection
+                    st.session_state['selected_scenario'] = config['name']
+                    st.session_state['selected_test_case'] = None
+                    if 'test_case' in st.session_state:
+                        del st.session_state['test_case']
+                    # Auto-fill parameters if not customized
+                    if config['params']['do'] > 0:
+                        st.session_state.do_input = config['params']['do']
+                        st.session_state.tp_input = config['params']['tp']
+                        st.session_state.YS_input = config['params']['YS']
+                        st.session_state.TS_input = config['params']['TS']
+                
+                st.rerun()
+
+# Display description of selected configuration
+if st.session_state['selected_test_case'] is not None:
+    selected_config = next((c for c in all_configs if c.get('test_num') == st.session_state['selected_test_case']), None)
 else:
-    default_scenario_idx = 0
+    selected_config = next((c for c in all_configs if c['name'] == st.session_state['selected_scenario']), None)
 
-# Preset scenario selection
-scenario = st.selectbox(
-    "Select Preset Scenario",
-    options=list(PRESET_SCENARIOS.keys()),
-    index=default_scenario_idx,
-    help="Choose a preset configuration or 'Customized' to input all parameters manually"
-)
+if selected_config:
+    st.caption(f"*{selected_config['description']}*")
 
-selected_preset = PRESET_SCENARIOS[scenario]
-st.caption(f"*{selected_preset['description']}*")
+# Set scenario variable for backward compatibility
+scenario = st.session_state['selected_scenario']
+selected_preset = PRESET_SCENARIOS.get(scenario, PRESET_SCENARIOS['Customized'])
 
 # Load test case parameters if selected
 test_case_params = {}
 if 'test_case' in st.session_state:
     test_case_num = st.session_state['test_case']
     
+    # Standardized parameters for all test cases
+    standard_params = {
+        'do': 273.1,
+        'tp': 5.16,
+        'YS': 359.0,
+        'TS': 455.0,
+        'vendor_ILI': 'Test Vendor',
+        'ILI_dimp_tolerance': 10.0,
+        'ILI_Limp_tolerance': 0.0,
+        'CR_low': 0.1,
+        'CR_ave': 0.2,
+        'CR_high': 0.4,
+        'month_CR': 60,  # Changed default from 48 to 60 months
+        'CR_Limp': 10.0
+    }
+    
     if test_case_num == 1:
         # Test Case 1: z > 50
-        test_case_params = {
-            'do': 273.1,
-            'tp': 5.16,
-            'YS': 359.0,
-            'TS': 455.0,
+        test_case_params = standard_params.copy()
+        test_case_params.update({
             'dimp_org_percent': 50.0,
             'Limp_org': 300.0,
-            'feature_ID': 'Test-Case-1-z-greater-50',
-            'vendor_ILI': 'Test Vendor',
-            'ILI_dimp_tolerance': 0.0,
-            'ILI_Limp_tolerance': 0.0,
-            'CR_low': 0.0,
-            'CR_ave': 0.0,
-            'CR_high': 0.0,
-            'month_CR': 1,
-            'CR_Limp': 0.0
-        }
+            'feature_ID': 'Test-Case-1-z-greater-50'
+            # Removed month_CR override - now uses default 60 months
+        })
         st.info("✅ **Test Case 1 Loaded**: z > 50 (Limp=300mm). This tests the linear Folias factor formula.")
         
     elif test_case_num == 2:
         # Test Case 2: z ≤ 50
-        test_case_params = {
-            'do': 273.1,
-            'tp': 5.16,
-            'YS': 359.0,
-            'TS': 455.0,
+        test_case_params = standard_params.copy()
+        test_case_params.update({
             'dimp_org_percent': 50.0,
             'Limp_org': 200.0,
-            'feature_ID': 'Test-Case-2-z-less-equal-50',
-            'vendor_ILI': 'Test Vendor',
-            'ILI_dimp_tolerance': 0.0,
-            'ILI_Limp_tolerance': 0.0,
-            'CR_low': 0.0,
-            'CR_ave': 0.0,
-            'CR_high': 0.0,
-            'month_CR': 1,
-            'CR_Limp': 0.0
-        }
+            'feature_ID': 'Test-Case-2-z-less-equal-50'
+            # Removed month_CR override - now uses default 60 months
+        })
         st.info("✅ **Test Case 2 Loaded**: z ≤ 50 (Limp=200mm). This tests the polynomial Folias factor formula.")
         
     elif test_case_num == 3:
-        # R Markdown Example
-        test_case_params = {
-            'do': 273.1,
-            'tp': 6.35,
-            'YS': 359.0,
-            'TS': 455.0,
+        # R Markdown Example - Updated with standardized rates
+        test_case_params = standard_params.copy()
+        test_case_params.update({
+            'tp': 6.35,  # Original R markdown used 6.35mm
             'dimp_org_percent': 41.0,
             'Limp_org': 361.0,
             'feature_ID': '7',
-            'vendor_ILI': 'ROSEN MFL-C',
-            'ILI_dimp_tolerance': 15.0,
-            'ILI_Limp_tolerance': 0.0,
-            'CR_low': 0.196,
-            'CR_ave': 0.245,
-            'CR_high': 0.452,
-            'month_CR': 48,
-            'CR_Limp': 0.0
-        }
-        st.info("✅ **R Markdown Example Loaded**: Complete assessment scenario from PNG_Metal_Loss_Feature_Assessment.Rmd")
+            'vendor_ILI': 'ROSEN MFL-C'
+        })
+        st.info("✅ **R Markdown Example Loaded**: Complete assessment scenario with updated standardized rates.")
     
     # Clear the test case after loading
     if st.button("🔄 Clear Test Case and Reset", type="secondary"):
@@ -277,7 +422,7 @@ with tab1:
             min_value=0.0,
             value=float(test_case_params.get('do', selected_preset['do'])),
             step=0.1,
-            disabled=not is_customized,
+            key="do_input",
             help="Pipe outside diameter in millimeters"
         )
         
@@ -286,7 +431,7 @@ with tab1:
             min_value=0.0,
             value=float(test_case_params.get('tp', selected_preset['tp'])),
             step=0.01,
-            disabled=not is_customized,
+            key="tp_input",
             help="Nominal wall thickness in millimeters"
         )
     
@@ -296,7 +441,7 @@ with tab1:
             min_value=0.0,
             value=float(test_case_params.get('YS', selected_preset['YS'])),
             step=1.0,
-            disabled=not is_customized,
+            key="YS_input",
             help="Specified Minimum Yield Strength"
         )
         
@@ -305,7 +450,7 @@ with tab1:
             min_value=0.0,
             value=float(test_case_params.get('TS', selected_preset['TS'])),
             step=1.0,
-            disabled=not is_customized,
+            key="TS_input",
             help="Specified Minimum Tensile Strength"
         )
 
@@ -416,7 +561,7 @@ with tab3:
             "Projection Period (months)",
             min_value=1,
             max_value=120,
-            value=int(test_case_params.get('month_CR', 48)),
+            value=int(test_case_params.get('month_CR', 60)),
             step=1,
             help="Number of months to project forward"
         )
@@ -670,16 +815,21 @@ if process_button:
                 
                 fig_cutoff = go.Figure()
                 
-                # Truncate data at cutoff points
-                cutoff_low_idx = min(cutoff_months['low'], month_CR)
-                cutoff_ave_idx = min(cutoff_months['ave'], month_CR)
-                cutoff_high_idx = min(cutoff_months['high'], month_CR)
+                # Truncate data at cutoff points (handle -1 for safe condition)
+                cutoff_low_idx = month_CR if cutoff_months['low'] == -1 else min(cutoff_months['low'], month_CR)
+                cutoff_ave_idx = month_CR if cutoff_months['ave'] == -1 else min(cutoff_months['ave'], month_CR)
+                cutoff_high_idx = month_CR if cutoff_months['high'] == -1 else min(cutoff_months['high'], month_CR)
+                
+                # Create labels
+                low_label = f'Low (Safe)' if cutoff_months['low'] == -1 else f'Low (Cutoff: Month {cutoff_low_idx})'
+                ave_label = f'Average (Safe)' if cutoff_months['ave'] == -1 else f'Average (Cutoff: Month {cutoff_ave_idx})'
+                high_label = f'High (Safe)' if cutoff_months['high'] == -1 else f'High (Cutoff: Month {cutoff_high_idx})'
                 
                 fig_cutoff.add_trace(go.Scatter(
                     x=date_seq[:cutoff_low_idx],
                     y=sop_low[:cutoff_low_idx],
                     mode='lines+markers',
-                    name=f'Low (Cutoff: Month {cutoff_low_idx})',
+                    name=low_label,
                     line=dict(color='green', width=2),
                     marker=dict(size=6)
                 ))
@@ -688,7 +838,7 @@ if process_button:
                     x=date_seq[:cutoff_ave_idx],
                     y=sop_ave[:cutoff_ave_idx],
                     mode='lines+markers',
-                    name=f'Average (Cutoff: Month {cutoff_ave_idx})',
+                    name=ave_label,
                     line=dict(color='orange', width=2),
                     marker=dict(size=6)
                 ))
@@ -697,7 +847,7 @@ if process_button:
                     x=date_seq[:cutoff_high_idx],
                     y=sop_high[:cutoff_high_idx],
                     mode='lines+markers',
-                    name=f'High (Cutoff: Month {cutoff_high_idx})',
+                    name=high_label,
                     line=dict(color='red', width=2),
                     marker=dict(size=6)
                 ))
@@ -723,9 +873,13 @@ if process_button:
                 
                 # Cutoff information
                 with st.expander("ℹ️ 80% Wall Thickness Cutoff Information"):
-                    st.write(f"**Low corrosion rate:** Reaches 80% wall thickness at Month {cutoff_months['low']}")
-                    st.write(f"**Average corrosion rate:** Reaches 80% wall thickness at Month {cutoff_months['ave']}")
-                    st.write(f"**High corrosion rate:** Reaches 80% wall thickness at Month {cutoff_months['high']}")
+                    for rate_name, rate_key in [("Low", "low"), ("Average", "ave"), ("High", "high")]:
+                        cutoff = cutoff_months[rate_key]
+                        # -1 indicates safe (from backend update)
+                        if cutoff == -1:
+                            st.write(f"**{rate_name} corrosion rate:** Safe for full projection period ({month_CR} months)")
+                        else:
+                            st.write(f"**{rate_name} corrosion rate:** Reaches 80% wall thickness at Month {cutoff}")
                 
                 # Store results and figures in session state for export and persistence
                 st.session_state['metal_loss_results'] = results
