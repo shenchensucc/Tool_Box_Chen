@@ -68,7 +68,7 @@ st.info(
 # Main content
 st.markdown("### 📁 Step 1: Upload Source Files")
 
-col1, col2, col3 = st.columns(3)
+col1, col2 = st.columns(2)
 
 with col1:
     st.markdown("**MDL File**")
@@ -82,17 +82,6 @@ with col1:
         st.success(f"✅ {mdl_file.name}")
 
 with col2:
-    st.markdown("**ILI Data File**")
-    ili_file = st.file_uploader(
-        "ILI Data (.xlsx)",
-        type=["xlsx"],
-        help="Excel file containing in-line inspection data",
-        key="ili_file",
-    )
-    if ili_file:
-        st.success(f"✅ {ili_file.name}")
-
-with col3:
     st.markdown("**Template File**")
     template_file = st.file_uploader(
         "Dig Package Template (.xlsx)",
@@ -103,9 +92,54 @@ with col3:
     if template_file:
         st.success(f"✅ {template_file.name}")
 
+st.markdown("### 📊 Step 2: Upload ILI Data Files")
+st.info("💡 You can upload multiple ILI files in different formats (TDW, Rosen-MFLA, Rosen-MFLC, Rosen-EMAT).")
+
+if "ili_files_data" not in st.session_state:
+    st.session_state.ili_files_data = []
+
+# Multiple ILI uploader
+uploaded_ili_files = st.file_uploader(
+    "Upload ILI Data Files (.xlsx)",
+    type=["xlsx"],
+    accept_multiple_files=True,
+    help="Excel files containing in-line inspection data",
+    key="ili_files_uploader"
+)
+
+if uploaded_ili_files:
+    # Create a list to store file info and selected format
+    new_ili_data = []
+    
+    for i, file in enumerate(uploaded_ili_files):
+        st.markdown(f"**File {i+1}:** `{file.name}`")
+        cols = st.columns([2, 3])
+        with cols[0]:
+            # Try to guess format from filename
+            default_index = 0
+            fname_lower = file.name.lower()
+            if "tdw" in fname_lower: default_index = 0
+            elif "mfla" in fname_lower: default_index = 1
+            elif "mflc" in fname_lower: default_index = 2
+            elif "emat" in fname_lower: default_index = 3
+            
+            format_choice = st.selectbox(
+                f"Select format for {file.name}",
+                options=["TDW", "Rosen-MFLA", "Rosen-MFLC", "Rosen-EMAT"],
+                index=default_index,
+                key=f"format_{i}"
+            )
+        
+        new_ili_data.append({
+            "file": file,
+            "format": format_choice
+        })
+    
+    st.session_state.ili_files_data = new_ili_data
+
 # Revision number input
 st.markdown("---")
-st.markdown("### ⚙️ Step 2: Configuration")
+st.markdown("### ⚙️ Step 3: Configuration")
 
 col1, col2 = st.columns([1, 3])
 
@@ -122,13 +156,13 @@ with col2:
 
 # Generate button
 st.markdown("---")
-st.markdown("### 🚀 Step 3: Generate Dig Packages")
+st.markdown("### 🚀 Step 4: Generate Dig Packages")
 
 # Check if all files are uploaded
-all_files_uploaded = mdl_file is not None and ili_file is not None and template_file is not None
+all_files_uploaded = mdl_file is not None and len(st.session_state.ili_files_data) > 0 and template_file is not None
 
 if not all_files_uploaded:
-    st.warning("⚠️ Please upload all three source files before generating dig packages.")
+    st.warning("⚠️ Please upload MDL, at least one ILI file, and a Template before generating dig packages.")
 
 if st.button(
     "🚀 Generate Dig Packages",
@@ -138,22 +172,25 @@ if st.button(
 ):
     with st.spinner("⏳ Generating dig packages... This may take a few minutes."):
         try:
-            # Reset files to beginning
-            mdl_file.seek(0)
-            ili_file.seek(0)
-            template_file.seek(0)
-            
             # Prepare files for upload
-            files = {
-                "mdl_file": (mdl_file.name, mdl_file.read(), mdl_file.type),
-                "ili_file": (ili_file.name, ili_file.read(), ili_file.type),
-                "template_file": (template_file.name, template_file.read(), template_file.type),
+            files = [
+                ("mdl_file", (mdl_file.name, mdl_file.getvalue(), mdl_file.type)),
+                ("template_file", (template_file.name, template_file.getvalue(), template_file.type)),
+            ]
+            
+            # Add all ILI files
+            ili_formats = []
+            for i, item in enumerate(st.session_state.ili_files_data):
+                files.append(("ili_files", (item["file"].name, item["file"].getvalue(), item["file"].type)))
+                ili_formats.append(item["format"])
+            
+            data = {
+                "revision": revision,
+                "ili_formats": ",".join(ili_formats)
             }
             
-            data = {"revision": revision}
-            
             # Call API
-            with httpx.Client(timeout=300.0) as client:  # 5 minute timeout for large files
+            with httpx.Client(timeout=600.0) as client:  # 10 minute timeout for large files
                 response = client.post(
                     f"{BACKEND_URL}/api/pipeline/dig-package/generate",
                     files=files,
@@ -163,16 +200,23 @@ if st.button(
             if response.status_code == 200:
                 # Store the ZIP file in session state
                 st.session_state.dig_packages_zip = response.content
-                st.session_state.dig_packages_filename = response.headers.get(
-                    "Content-Disposition", ""
-                ).split("filename=")[-1].strip('"')
-                st.session_state.dig_packages_generated = True
                 
+                # Get filename from header or use default
+                disp = response.headers.get("Content-Disposition", "")
+                if "filename=" in disp:
+                    st.session_state.dig_packages_filename = disp.split("filename=")[-1].strip('"')
+                else:
+                    st.session_state.dig_packages_filename = f"Dig_Packages_R{revision}.zip"
+                    
+                st.session_state.dig_packages_generated = True
                 st.success("✅ Dig packages generated successfully!")
                 st.rerun()
             
             else:
-                error_detail = response.json().get("detail", "Unknown error")
+                try:
+                    error_detail = response.json().get("detail", "Unknown error")
+                except:
+                    error_detail = f"Server error ({response.status_code})"
                 st.error(f"❌ Error generating dig packages: {error_detail}")
         
         except httpx.TimeoutException:

@@ -120,7 +120,7 @@ file: [binary Excel file]
 
 **Validation**:
 - File extension must be `.xlsx` or `.xls`
-- File size must be ≤ MAX_FILE_SIZE (30 MB)
+- File size must be ≤ MAX_FILE_SIZE (100 MB)
 
 **Implementation**:
 ```python

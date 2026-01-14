@@ -43,7 +43,7 @@ from backend.tml.workflows._17_allowable_stress import process_allowable_stress
 from backend.tml.workflows._18_design_factor import process_design_factor
 from backend.tml.workflows._19_joint_factor import process_joint_factor
 from backend.tml.workflows._20_location_factor import process_location_factor
-from backend.pipeline.metal_loss import assess_metal_loss_feature
+from backend.pipeline.metal_loss import assess_metal_loss_feature, mass_assess_metal_loss
 from backend.pipeline.report_generator import generate_word_report
 from backend.pipeline.dig_package import generate_dig_packages
 
@@ -58,7 +58,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-MAX_FILE_SIZE = 30 * 1024 * 1024  # 30 MB
+MAX_FILE_SIZE = 100 * 1024 * 1024  # 100 MB
 
 # Temporary file storage for TML processing (token -> file_path)
 # In production, use Redis or similar
@@ -587,6 +587,62 @@ async def assess_metal_loss(
         raise HTTPException(status_code=400, detail=f"Error in assessment: {str(e)}")
 
 
+@app.post("/api/pipeline/metal-loss/mass-assess")
+async def mass_assess_metal_loss_endpoint(
+    file: UploadFile = File(...),
+    do: float = Form(...),
+    tp: float = Form(...),
+    YS: float = Form(...),
+    TS: float = Form(...),
+    depth_tolerance: float = Form(...),
+    length_tolerance: float = Form(...),
+    depth_cr: float = Form(4.0),
+    length_cr: float = Form(25.0),
+    start_year: int = Form(...)
+):
+    """
+    Mass assess metal loss features from an Excel file.
+    """
+    validate_excel_file(file)
+    temp_input = save_temp_file(file)
+    
+    try:
+        # Read Excel
+        df = pd.read_excel(temp_input)
+        
+        # Process
+        df_result = mass_assess_metal_loss(
+            df=df,
+            do=do,
+            tp=tp,
+            YS=YS,
+            TS=TS,
+            depth_tolerance=depth_tolerance,
+            length_tolerance=length_tolerance,
+            depth_cr=depth_cr,
+            length_cr=length_cr,
+            start_year=start_year
+        )
+        
+        # Save to temporary Excel file
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp:
+            df_result.to_excel(tmp.name, index=False)
+            tmp_path = tmp.name
+            
+        return FileResponse(
+            path=tmp_path,
+            filename=f"Mass_Metal_Loss_Assessment_{datetime.now().strftime('%Y%m%d')}.xlsx",
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename=Mass_Metal_Loss_Assessment_{datetime.now().strftime('%Y%m%d')}.xlsx"}
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error in mass assessment: {str(e)}")
+    finally:
+        if temp_input.exists():
+            os.unlink(temp_input)
+
+
 @app.post("/api/pipeline/metal-loss/export-word")
 async def export_word_report(
     assessment_results: str = Form(...),
@@ -643,40 +699,42 @@ async def export_word_report(
 
 @app.post("/api/pipeline/dig-package/generate")
 async def generate_dig_package_endpoint(
-    mdl_file: UploadFile = File(..., description="Master Dig List Excel file"),
-    ili_file: UploadFile = File(..., description="ILI data Excel file"),
-    template_file: UploadFile = File(..., description="Dig package template Excel file"),
-    revision: str = Form(..., description="Revision identifier (e.g., '1', '2', 'draft', etc.)")
+    mdl_file: UploadFile = File(...),
+    ili_files: List[UploadFile] = File(...),
+    template_file: UploadFile = File(...),
+    revision: str = Form("0"),
+    ili_formats: str = Form(""),
 ):
     """
-    Generate dig packages from MDL, ILI data, and template files.
-    
-    Parameters:
-        mdl_file: Master Dig List Excel file (.xlsx)
-        ili_file: ILI (In-Line Inspection) data Excel file (.xlsx)
-        template_file: Dig package template Excel file (.xlsx)
-        revision: Revision identifier (e.g., '1', '2', 'draft', etc.) for generated packages
-    
-    Returns:
-        ZIP file containing all generated Excel and PDF dig packages
+    Generate dig packages from MDL, multiple ILI data files, and template files.
     """
     try:
         # Validate file sizes
         validate_file_size(mdl_file)
-        validate_file_size(ili_file)
+        for ili_file in ili_files:
+            validate_file_size(ili_file)
         validate_file_size(template_file)
-        
-        # Read file contents
+
+        # Read contents
         mdl_content = await mdl_file.read()
-        ili_content = await ili_file.read()
         template_content = await template_file.read()
         
+        ili_contents = []
+        for ili_file in ili_files:
+            ili_contents.append(await ili_file.read())
+            
+        # Parse formats
+        formats_list = ili_formats.split(",") if ili_formats else ["Rosen-MFLA"] * len(ili_files)
+
         # Generate dig packages
+        from backend.pipeline.dig_package import generate_dig_packages
+        
         zip_buffer = generate_dig_packages(
             mdl_content=mdl_content,
-            ili_content=ili_content,
+            ili_contents=ili_contents,
             template_content=template_content,
-            revision=revision
+            revision=revision,
+            ili_formats=formats_list
         )
         
         # Create temporary file for ZIP
@@ -692,10 +750,10 @@ async def generate_dig_package_endpoint(
             media_type="application/zip",
             headers={"Content-Disposition": f"attachment; filename=Dig_Packages_R{revision}_{timestamp}.zip"}
         )
-    
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error generating dig packages: {str(e)}")
 
 

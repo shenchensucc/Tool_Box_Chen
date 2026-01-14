@@ -1,6 +1,6 @@
 """
 Unit tests for metal loss assessment calculations
-Tests are based on R package 'mla' test cases from test-fmla.R
+# Tests are based on standard validation cases
 """
 import pytest
 import numpy as np
@@ -82,11 +82,11 @@ class TestFoliasFactorCalculations:
 
 
 class TestFailurePressureCalculations:
-    """Test failure pressure calculations - matching R package test-fmla.R"""
+    """Test failure pressure calculations - matching expected results"""
     
     def test_modified_b31g_z_greater_than_50(self):
         """
-        Test case from R package: test-fmla.R
+        # Standard test case
         Test modified B31G with z > 50
         """
         # Test parameters from R
@@ -123,7 +123,7 @@ class TestFailurePressureCalculations:
         
         calculated_Pf = result['ans']['Pf'][0]
         
-        # Assert match with R package results
+        # Assert match with expected results
         assert np.isclose(calculated_Pf, expected_Pf, rtol=1e-6), \
             f"Failure pressure mismatch: {calculated_Pf} != {expected_Pf}"
         
@@ -131,7 +131,7 @@ class TestFailurePressureCalculations:
     
     def test_modified_b31g_z_less_than_or_equal_50(self):
         """
-        Test case from R package: test-fmla.R
+        # Standard test case
         Test modified B31G with z <= 50
         """
         # Test parameters from R
@@ -168,7 +168,7 @@ class TestFailurePressureCalculations:
         
         calculated_Pf = result['ans']['Pf'][0]
         
-        # Assert match with R package results
+        # Assert match with expected results
         assert np.isclose(calculated_Pf, expected_Pf, rtol=1e-6), \
             f"Failure pressure mismatch: {calculated_Pf} != {expected_Pf}"
         
@@ -237,7 +237,7 @@ class TestCompleteAssessment:
     """Test complete metal loss feature assessment"""
     
     def test_full_assessment_scenario(self):
-        """Test complete assessment matching R markdown example"""
+        """Test complete assessment matching validation example"""
         # Parameters from PNG_Metal_Loss_Feature_Assessment.Rmd
         do = 273.1  # mm
         tp = 6.35  # mm

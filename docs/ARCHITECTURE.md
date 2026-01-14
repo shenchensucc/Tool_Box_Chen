@@ -278,7 +278,7 @@ All responses use JSON with Pydantic models:
 
 ```json
 {
-  "detail": "File too large. Maximum size is 30 MB"
+  "detail": "File too large. Maximum size is 100 MB"
 }
 ```
 
@@ -328,7 +328,7 @@ DEBUG=true
 ### Current Security Measures
 
 1. **File Upload Security**:
-   - Size limits (30 MB)
+   - Size limits (100 MB)
    - Type validation (Excel only)
    - Temporary file cleanup
 
@@ -358,7 +358,7 @@ DEBUG=true
 ### Current Architecture Limits
 
 - **Single-threaded backend** (Uvicorn default)
-- **In-memory file processing** (30 MB limit)
+- **In-memory file processing** (100 MB limit)
 - **No caching layer**
 - **No database** (stateless)
 
@@ -614,7 +614,7 @@ Future extensibility:
 
 ## Known Limitations
 
-1. **File size**: Limited to 30 MB (memory constraints)
+1. **File size**: Limited to 100 MB (memory constraints)
 2. **Concurrency**: No background task processing
 3. **State**: No persistent storage
 4. **Auth**: No user authentication

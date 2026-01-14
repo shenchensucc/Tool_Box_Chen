@@ -61,7 +61,7 @@ st.markdown("### 📁 Step 1: Upload Excel File")
 uploaded_file = st.file_uploader(
     "Choose an Excel file (.xlsx or .xls)",
     type=["xlsx", "xls"],
-    help="Maximum file size: 10 MB",
+    help="Maximum file size: 100 MB",
 )
 
 if uploaded_file is not None:

@@ -353,11 +353,11 @@ DEBUG=true
 - ✅ SOP decay visualization
 - ✅ 80% wall thickness cutoff tracking
 - ✅ Word document report generation
-- ✅ Test case validation (R package compatibility)
+- ✅ Test case validation (Standard compatibility)
 
 ## 🔒 Security
 
-- File size validation (30 MB limit per file)
+- File size validation (100 MB limit per file)
 - Excel file type validation (extension checking)
 - Temporary file cleanup after processing
 - CORS configured for local development

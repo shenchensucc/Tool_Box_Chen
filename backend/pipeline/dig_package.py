@@ -29,8 +29,55 @@ from openpyxl.utils import get_column_letter
 # Keyword Definitions for Column Matching
 # ============================================================================
 
+VENDOR_MAPPINGS = {
+    "TDW": {
+        "Feature ID": ["ID", "Feature Number", "FeatureID", "Target ID"],
+        "Feature Type": ["Type", "Feature Type", "Anomaly Type"],
+        "Feature Description": ["Description", "Feature Description", "Anomaly Description"],
+        "Feature Length": ["Length", "Length (in)", "Length (mm)"],
+        "Feature Width": ["Width", "Width (in)", "Width (mm)"],
+        "Feature Depth": ["Depth", "Depth (%)", "Max Depth"],
+        "Feature Orientation": ["Orientation", "Clock Orientation", "O'Clock"],
+        "ILI Chainage": ["Chainage", "Odometer", "Distance"],
+        "Joint Number": ["Joint", "Joint Number", "Weld Number"],
+    },
+    "Rosen-MFLA": {
+        "Feature ID": ["ID#", "Feature Identifier", "Feature ID", "ILI Feature ID"],
+        "Feature Type": ["Feature Type", "Feature", "Event"],
+        "Feature Description": ["Feature Description", "Description", "Anomaly"],
+        "Feature Length": ["Length (mm)", "Length (in)", "Length"],
+        "Feature Width": ["Width (mm)", "Width (in)", "Width"],
+        "Feature Depth": ["Depth (%)", "Max Depth", "Peak Depth"],
+        "Feature Orientation": ["Orientation (clock)", "Clock Orient.", "Orientation (hh:mm)"],
+        "ILI Chainage": ["Wheel Count (ft)", "Log Dist.", "ILI Chainage (m)", "Odometer (m)"],
+        "Joint Number": ["Joint No. or US GW No.", "Joint No", "US GW No"],
+    },
+    "Rosen-MFLC": {
+        "Feature ID": ["ID#", "Feature Identifier", "Feature ID", "ILI Feature ID"],
+        "Feature Type": ["Feature Type", "Feature", "Event"],
+        "Feature Description": ["Feature Description", "Description", "Anomaly"],
+        "Feature Length": ["Length (mm)", "Length (in)", "Length"],
+        "Feature Width": ["Width (mm)", "Width (in)", "Width"],
+        "Feature Depth": ["Depth (%)", "Max Depth", "Peak Depth"],
+        "Feature Orientation": ["Orientation (clock)", "Clock Orient.", "Orientation (hh:mm)"],
+        "ILI Chainage": ["Wheel Count (ft)", "Log Dist.", "ILI Chainage (m)", "Odometer (m)"],
+        "Joint Number": ["Joint No. or US GW No.", "Joint No", "US GW No"],
+    },
+    "Rosen-EMAT": {
+        "Feature ID": ["ID#", "Feature Identifier", "Feature ID", "ILI Feature ID"],
+        "Feature Type": ["Feature Type", "Feature", "Event"],
+        "Feature Description": ["Feature Description", "Description", "Anomaly"],
+        "Feature Length": ["Length (mm)", "Length (in)", "Length"],
+        "Feature Width": ["Width (mm)", "Width (in)", "Width"],
+        "Feature Depth": ["Depth (%)", "Max Depth", "Peak Depth"],
+        "Feature Orientation": ["Orientation (clock)", "Clock Orient.", "Orientation (hh:mm)"],
+        "ILI Chainage": ["Wheel Count (ft)", "Log Dist.", "ILI Chainage (m)", "Odometer (m)"],
+        "Joint Number": ["Joint No. or US GW No.", "Joint No", "US GW No"],
+    }
+}
+
 COLUMN_KEYWORDS = {
-    # MDL Keywords
+    # MDL Keywords (Shared)
     "Dig ID": ["Dig Name", "Dig ID", "DigName", "NEW Dig Name"],
     "Feature ID": ["ID#", "Feature Identifier", "Feature ID", "ILI Feature ID", "Feature Number"],
     "Feature Type": ["Feature Type", "Feature", "Event", "Anomaly Type"],
@@ -59,7 +106,7 @@ COLUMN_KEYWORDS = {
     "End Assessment": ["End Assessment to TGW (m)", "End Assessment to TGW", "End Assessment"],
     "Exposure Length": ["Total Exposed Pipe Length (m)", "Total Exposed Pipe Length", "Total Exposed Length"],
     "Start Exposure": ["Start Exposed Pipe to TGW (m)", "Start Exposed Pipe to TGW", "Start Exposed Pipe"],
-    "End Exposure": ["End Exposed Pipe to TGW (m)", "End Exposed Pipe to TGW", "End Exposed Pipe"],
+    "End Exposure": ["End Exposed Pipe to TGW (m)", "End Exposed Pipe to TGW", "End Exposure"],
     "ILI Run Name": ["ILI", "ILI Run Name"],
     "ILI Run Accuracy": ["SEP Expiry Date", "XYZ Accuracy", "ILI Run Name Accuracy"],
     "Upstream AGM": ["U/S AGM"],
@@ -246,12 +293,13 @@ def extract_dig_ids(mdl_df: pd.DataFrame, column_mapping: Dict[str, str]) -> Lis
 # ILI Parsing Functions
 # ============================================================================
 
-def parse_ili_file(file_content: bytes) -> Tuple[pd.DataFrame, Dict[str, str], Optional[str]]:
+def parse_ili_file(file_content: bytes, vendor_format: str = "Rosen-MFLA") -> Tuple[pd.DataFrame, Dict[str, str], Optional[str]]:
     """
-    Parse ILI (In-Line Inspection) Excel file.
+    Parse ILI (In-Line Inspection) Excel file using vendor-specific mapping.
     
     Args:
         file_content: Bytes content of Excel file
+        vendor_format: Format of the ILI file (TDW, Rosen-MFLA, etc.)
         
     Returns:
         Tuple of (DataFrame with mapped columns, column mapping dict, worksheet name)
@@ -266,7 +314,7 @@ def parse_ili_file(file_content: bytes) -> Tuple[pd.DataFrame, Dict[str, str], O
     
     # Check for Rosen-type data (has Anomalies worksheet)
     anomalies_sheet = find_worksheet_by_keywords(wb, ANOMALIES_WORKSHEET_KEYWORDS)
-    if sheet_name == "Pipetally" and anomalies_sheet:
+    if "Rosen" in vendor_format and anomalies_sheet:
         # Use Anomalies worksheet for Rosen-type data
         sheet_name = anomalies_sheet
     
@@ -278,7 +326,7 @@ def parse_ili_file(file_content: bytes) -> Tuple[pd.DataFrame, Dict[str, str], O
     # Find header row
     for row in ws.iter_rows():
         row_values = [cell.value for cell in row]
-        if any(val for val in row_values):
+        if any(val is not None for val in row_values):
             headers = row_values
             break
     
@@ -290,15 +338,17 @@ def parse_ili_file(file_content: bytes) -> Tuple[pd.DataFrame, Dict[str, str], O
             if row_values == headers:
                 header_found = True
             continue
-        if any(val for val in row_values):
+        if any(val is not None for val in row_values):
             data.append(row_values)
     
     # Create DataFrame
     df = pd.DataFrame(data, columns=headers)
     
-    # Map columns to standard names
+    # Map columns to standard names using vendor mapping
     column_mapping = {}
-    for standard_name, keywords in COLUMN_KEYWORDS.items():
+    vendor_keywords = VENDOR_MAPPINGS.get(vendor_format, VENDOR_MAPPINGS["Rosen-MFLA"])
+    
+    for standard_name, keywords in vendor_keywords.items():
         found_col = find_column_by_keywords(df.columns.tolist(), keywords)
         if found_col:
             column_mapping[standard_name] = found_col
@@ -505,18 +555,19 @@ def populate_excavation_summary(wb, mdl_row: pd.Series, mdl_col_map: Dict[str, s
         ws.cell(row + 3, col).value = get_value("End Exposure")
 
 
-def populate_feature_table(wb, ili_df_filtered: pd.DataFrame, ili_col_map: Dict[str, str],
-                           target_indices: List[int], excavation_num: int, target_gw_chainage: float):
+def populate_feature_table(wb, ili_datasets: List[Dict[str, Any]], excavation_num: int):
     """
-    Populate feature table with dynamic rows.
+    Populate feature tables for multiple ILI datasets with dynamic rows.
     
     Args:
         wb: openpyxl workbook object
-        ili_df_filtered: Filtered ILI DataFrame
-        ili_col_map: ILI column mapping
-        target_indices: Indices of target features
+        ili_datasets: List of dicts containing:
+            - df: Filtered ILI DataFrame
+            - col_map: ILI column mapping
+            - target_indices: Indices of target features
+            - target_gw_chainage: Target girth weld chainage value
+            - format: Vendor format (TDW, Rosen-MFLA, etc.)
         excavation_num: Excavation number
-        target_gw_chainage: Target girth weld chainage value
     """
     ws = wb.active
     
@@ -525,62 +576,78 @@ def populate_feature_table(wb, ili_df_filtered: pd.DataFrame, ili_col_map: Dict[
     if not start_row_cell:
         return
     
-    start_row = start_row_cell.row + 2
+    current_row = start_row_cell.row + 2
     
-    # Column mapping
-    def get_ili_value(row, col_name):
-        col = ili_col_map.get(col_name)
+    # Helper for ILI values
+    def get_ili_value(row, col_map, col_name):
+        col = col_map.get(col_name)
         if col and col in row.index:
             val = row[col]
             if pd.notna(val):
-                return val if val >= 0 or not isinstance(val, (int, float)) else "-"
+                if isinstance(val, (int, float)):
+                    return val if val >= 0 else 0.0
+                return val
         return "-"
-    
-    # Populate rows
-    for idx, (ili_idx, ili_row) in enumerate(ili_df_filtered.iterrows()):
-        current_row = start_row + idx
-        
-        # Insert row if needed (except for first row)
-        if idx > 0:
+
+    # Loop through each ILI dataset
+    for ds_idx, dataset in enumerate(ili_datasets):
+        ili_df = dataset["df"]
+        ili_col_map = dataset["col_map"]
+        target_indices = dataset["target_indices"]
+        target_gw_chainage = dataset["target_gw_chainage"]
+        vendor_format = dataset["format"]
+
+        # Add header for different datasets if more than one
+        if len(ili_datasets) > 1:
             ws.insert_rows(current_row)
+            header_cell = ws.cell(current_row, 1)
+            header_cell.value = f"--- ILI DATA SOURCE: {vendor_format} ---"
+            header_cell.font = Font(bold=True, size=12, color="0000FF")
+            ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=10)
+            current_row += 1
+
+        # Populate rows for this dataset
+        for idx, (ili_idx, ili_row) in enumerate(ili_df.iterrows()):
+            # Insert row
+            ws.insert_rows(current_row)
+            
+            # Check if this is a target feature
+            is_target = ili_idx in target_indices
+            
+            # Values
+            feat_id = get_ili_value(ili_row, ili_col_map, "Feature ID")
+            chainage = get_ili_value(ili_row, ili_col_map, "ILI Chainage")
+            
+            # Calculate distance from TGW
+            dist_from_tgw = "-"
+            if isinstance(chainage, (int, float)) and isinstance(target_gw_chainage, (int, float)):
+                dist_from_tgw = chainage - target_gw_chainage
+            
+            # Set values
+            ws.cell(current_row, 1).value = str(feat_id)
+            ws.cell(current_row, 2).value = excavation_num
+            ws.cell(current_row, 3).value = get_ili_value(ili_row, ili_col_map, "Feature Type")
+            ws.cell(current_row, 4).value = get_ili_value(ili_row, ili_col_map, "Feature Description")
+            ws.cell(current_row, 5).value = get_ili_value(ili_row, ili_col_map, "Feature Depth")
+            ws.cell(current_row, 6).value = get_ili_value(ili_row, ili_col_map, "Feature Length")
+            ws.cell(current_row, 7).value = get_ili_value(ili_row, ili_col_map, "Feature Width")
+            ws.cell(current_row, 8).value = get_ili_value(ili_row, ili_col_map, "Feature Orientation")
+            ws.cell(current_row, 9).value = chainage
+            ws.cell(current_row, 10).value = dist_from_tgw
+            
+            # Apply formatting
+            if is_target:
+                for col_idx in range(1, 11):
+                    cell = ws.cell(current_row, col_idx)
+                    cell.font = Font(bold=True, color="FF0000")
+                    cell.fill = PatternFill(start_color="D3D3D3", end_color="D3D3D3", fill_type="solid")
+            
+            current_row += 1
         
-        # Check if this is a target feature
-        is_target = ili_idx in target_indices
-        
-        # Populate columns
-        feat_id = get_ili_value(ili_row, "Feature ID")
-        chainage = get_ili_value(ili_row, "ILI Chainage")
-        
-        # Calculate distance from TGW
-        dist_from_tgw = "-"
-        if isinstance(chainage, (int, float)) and isinstance(target_gw_chainage, (int, float)):
-            dist_from_tgw = chainage - target_gw_chainage
-        
-        # Set values
-        ws.cell(current_row, 1).value = str(feat_id)
-        ws.cell(current_row, 2).value = excavation_num
-        ws.cell(current_row, 3).value = get_ili_value(ili_row, "Feature Type")
-        ws.cell(current_row, 4).value = get_ili_value(ili_row, "Feature Description")
-        ws.cell(current_row, 5).value = get_ili_value(ili_row, "Feature Depth")
-        ws.cell(current_row, 6).value = get_ili_value(ili_row, "Feature Length")
-        ws.cell(current_row, 7).value = get_ili_value(ili_row, "Feature Width")
-        ws.cell(current_row, 8).value = get_ili_value(ili_row, "Feature Orientation")
-        ws.cell(current_row, 9).value = chainage
-        ws.cell(current_row, 10).value = dist_from_tgw
-        
-        # Apply formatting
-        if is_target:
-            # Target feature: Bold, Red, Grey background
-            for col_idx in range(1, 11):
-                cell = ws.cell(current_row, col_idx)
-                cell.font = Font(bold=True, color="FF0000")
-                cell.fill = PatternFill(start_color="D3D3D3", end_color="D3D3D3", fill_type="solid")
-        else:
-            # Regular feature: Normal formatting
-            for col_idx in range(1, 11):
-                cell = ws.cell(current_row, col_idx)
-                cell.font = Font(bold=False, color="000000")
-                cell.fill = PatternFill(fill_type=None)
+        # Add spacing between datasets
+        if ds_idx < len(ili_datasets) - 1:
+            ws.insert_rows(current_row)
+            current_row += 1
 
 
 # ============================================================================
@@ -717,33 +784,45 @@ def filter_ili_data_by_range(ili_df: pd.DataFrame, target_gw_chainage: float,
     return ili_df[mask].copy()
 
 
-def generate_dig_packages(mdl_content: bytes, ili_content: bytes, template_content: bytes,
-                         revision: str):
+def generate_dig_packages(mdl_content: bytes, ili_contents: List[bytes], template_content: bytes,
+                         revision: str, ili_formats: List[str]):
     """
-    Generate dig packages from source files (Generator).
+    Generate dig packages from MDL, multiple ILI datasets, and template.
     
     Args:
         mdl_content: MDL Excel file content
-        ili_content: ILI Excel file content
+        ili_contents: List of ILI Excel file contents
         template_content: Template Excel file content
-        revision: Revision identifier (e.g., '1', '2', 'draft', etc.)
+        revision: Revision identifier
+        ili_formats: List of vendor formats corresponding to ili_contents
         
-    Yields:
-        JSON string with progress update or final result
+    Returns:
+        BytesIO object containing the ZIP file
     """
-    # Parse files
+    # Parse MDL
     mdl_df, mdl_col_map = parse_mdl_file(mdl_content)
-    ili_df, ili_col_map, ili_sheet = parse_ili_file(ili_content)
     
+    # Parse all ILI files
+    ili_data_parsed = []
+    for content, v_format in zip(ili_contents, ili_formats):
+        try:
+            df, col_map, sheet = parse_ili_file(content, v_format)
+            ili_data_parsed.append({
+                "df": df,
+                "col_map": col_map,
+                "format": v_format
+            })
+        except Exception as e:
+            print(f"Error parsing ILI file ({v_format}): {e}")
+    
+    if not ili_data_parsed:
+        raise ValueError("No ILI files could be parsed successfully")
+
     # Extract dig IDs
     dig_ids = extract_dig_ids(mdl_df, mdl_col_map)
-    
     if not dig_ids:
         raise ValueError("No valid Dig IDs found in MDL file")
         
-    total_digs = len(dig_ids)
-    yield json.dumps({"type": "start", "total": total_digs}) + "\n"
-    
     # Create temporary directory for files
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
@@ -753,55 +832,54 @@ def generate_dig_packages(mdl_content: bytes, ili_content: bytes, template_conte
             # Filter MDL for current dig ID
             dig_id_col = mdl_col_map.get("Dig ID")
             mdl_features = mdl_df[mdl_df[dig_id_col] == dig_id]
-            
             if mdl_features.empty:
                 continue
             
-            # Get first row for single-value fields
             mdl_first_row = mdl_features.iloc[0]
             
-            # Extract parameters for logging
-            params = {}
-            for key in ["Pipe OD", "Pipe NWT", "MOP", "Target Girth Weld", "Pipeline Name"]:
-                 col = mdl_col_map.get(key)
-                 if col and col in mdl_first_row.index:
-                     params[key] = str(mdl_first_row[col])
+            # Prepare datasets for this dig ID
+            ili_datasets_for_dig = []
             
-            yield json.dumps({
-                "type": "progress", 
-                "current": excavation_num, 
-                "dig_id": dig_id, 
-                "stage": "processing",
-                "params": params
-            }) + "\n"
+            for ili_item in ili_data_parsed:
+                df = ili_item["df"]
+                col_map = ili_item["col_map"]
+                v_format = ili_item["format"]
+                
+                # Find TGW chainage
+                target_gw_chainage = get_target_gw_chainage(mdl_first_row, df, mdl_col_map, col_map)
+                
+                if target_gw_chainage is not None:
+                    df_filtered = filter_ili_data_by_range(df, target_gw_chainage, 
+                                                         mdl_first_row, mdl_col_map, col_map)
+                else:
+                    # Fallback
+                    df_filtered = df.copy()
+                    target_gw_chainage = 0.0
+                
+                # Get matching features
+                target_indices = get_target_feature_indices(mdl_features, df_filtered, 
+                                                           mdl_col_map, col_map)
+                
+                # Only add if there are features in range or it's the first dataset
+                if not df_filtered.empty:
+                    ili_datasets_for_dig.append({
+                        "df": df_filtered,
+                        "col_map": col_map,
+                        "target_indices": target_indices,
+                        "target_gw_chainage": target_gw_chainage,
+                        "format": v_format
+                    })
             
-            # Get target girth weld chainage
-            target_gw_chainage = get_target_gw_chainage(mdl_first_row, ili_df, mdl_col_map, ili_col_map)
-            
-            if target_gw_chainage is not None:
-                ili_df_filtered = filter_ili_data_by_range(ili_df, target_gw_chainage, 
-                                                         mdl_first_row, mdl_col_map, ili_col_map)
-            else:
-                # Fallback if TGW not found
-                # Use full dataframe but set TGW chainage to 0.0 (distances will be absolute)
-                ili_df_filtered = ili_df.copy()
-                target_gw_chainage = 0.0
-            
-            # Get target feature indices
-            target_indices = get_target_feature_indices(mdl_features, ili_df_filtered, 
-                                                       mdl_col_map, ili_col_map)
-            
-            
-            # Load template
+            if not ili_datasets_for_dig:
+                continue
+
+            # Load and populate template
             wb = load_workbook(io.BytesIO(template_content))
-            
-            # Populate template
             populate_single_value_fields(wb, mdl_first_row, mdl_col_map, revision, excavation_num)
             populate_excavation_summary(wb, mdl_first_row, mdl_col_map, excavation_num)
-            populate_feature_table(wb, ili_df_filtered, ili_col_map, target_indices, 
-                                  excavation_num, target_gw_chainage)
+            populate_feature_table(wb, ili_datasets_for_dig, excavation_num)
             
-            # Save Excel file
+            # Save Excel
             excel_filename = f"{dig_id}_DP_R{revision}.xlsx"
             excel_path = temp_path / excel_filename
             wb.save(str(excel_path))
@@ -811,7 +889,7 @@ def generate_dig_packages(mdl_content: bytes, ili_content: bytes, template_conte
             pdf_path = temp_path / pdf_filename
             convert_excel_to_pdf(str(excel_path), str(pdf_path))
         
-        # Create ZIP file
+        # Create ZIP
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
             for file_path in temp_path.glob("*"):
@@ -819,11 +897,5 @@ def generate_dig_packages(mdl_content: bytes, ili_content: bytes, template_conte
                     zip_file.write(file_path, file_path.name)
         
         zip_buffer.seek(0)
-        zip_base64 = base64.b64encode(zip_buffer.getvalue()).decode('utf-8')
-        
-        yield json.dumps({
-            "type": "result",
-            "zip_data": zip_base64,
-            "filename": f"Dig_Packages_R{revision}.zip"
-        }) + "\n"
+        return zip_buffer
 

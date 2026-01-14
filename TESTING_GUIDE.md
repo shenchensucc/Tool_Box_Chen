@@ -2,7 +2,7 @@
 
 ## Quick Test with Button Feature
 
-I've added **three test case buttons** at the top of the Metal Loss Assessment page that automatically load R package test cases. This makes testing super easy!
+I've added **three test case buttons** at the top of the Metal Loss Assessment page that automatically load validation test cases. This makes testing super easy!
 
 ## 🚀 How to Use Test Case Buttons
 
@@ -31,7 +31,7 @@ streamlit run frontend/Home.py
 At the top of the page, you'll see:
 
 ```
-🧪 Load R Package Test Cases (click to expand)
+🧪 Load Validation Test Cases (click to expand)
 ```
 
 Click to expand it, then you'll see **three buttons**:
@@ -41,7 +41,7 @@ Click to expand it, then you'll see **three buttons**:
 ### 🔘 Button 1: Test Case 1: z > 50
 
 **What it does:**
-- Loads parameters from R package test case where z > 50
+- Loads parameters from standard test case where z > 50
 - Tests the **linear Folias factor formula** (3.3 + 0.032z)
 - This is the simplified formula used for long defects
 
@@ -65,7 +65,7 @@ Click to expand it, then you'll see **three buttons**:
 ### 🔘 Button 2: Test Case 2: z ≤ 50
 
 **What it does:**
-- Loads parameters from R package test case where z ≤ 50
+- Loads parameters from standard test case where z ≤ 50
 - Tests the **polynomial Folias factor formula** √(1 + 0.6275z - 0.003375z²)
 - This is the more accurate formula for shorter defects
 
@@ -82,14 +82,14 @@ Click to expand it, then you'll see **three buttons**:
 **Expected results:**
 - Different failure pressure than Test Case 1
 - z value is ≤ 50, so polynomial Folias factor is used
-- Should exactly match R package output
+- Should exactly match expected output
 
 ---
 
-### 🔘 Button 3: R Markdown Example
+### 🔘 Button 3: Standard Example
 
 **What it does:**
-- Loads the **complete assessment scenario** from your R markdown file
+- Loads the **complete assessment scenario** for validation
 - Shows realistic assessment with growth over time
 - Full 48-month projection with three growth scenarios
 
@@ -110,7 +110,7 @@ Click to expand it, then you'll see **three buttons**:
 - SOP decreases over time
 - 80% wall thickness cutoff dates calculated
 - All three charts display properly
-- Matches your R markdown output!
+- Matches expected validation output!
 
 ---
 
@@ -190,7 +190,7 @@ After running each test case:
 - [ ] Failure pressure is DIFFERENT from Test Case 1
 - [ ] Results are consistent
 
-**Test Case 3 (R Markdown):**
+**Test Case 3 (Standard):**
 - [ ] Three distinct growth scenarios visible
 - [ ] Depth increases monotonically
 - [ ] SOP decreases monotonically
@@ -261,7 +261,7 @@ Pf ≈ 2 × 428 × (5.16/273.1) × 0.657 × 1000 ≈ 10,632 kPa
 ## 📝 Summary
 
 The test case buttons make it incredibly easy to:
-- ✅ Validate Python implementation against R package
+- ✅ Validate Python implementation against standard cases
 - ✅ Demonstrate functionality to stakeholders
 - ✅ Quick regression testing after code changes
 - ✅ Learn how different parameters affect results

@@ -254,7 +254,7 @@ all_configs.append({
     'type': 'test',
     'test_num': 1,
     'params': {'do': 273.1, 'tp': 5.16, 'YS': 359.0, 'TS': 455.0},
-    'description': 'R Package Test: Long defect (Linear Folias factor)'
+    'description': 'Standard Test: Long defect (Linear Folias factor)'
 })
 all_configs.append({
     'name': '🧪 Test Case 2: z ≤ 50',
@@ -262,15 +262,15 @@ all_configs.append({
     'type': 'test',
     'test_num': 2,
     'params': {'do': 273.1, 'tp': 5.16, 'YS': 359.0, 'TS': 455.0},
-    'description': 'R Package Test: Short defect (Polynomial Folias factor)'
+    'description': 'Standard Test: Short defect (Polynomial Folias factor)'
 })
 all_configs.append({
-    'name': '🧪 R Markdown Example',
+    'name': '🧪 Standard Example',
     'key': 'test_case_3',
     'type': 'test',
     'test_num': 3,
     'params': {'do': 273.1, 'tp': 6.35, 'YS': 359.0, 'TS': 455.0},
-    'description': 'R Package Test: Complete assessment scenario'
+    'description': 'Standard Test: Complete assessment scenario'
 })
 
 # Add all preset scenarios
@@ -389,16 +389,16 @@ if 'test_case' in st.session_state:
         st.info("✅ **Test Case 2 Loaded**: z ≤ 50 (Limp=200mm). This tests the polynomial Folias factor formula.")
         
     elif test_case_num == 3:
-        # R Markdown Example - Updated with standardized rates
+        # Standard Example - Updated with standardized rates
         test_case_params = standard_params.copy()
         test_case_params.update({
-            'tp': 6.35,  # Original R markdown used 6.35mm
+            'tp': 6.35,  # Standard test case uses 6.35mm
             'dimp_org_percent': 41.0,
             'Limp_org': 361.0,
             'feature_ID': '7',
             'vendor_ILI': 'ROSEN MFL-C'
         })
-        st.info("✅ **R Markdown Example Loaded**: Complete assessment scenario with updated standardized rates.")
+        st.info("✅ **Standard Example Loaded**: Complete assessment scenario with updated standardized rates.")
     
     # Clear the test case after loading
     if st.button("🔄 Clear Test Case and Reset", type="secondary"):

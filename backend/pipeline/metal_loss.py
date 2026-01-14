@@ -1,8 +1,8 @@
 """
-Metal Loss Assessment Calculations
-Translated from R package 'mla' to Python
+Metal Loss Assessment Calculations based on Modified B31G methodology.
 """
 import numpy as np
+import pandas as pd
 from typing import Dict, List, Optional, Union
 
 
@@ -15,8 +15,6 @@ def calculate_folias_factor(
 ) -> Union[float, np.ndarray]:
     """
     Calculate Folias/bulging factor for metal loss assessment.
-    
-    Translated from R function fMfolias().
     
     Parameters:
     -----------
@@ -84,7 +82,7 @@ def calculate_folias_factor(
 
 def calculate_failure_pressure(
     dimp: Union[float, List[float], np.ndarray],
-    Limp: float,
+    Limp: Union[float, np.ndarray],
     do: float,
     tp: float,
     YS: float,
@@ -96,14 +94,12 @@ def calculate_failure_pressure(
     """
     Calculate failure stress and pressure for metal loss evaluation.
     
-    Translated from R function fmla().
-    
     Parameters:
     -----------
     dimp : float, list, or ndarray
         Depth of the defect (mm)
-    Limp : float
-        Length of the defect (mm)
+    Limp : float or ndarray
+        Length of the defect (mm). Can be a scalar or an array matching dimp length.
     do : float
         Outside diameter of pipe (mm)
     tp : float
@@ -153,8 +149,8 @@ def calculate_failure_pressure(
     if np.any(d_t > 0.80):
         warnings.append("some d_t ratio > 80% detected")
     
-    # Calculate Folias factor
-    Mfolias_values = np.array([calculate_folias_factor(do, tp, Limp, method) for _ in range(n)])
+    # Calculate Folias factor (vectorized)
+    Mfolias_values = calculate_folias_factor(do, tp, Limp, method)
     
     # Initialize remaining strength factor
     Rs = np.full(n, np.nan)
@@ -163,10 +159,16 @@ def calculate_failure_pressure(
     if method == "b31g":
         # For z <= 20
         valid_idx = ~np.isnan(Mfolias_values)
-        Rs[valid_idx] = (1 - (2/3) * d_t[valid_idx]) / (1 - (2/3) * d_t[valid_idx] / Mfolias_values[valid_idx])
-        # For z > 20
-        invalid_idx = np.isnan(Mfolias_values)
-        Rs[invalid_idx] = 1 - d_t[invalid_idx]
+        if isinstance(Mfolias_values, np.ndarray):
+            Rs[valid_idx] = (1 - (2/3) * d_t[valid_idx]) / (1 - (2/3) * d_t[valid_idx] / Mfolias_values[valid_idx])
+            # For z > 20
+            invalid_idx = np.isnan(Mfolias_values)
+            Rs[invalid_idx] = 1 - d_t[invalid_idx]
+        else:
+            if not np.isnan(Mfolias_values):
+                Rs = (1 - (2/3) * d_t) / (1 - (2/3) * d_t / Mfolias_values)
+            else:
+                Rs = 1 - d_t
         
     elif method == "mb31g":
         Rs = (1 - 0.85 * d_t) / (1 - 0.85 * d_t / Mfolias_values)
@@ -358,6 +360,164 @@ def assess_metal_loss_feature(
     }
 
 
+def find_column_names(df: pd.DataFrame, possible_names: List[str]) -> Optional[str]:
+    """
+    Find a column name in the DataFrame that matches one of the possible names (case-insensitive).
+    """
+    df_columns = [str(col).lower() for col in df.columns]
+    for name in possible_names:
+        if name.lower() in df_columns:
+            # Find the original case name
+            idx = df_columns.index(name.lower())
+            return df.columns[idx]
+    return None
 
 
+def mass_assess_metal_loss(
+    df: pd.DataFrame,
+    do: float,
+    tp: float,
+    YS: float,
+    TS: float,
+    depth_tolerance: float,
+    length_tolerance: float,
+    depth_cr: float,
+    length_cr: float,
+    start_year: int
+) -> pd.DataFrame:
+    """
+    Perform mass assessment for metal loss features over 10 years.
+    
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        Input data with metal loss features
+    do : float
+        Outside diameter (mm)
+    tp : float
+        Wall thickness (mm)
+    YS : float
+        Yield strength (MPa)
+    TS : float
+        Tensile strength (MPa)
+    depth_tolerance : float
+        ILI depth tolerance (%)
+    length_tolerance : float
+        ILI length tolerance (mm)
+    depth_cr : float
+        Corrosion rate for depth (mm/year)
+    length_cr : float
+        Corrosion rate for length (mm/year)
+    start_year : int
+        The year of the ILI run
+        
+    Returns:
+    --------
+    pd.DataFrame
+        Modified DataFrame with 10 years of Pf decay
+    """
+    # 1. Map columns (placeholder for more names later)
+    depth_col = find_column_names(df, ["depth", "defect depth", "dimp"])
+    length_col = find_column_names(df, ["length", "defect length", "Limp"])
+    feature_id_col = find_column_names(df, ["feature id", "feature", "id", "f_id"])
+    
+    if not depth_col or not length_col:
+        raise ValueError(f"Required columns (depth, length) not found in Excel file. Found: {list(df.columns)}")
 
+    # Log which columns were found
+    print(f"Using depth column: '{depth_col}', length column: '{length_col}', feature id column: '{feature_id_col}'")
+    
+    # 2. Create working copy and initialize result columns
+    df_result = df.copy()
+    
+    # Initialize all result columns with None (will show as blank in Excel)
+    for i in range(10):
+        year = start_year + i
+        df_result[f"Year {year} Pf (psi)"] = None
+    
+    # Initialize debug columns
+    df_result["Debug_Feature_ID"] = df[feature_id_col] if feature_id_col else "Not Found"
+    df_result["Debug_Initial_Depth_mm"] = None
+    df_result["Debug_Initial_Length_mm"] = None
+    
+    # 3. Identify valid rows (skip if 0, empty, or negative)
+    # Convert to numeric, errors become NaN
+    depth_raw = pd.to_numeric(df[depth_col], errors='coerce')
+    length_raw = pd.to_numeric(df[length_col], errors='coerce')
+    
+    # Log sample values for debugging
+    print(f"First 5 depth values: {depth_raw.head().tolist()}")
+    print(f"First 5 length values: {length_raw.head().tolist()}")
+    
+    # Valid mask: both depth and length must be > 0 and not NaN
+    valid_mask = (depth_raw.notna()) & (depth_raw > 0) & \
+                 (length_raw.notna()) & (length_raw > 0)
+    
+    # Log skipped rows for debugging
+    skipped_mask = ~valid_mask
+    if skipped_mask.any():
+        skipped_indices = df[skipped_mask].index.tolist()
+        print(f"Skipping {skipped_mask.sum()} rows with 0/empty depth or length at indices: {skipped_indices[:10]}...")
+        # Show the actual values being skipped
+        for idx in skipped_indices[:5]:
+            print(f"  Row {idx}: depth={depth_raw.iloc[idx]}, length={length_raw.iloc[idx]}")
+    
+    print(f"Valid rows: {valid_mask.sum()} out of {len(df)}")
+        
+    # If no valid rows, return the dataframe as is
+    if not valid_mask.any():
+        print("No valid rows found, returning empty results")
+        return df_result
+
+    # 4. Extract only valid data for calculation
+    dimp_percent_vals = depth_raw[valid_mask].values
+    Limp_org_vals = length_raw[valid_mask].values
+    
+    # Get indices of valid rows for logging
+    valid_indices = df[valid_mask].index.tolist()
+    print(f"Processing {len(dimp_percent_vals)} valid features at indices: {valid_indices[:10]}...")
+    
+    # Apply tool tolerances to valid data only
+    dimp_0 = (dimp_percent_vals + depth_tolerance) * 0.01 * tp
+    Limp_0 = Limp_org_vals + length_tolerance
+    
+    # Store exact values used for calculation for debugging
+    df_result.loc[valid_mask, "Debug_Initial_Depth_mm"] = np.round(dimp_0, 4)
+    df_result.loc[valid_mask, "Debug_Initial_Length_mm"] = np.round(Limp_0, 4)
+    
+    # 5. Calculate for 10 years for valid rows only
+    for i in range(10):
+        year = start_year + i
+        
+        # Growth (mm)
+        dimp_t = dimp_0 + (i * depth_cr)
+        Limp_t = Limp_0 + (i * length_cr)
+        
+        # Calculate Pf (kPa)
+        res = calculate_failure_pressure(
+            dimp=dimp_t,
+            Limp=Limp_t,
+            do=do,
+            tp=tp,
+            YS=YS,
+            TS=TS
+        )
+        
+        pf_kPa = res['ans']['Pf']
+        
+        # Convert to psi
+        # kPa to psi conversion: 0.14503774
+        pf_values = pf_kPa * 0.14503774
+        
+        # Prepare result array
+        results = np.round(pf_values, 2).astype(object)
+        
+        # Handle >80% limit
+        is_leak = (dimp_t / tp) > 0.8
+        results[is_leak] = ">80% leak"
+        
+        # Assign back to the dataframe using the mask
+        col_name = f"Year {year} Pf (psi)"
+        df_result.loc[valid_mask, col_name] = results
+        
+    return df_result

@@ -561,7 +561,7 @@ with st.expander("ℹ️ Help & Information"):
     
     ### 📌 Important Notes
     
-    - **Maximum file size**: 30 MB per file
+    - **Maximum file size**: 100 MB per file
     - **Supported formats**: .xlsx, .xls
     - **Data Privacy**: Files are processed in memory only and deleted immediately after processing
     - **Processing time**: 30 seconds to a few minutes (depends on file size and workflow count)
