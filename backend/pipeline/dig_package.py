@@ -24,11 +24,15 @@ from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
+from backend.pipeline.ili_reader import find_column_names, identify_ili_columns, COLUMN_KEYWORDS as GLOBAL_KEYWORDS
+
 
 # ============================================================================
 # Keyword Definitions for Column Matching
 # ============================================================================
 
+# Vendor-specific mappings can still be used for specialized matching if needed,
+# but we'll prefer the global COLUMN_KEYWORDS from ili_reader.py for general tasks.
 VENDOR_MAPPINGS = {
     "TDW": {
         "Feature ID": ["ID", "Feature Number", "FeatureID", "Target ID"],
@@ -76,44 +80,6 @@ VENDOR_MAPPINGS = {
     }
 }
 
-COLUMN_KEYWORDS = {
-    # MDL Keywords (Shared)
-    "Dig ID": ["Dig Name", "Dig ID", "DigName", "NEW Dig Name"],
-    "Feature ID": ["ID#", "Feature Identifier", "Feature ID", "ILI Feature ID", "Feature Number"],
-    "Feature Type": ["Feature Type", "Feature", "Event", "Anomaly Type"],
-    "Feature Description": ["Feature Description", "Description", "Feature", "Anomaly Description", "Event", "Anomaly"],
-    "Feature Length": ["Length (in)", "Length (mm)", "Feature Length (mm)", "Feature Length (in)", "Length", "Length (in.)", "Length (mm)"],
-    "Feature Width": ["Width (in)", "Width", "Width (mm)", "Feature Width (mm)", "Feature Width (in)", "Width (in.)", "Width (mm)"],
-    "Feature Depth": ["Depth (%)", "Max Depth", "Max. Depth", "Peak Depth", "Peak Depth (% WT)", "Feature Depth", "Depth", "Depth (mm)"],
-    "Feature Orientation": ["Orientation (clock)", "Clock Orient.", "Orientation (hh:mm)", "Feature Orientation", "Feature Orientation (Center of feature) (hh:mm)", "(Degree)", "o'clock"],
-    "ILI Chainage": ["Wheel Count (ft)", "Log Dist.", "ILI Chainage (m)", "Odometer (m)", "Log Distance", "ILI Chainage/Odometer (m)", "ILI Chainage", "Odometer", "Wheel Count (ft.)", "ILI Distance (m)"],
-    "Joint Number": ["Joint No. or US GW No.", "Joint No", "US GW No", "PNG Joint Number", "Client Jno.", "Feature Identifier"],
-    "Joint Length": ["Joint Length", "Joint Length (ft)", "Joint Length (m)"],
-    "Seam Orientation": ["Seam Weld Orientation (hh:mm)", "D/S Seam Weld Orientation", "Seam Orientation (clock)", "D/S Seam Weld Orientation (hh:mm)", "SWD Orientation (hh:mm)", "o'clock"],
-    "Pipeline Name": ["Pipeline Name", "Pipeline_Name", "PipelineName"],
-    "Pipe OD": ["Pipe OD", "Pipe_OD", "PipeOD", "OD (mm)"],
-    "Pipe NWT": ["Pipe NWT", "Pipe_NWT", "PipeNWT", "Nominal Wall Thickness (mm)"],
-    "Pipe Grade": ["Pipe Grade", "Pipe_Grade", "PipeGrade"],
-    "Pipe Year": ["Pipe Year", "Pipe_Year", "PipeYear"],
-    "MOP": ["MOP (psi)", "MOP", "PipeGrade", "MOP (PSI)"],
-    "SEP": ["SEP (psi)", "Safe Excavation Pressure", "Excavation Pressure", "SEP"],
-    "Milepost": ["Milepost", "MP", "US MP", "Field_1"],
-    "Latitude": ["TGW Lat (deg)", "Lat", "Latitude", "Latitude (°)"],
-    "Longitude": ["TGW Lon (deg)", "Long", "Longitude", "Lon", "Longitude (°)"],
-    "Target Girth Weld": ["TGW", "Target Girth Weld"],
-    "Assessment Length": ["Total Assessment Length (m)", "Total Assessment Length", "Assessment Length"],
-    "Start Assessment": ["Start Assessment to TGW (m)", "Start Assessment to TGW", "Start Assessment"],
-    "End Assessment": ["End Assessment to TGW (m)", "End Assessment to TGW", "End Assessment"],
-    "Exposure Length": ["Total Exposed Pipe Length (m)", "Total Exposed Pipe Length", "Total Exposed Length"],
-    "Start Exposure": ["Start Exposed Pipe to TGW (m)", "Start Exposed Pipe to TGW", "Start Exposed Pipe"],
-    "End Exposure": ["End Exposed Pipe to TGW (m)", "End Exposed Pipe to TGW", "End Exposure"],
-    "ILI Run Name": ["ILI", "ILI Run Name"],
-    "ILI Run Accuracy": ["SEP Expiry Date", "XYZ Accuracy", "ILI Run Name Accuracy"],
-    "Upstream AGM": ["U/S AGM"],
-    "Downstream AGM": ["D/S AGM"],
-    "Girth Weld": ["Girth Weld", "Weld", "Area End Installation", "Area End Launcher", "Area Start Installation", "Area Start Receiver", "Girth Weld wall thickness down", "Girth Weld wall thickness up", "GirthWeld"],
-}
-
 # Worksheet name keywords
 MDL_WORKSHEET_KEYWORDS = ["Features&Dig", "Features", "Dig"]
 ILI_WORKSHEET_KEYWORDS = ["Pipetally", "Pipe Tally", "Tally", "True", "Page-1", "PNG ILI Pipeline Tally"]
@@ -123,26 +89,6 @@ ANOMALIES_WORKSHEET_KEYWORDS = ["Anomalies", "Anomaly", "Anomaly Listing"]
 # ============================================================================
 # Utility Functions
 # ============================================================================
-
-def find_column_by_keywords(headers: List[str], keywords: List[str]) -> Optional[str]:
-    """
-    Search for column name by matching header against list of keywords.
-    
-    Args:
-        headers: List of column headers from Excel
-        keywords: List of possible keyword matches
-        
-    Returns:
-        Column name if found, None otherwise
-    """
-    headers_lower = {h.strip(): h for h in headers if h}
-    
-    for keyword in keywords:
-        keyword_lower = keyword.lower().strip()
-        for header_lower, header_original in headers_lower.items():
-            if header_lower.lower() == keyword_lower:
-                return header_original
-    return None
 
 
 def find_worksheet_by_keywords(workbook, keywords: List[str]) -> Optional[str]:
@@ -260,8 +206,8 @@ def parse_mdl_file(file_content: bytes) -> Tuple[pd.DataFrame, Dict[str, str]]:
     
     # Map columns to standard names
     column_mapping = {}
-    for standard_name, keywords in COLUMN_KEYWORDS.items():
-        found_col = find_column_by_keywords(df.columns.tolist(), keywords)
+    for standard_name, keywords in GLOBAL_KEYWORDS.items():
+        found_col = find_column_names(df, keywords)
         if found_col:
             column_mapping[standard_name] = found_col
     
@@ -349,7 +295,7 @@ def parse_ili_file(file_content: bytes, vendor_format: str = "Rosen-MFLA") -> Tu
     vendor_keywords = VENDOR_MAPPINGS.get(vendor_format, VENDOR_MAPPINGS["Rosen-MFLA"])
     
     for standard_name, keywords in vendor_keywords.items():
-        found_col = find_column_by_keywords(df.columns.tolist(), keywords)
+        found_col = find_column_names(df, keywords)
         if found_col:
             column_mapping[standard_name] = found_col
     

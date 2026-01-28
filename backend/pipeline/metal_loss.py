@@ -4,6 +4,7 @@ Metal Loss Assessment Calculations based on Modified B31G methodology.
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Optional, Union
+from backend.pipeline.ili_reader import identify_ili_columns
 
 
 def calculate_folias_factor(
@@ -360,17 +361,7 @@ def assess_metal_loss_feature(
     }
 
 
-def find_column_names(df: pd.DataFrame, possible_names: List[str]) -> Optional[str]:
-    """
-    Find a column name in the DataFrame that matches one of the possible names (case-insensitive).
-    """
-    df_columns = [str(col).lower() for col in df.columns]
-    for name in possible_names:
-        if name.lower() in df_columns:
-            # Find the original case name
-            idx = df_columns.index(name.lower())
-            return df.columns[idx]
-    return None
+# find_column_names has been moved to backend.pipeline.ili_reader
 
 
 def mass_assess_metal_loss(
@@ -416,10 +407,11 @@ def mass_assess_metal_loss(
     pd.DataFrame
         Modified DataFrame with 10 years of Pf decay
     """
-    # 1. Map columns (placeholder for more names later)
-    depth_col = find_column_names(df, ["depth", "defect depth", "dimp"])
-    length_col = find_column_names(df, ["length", "defect length", "Limp"])
-    feature_id_col = find_column_names(df, ["feature id", "feature", "id", "f_id"])
+    # 1. Map columns using the centralized ILI reader utility
+    ili_cols = identify_ili_columns(df)
+    depth_col = ili_cols.get("depth")
+    length_col = ili_cols.get("length")
+    feature_id_col = ili_cols.get("feature_id")
     
     if not depth_col or not length_col:
         raise ValueError(f"Required columns (depth, length) not found in Excel file. Found: {list(df.columns)}")

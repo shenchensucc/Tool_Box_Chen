@@ -44,6 +44,7 @@ from backend.tml.workflows._18_design_factor import process_design_factor
 from backend.tml.workflows._19_joint_factor import process_joint_factor
 from backend.tml.workflows._20_location_factor import process_location_factor
 from backend.pipeline.metal_loss import assess_metal_loss_feature, mass_assess_metal_loss
+from backend.pipeline.ili_reader import read_ili_data, identify_ili_columns
 from backend.pipeline.report_generator import generate_word_report
 from backend.pipeline.dig_package import generate_dig_packages
 
@@ -58,7 +59,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-MAX_FILE_SIZE = 100 * 1024 * 1024  # 100 MB
+MAX_FILE_SIZE = 200 * 1024 * 1024  # 200 MB
 
 # Temporary file storage for TML processing (token -> file_path)
 # In production, use Redis or similar
@@ -245,6 +246,16 @@ async def process_ili_data(
 
         if df.empty:
             raise HTTPException(status_code=400, detail="Sheet is empty")
+
+        # Auto-identify columns if not provided
+        ili_cols = identify_ili_columns(df)
+        if not distance_column:
+            distance_column = ili_cols.get("distance")
+        if not depth_column:
+            depth_column = ili_cols.get("depth")
+        if not metal_loss_column:
+            # Try "depth" as fallback for metal loss if explicit metal loss column not found
+            metal_loss_column = ili_cols.get("depth")
 
         # Collect columns to analyze
         columns_to_analyze = []
@@ -607,8 +618,8 @@ async def mass_assess_metal_loss_endpoint(
     temp_input = save_temp_file(file)
     
     try:
-        # Read Excel
-        df = pd.read_excel(temp_input)
+        # Read Excel using the centralized ILI reader
+        df = read_ili_data(temp_input)
         
         # Process
         df_result = mass_assess_metal_loss(
