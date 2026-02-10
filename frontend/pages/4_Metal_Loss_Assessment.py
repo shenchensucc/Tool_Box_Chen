@@ -107,6 +107,7 @@ def export_plot_as_image(fig, format="png", width=1200, height=600):
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from frontend_utils import (
+    BACKEND_URL,
     apply_custom_styling,
     check_backend_health,
     display_header,
@@ -619,7 +620,7 @@ if process_button:
             # Call the API
             with httpx.Client(timeout=60.0) as client:
                 response = client.post(
-                    "http://localhost:8000/api/pipeline/metal-loss/assess",
+                    f"{BACKEND_URL}/api/pipeline/metal-loss/assess",
                     data=data,
                 )
             
@@ -945,7 +946,7 @@ if st.session_state.get('assessment_complete', False):
                 # Call export API
                 with httpx.Client(timeout=120.0) as client:
                     export_response = client.post(
-                        "http://localhost:8000/api/pipeline/metal-loss/export-word",
+                        f"{BACKEND_URL}/api/pipeline/metal-loss/export-word",
                         files=files,
                         data=data_form
                     )

@@ -8,6 +8,7 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from frontend_utils import (
+    BACKEND_URL,
     apply_custom_styling,
     check_backend_health,
     display_header,
@@ -52,7 +53,7 @@ def fetch_template(template_type: str):
     """Fetch template from backend and cache for better performance"""
     try:
         response = httpx.get(
-            f"http://localhost:8000/api/tml/download-template/{template_type}",
+            f"{BACKEND_URL}/api/tml/download-template/{template_type}",
             timeout=10.0
         )
         if response.status_code == 200:
@@ -235,7 +236,7 @@ if process_button:
                 # Call the API
                 with httpx.Client(timeout=300.0) as client:  # 5 minute timeout for large files
                     response = client.post(
-                        "http://localhost:8000/api/tml/process",
+                        f"{BACKEND_URL}/api/tml/process",
                         files=files,
                         data=data,
                     )
@@ -253,7 +254,7 @@ if process_button:
                     try:
                         # Download ZIP file immediately
                         zip_response = httpx.get(
-                            f"http://localhost:8000/api/tml/download/{zip_token}",
+                            f"{BACKEND_URL}/api/tml/download/{zip_token}",
                             timeout=60.0
                         )
                         if zip_response.status_code == 200:
@@ -264,7 +265,7 @@ if process_button:
                     try:
                         # Download combined file immediately
                         combined_response = httpx.get(
-                            f"http://localhost:8000/api/tml/download/{combined_token}",
+                            f"{BACKEND_URL}/api/tml/download/{combined_token}",
                             timeout=60.0
                         )
                         if combined_response.status_code == 200:
