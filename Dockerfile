@@ -13,6 +13,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY backend/ ./backend/
 COPY frontend/ ./frontend/
+COPY .streamlit/ ./.streamlit/
 
 # Streamlit talks to backend via localhost (backend on 8001 to avoid PORT conflict)
 ENV BACKEND_URL=http://127.0.0.1:8001
@@ -22,4 +23,7 @@ EXPOSE 8000
 
 # Run backend on 8001 (internal) + Streamlit on PORT (exposed to internet)
 # Platform routes external traffic to PORT - visitors see Streamlit UI
-CMD sh -c "uvicorn backend.main:app --host 0.0.0.0 --port 8001 & streamlit run frontend/Home.py --server.port ${PORT:-8000} --server.address 0.0.0.0 --server.headless true"
+# Fix WebSocket loading behind reverse proxy (enableWebsocketCompression=false)
+ENV STREAMLIT_SERVER_ENABLEWEBSOCKETCOMPRESSION=false
+ENV STREAMLIT_SERVER_ENABLECORS=false
+CMD sh -c "uvicorn backend.main:app --host 0.0.0.0 --port 8001 & streamlit run frontend/Home.py --server.port ${PORT:-8000} --server.address 0.0.0.0 --server.headless true --server.enableWebsocketCompression false --server.enableCORS false"

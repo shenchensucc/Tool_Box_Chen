@@ -1,0 +1,5 @@
+# Streamlit config for deployment behind reverse proxy (Koyeb/ai-builders.space)
+# Fixes "loading never finishes" - WebSocket compression is stripped by some proxies
+[server]
+enableWebsocketCompression = false
+enableCORS = false
