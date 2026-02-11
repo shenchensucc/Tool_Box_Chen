@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from openpyxl import load_workbook
 
 from backend.models import (
@@ -130,6 +130,12 @@ def create_histogram(series: pd.Series, column_name: str, bins: int = 30) -> His
         bin_edges=bin_edges.tolist(),
         counts=counts.tolist(),
     )
+
+
+@app.get("/")
+async def root():
+    """Redirect root to API docs"""
+    return RedirectResponse(url="/docs", status_code=302)
 
 
 @app.get("/health", response_model=HealthResponse)
