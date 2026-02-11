@@ -15,6 +15,7 @@ from frontend_utils import (
     display_header,
     display_sidebar_navigation,
     set_page_config,
+    show_backend_unavailable_and_retry,
     BACKEND_URL,
 )
 
@@ -33,16 +34,7 @@ display_header(
 
 # Check backend status
 if not check_backend_health():
-    st.error(
-        """
-        ⚠️ **Backend API is not available**
-        
-        Please start the backend server:
-        ```bash
-        uv run uvicorn backend.main:app --reload
-        ```
-        """
-    )
+    show_backend_unavailable_and_retry()
     st.stop()
 
 st.info("📋 **About This Tool**: Upload an Excel file containing metal loss features (depth, length) to calculate the 10-year failure pressure decay for all features at once.")

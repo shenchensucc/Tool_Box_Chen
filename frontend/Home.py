@@ -5,6 +5,7 @@ from frontend_utils import (
     check_backend_health,
     display_sidebar_navigation,
     set_page_config,
+    show_backend_unavailable_and_retry,
 )
 
 # Page configuration
@@ -77,15 +78,7 @@ with col2:
     if backend_status:
         st.success("✅ Backend API is running")
     else:
-        st.error("❌ Backend API is not available")
-        st.info(
-            """
-            **To start the backend:**
-            ```bash
-            uv run uvicorn backend.main:app --reload
-            ```
-            """
-        )
+        show_backend_unavailable_and_retry()
 
 # Footer
 st.markdown("---")

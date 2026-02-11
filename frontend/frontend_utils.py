@@ -193,14 +193,35 @@ async def call_process_api(
         return None
 
 
-@st.cache_resource(ttl=30)  # Cache for 30 seconds
+@st.cache_resource(ttl=10)  # Cache for 10 seconds (allows quick retry when backend starts)
 def check_backend_health() -> bool:
-    """Check if backend is running (cached for 30 seconds)"""
+    """Check if backend is running (cached for 10 seconds)"""
     try:
         response = httpx.get(f"{BACKEND_URL}/health", timeout=5.0)
         return response.status_code == 200 and response.json().get("ok", False)
     except Exception:
         return False
+
+
+def show_backend_unavailable_and_retry() -> None:
+    """
+    Show backend unavailable message with retry button.
+    On retry click, clears health check cache and reruns the app.
+    """
+    st.error(
+        """
+        ⚠️ **Backend API is not available**
+
+        Please start the backend server from the project root:
+        ```bash
+        python -m uvicorn backend.main:app --reload
+        ```
+        Or with uv: `uv run uvicorn backend.main:app --reload`
+        """
+    )
+    if st.button("🔄 Retry connection", type="primary"):
+        check_backend_health.clear()
+        st.rerun()
 
 
 def display_sidebar_navigation():

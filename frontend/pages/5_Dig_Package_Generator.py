@@ -20,6 +20,7 @@ from frontend_utils import (
     display_header,
     display_sidebar_navigation,
     set_page_config,
+    show_backend_unavailable_and_retry,
 )
 
 # Page configuration
@@ -37,16 +38,7 @@ display_header(
 
 # Check backend status
 if not check_backend_health():
-    st.error(
-        """
-        ⚠️ **Backend API is not available**
-
-        Please start the backend server:
-        ```bash
-        uv run uvicorn backend.main:app --reload
-        ```
-        """
-    )
+    show_backend_unavailable_and_retry()
     st.stop()
 
 # Initialize session state
