@@ -10,6 +10,8 @@ A Python-based web application providing tools for facility and pipeline enginee
 - **🛢️ Pipeline Tools**:
   - **ILI Visual Tool**: Upload and analyze In-Line Inspection (ILI) data from Excel files
   - **Metal Loss Assessment**: Assess pipeline metal loss features using modified B31G methodology with corrosion growth projections
+  - **Metal Loss Mass Assessment**: Mass assessment of metal loss features across multiple pipeline segments
+  - **Dig Package Generator**: Generate dig packages from MDL, ILI data, and template files
 
 ## 🏗️ Architecture
 
@@ -31,12 +33,16 @@ Tool_Box_Chen/
 │   │   ├── 1_Dashboard.py         # Dashboard overview
 │   │   ├── 2_TML_Data_Loader.py   # TML data processing tool
 │   │   ├── 3_ILI_Visual_Tool.py   # ILI data analysis tool
-│   │   └── 4_Metal_Loss_Assessment.py  # Metal loss assessment tool
+│   │   ├── 4_Metal_Loss_Assessment.py  # Metal loss assessment tool
+│   │   ├── 5_Dig_Package_Generator.py  # Dig package generation tool
+│   │   └── 6_Metal_Loss_Mass_Assessment.py  # Metal loss mass assessment tool
 │   └── __init__.py
 ├── backend/                       # Backend API (FastAPI)
 │   ├── main.py                    # FastAPI application and endpoints
 │   ├── models.py                   # Pydantic models for API validation
 │   ├── pipeline/                  # Pipeline engineering tools
+│   │   ├── ili_reader.py          # ILI data reading and processing
+│   │   ├── dig_package.py         # Dig package generation
 │   │   ├── metal_loss.py          # Metal loss assessment calculations
 │   │   └── report_generator.py    # Word report generation
 │   ├── tml/                       # Thickness Monitoring Location tools
@@ -89,7 +95,7 @@ Tool_Box_Chen/
 ├── run_backend.bat                # Backend startup script (Windows)
 ├── run_frontend.sh                # Frontend startup script (Linux/Mac)
 ├── run_frontend.bat               # Frontend startup script (Windows)
-├── QUICK_START.md                 # Quick setup guide
+├── HOW_TO_OPEN_APP.md             # Quick run reference
 ├── TESTING_GUIDE.md               # Testing guidelines
 ├── .gitignore                     # Git ignore rules
 └── README.md                      # This file
@@ -182,6 +188,7 @@ The frontend will open automatically in your browser at `http://localhost:8501`
 
 **Pipeline Metal Loss Assessment:**
 - **POST** `/api/pipeline/metal-loss/assess` - Assess metal loss feature and return calculated results
+- **POST** `/api/pipeline/metal-loss/mass-assess` - Bulk assess metal loss features from Excel for 10-year Pf decay
 - **POST** `/api/pipeline/metal-loss/export-word` - Generate and download Word document report
 
 Visit `http://127.0.0.1:8000/docs` for interactive API documentation (Swagger UI).
@@ -355,6 +362,18 @@ DEBUG=true
 - ✅ Word document report generation
 - ✅ Test case validation (Standard compatibility)
 
+### Metal Loss Mass Assessment
+
+- ✅ Mass assessment of metal loss features across multiple pipeline segments
+- ✅ Batch processing support
+- ✅ Excel data integration
+
+### Dig Package Generator
+
+- ✅ Upload MDL, ILI data, and template files
+- ✅ Generate dig packages for pipeline excavation planning
+- ✅ Excel-to-PDF conversion (Windows)
+
 ## 🔒 Security
 
 - File size validation (100 MB limit per file)
@@ -368,6 +387,8 @@ DEBUG=true
 
 - [x] TML Data Loader with 20 workflows
 - [x] Metal Loss Assessment tool
+- [x] Metal Loss Mass Assessment tool
+- [x] Dig Package Generator
 - [x] Word document report generation
 - [ ] Implement user authentication
 - [ ] Add database for project persistence
@@ -399,8 +420,8 @@ Comprehensive documentation is available in the [`docs/`](docs/) folder:
 - 🎨 [**Frontend Components**](docs/functions/FRONTEND_COMPONENTS.md) - UI patterns
 
 ### Quick Links
-- For quick setup: [QUICK_START.md](QUICK_START.md)
-- For project overview: [docs/DOCUMENTATION_SETUP_COMPLETE.md](docs/DOCUMENTATION_SETUP_COMPLETE.md)
+- For quick setup: [HOW_TO_OPEN_APP.md](HOW_TO_OPEN_APP.md)
+- For project overview: [docs/README.md](docs/README.md)
 
 ## 🤝 Contributing
 

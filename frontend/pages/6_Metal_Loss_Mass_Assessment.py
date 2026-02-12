@@ -1,10 +1,8 @@
 import sys
 from pathlib import Path
 from datetime import datetime
-import io
 import httpx
 import streamlit as st
-import pandas as pd
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -39,10 +37,10 @@ if not check_backend_health():
 
 st.info("📋 **About This Tool**: Upload an Excel file containing metal loss features (depth, length) to calculate the 10-year failure pressure decay for all features at once.")
 
-# Main content area
-st.subheader("📝 Assessment Parameters")
+# --- Integrated Process Flow (real workflow) ---
+st.subheader("📊 Process Flow")
 
-# Reset button
+# Reset button - compact
 if st.button("🔄 Reset Tool", help="Clear all inputs and results"):
     keys_to_clear = ['mass_assess_result', 'mass_assess_filename']
     for key in keys_to_clear:
@@ -50,95 +48,145 @@ if st.button("🔄 Reset Tool", help="Clear all inputs and results"):
             del st.session_state[key]
     st.rerun()
 
-col1, col2 = st.columns(2)
+flow_col1, arrow1, flow_col2, arrow2, flow_col3 = st.columns([2, 0.3, 2, 0.3, 2])
 
-with col1:
-    st.markdown("### Pipe Properties")
-    do = st.number_input("Outside Diameter (mm)", min_value=0.0, value=273.1, step=0.1)
-    tp = st.number_input("Wall Thickness (mm)", min_value=0.0, value=9.27, step=0.01)
-    YS = st.number_input("Yield Strength (MPa)", min_value=0.0, value=359.0, step=1.0)
-    TS = st.number_input("Tensile Strength (MPa)", min_value=0.0, value=455.0, step=1.0)
+with flow_col1:
+    st.markdown("""
+    <div style="text-align: center; padding: 0.6rem; background: linear-gradient(135deg, #e3f2fd 0%, #bbdefb 100%); 
+                border-radius: 12px; border: 2px solid #1976d2; margin-bottom: 0.5rem;">
+        <div style="font-size: 1.5rem;">📁 <strong>1. UPLOAD</strong></div>
+    </div>
+    """, unsafe_allow_html=True)
+    uploaded_file = st.file_uploader("Excel file", type=["xlsx", "xls"], key="upload_flow", label_visibility="collapsed")
+    if uploaded_file:
+        st.caption(f"✓ {uploaded_file.name}")
 
-with col2:
-    st.markdown("### ILI & Growth Parameters")
-    depth_tol = st.number_input("Depth Tolerance (%)", min_value=0.0, value=10.0, step=0.1)
-    length_tol = st.number_input("Length Tolerance (mm)", min_value=0.0, value=0.0, step=1.0)
-    depth_cr = st.number_input("Depth Corrosion Rate (mm/yr)", min_value=0.0, value=4.0, step=0.1, help="Default: 4.0 mm/year")
-    length_cr = st.number_input("Length Corrosion Rate (mm/yr)", min_value=0.0, value=25.0, step=1.0, help="Default: 25.0 mm/year")
-    start_year = st.number_input("ILI Run Year", min_value=1900, max_value=2100, value=datetime.now().year)
+with arrow1:
+    st.markdown("<div style='text-align: center; padding-top: 2rem; font-size: 1.5rem;'>→</div>", unsafe_allow_html=True)
 
-st.markdown("---")
-st.subheader("📁 Upload Data")
-uploaded_file = st.file_uploader("Choose an Excel file", type=["xlsx", "xls"])
-
-if uploaded_file:
-    st.success(f"File '{uploaded_file.name}' uploaded successfully!")
-    
-    if st.button("🚀 Run Mass Assessment", type="primary", use_container_width=True):
-        with st.spinner("⏳ Processing features... This may take a moment for large files."):
+with flow_col2:
+    st.markdown("""
+    <div style="text-align: center; padding: 0.6rem; background: linear-gradient(135deg, #fff3e0 0%, #ffe0b2 100%); 
+                border-radius: 12px; border: 2px solid #e65100; margin-bottom: 0.5rem;">
+        <div style="font-size: 1.5rem;">⚙️ <strong>2. CALCULATE</strong></div>
+    </div>
+    """, unsafe_allow_html=True)
+    with st.expander("Parameters", expanded=not uploaded_file):
+        p1, p2 = st.columns(2)
+        with p1:
+            do = st.number_input("Outside Diameter (mm)", min_value=0.0, value=273.1, step=0.1)
+            tp = st.number_input("Wall Thickness (mm)", min_value=0.0, value=9.27, step=0.01)
+            YS = st.number_input("Yield Strength (MPa)", min_value=0.0, value=359.0, step=1.0)
+            TS = st.number_input("Tensile Strength (MPa)", min_value=0.0, value=455.0, step=1.0)
+        with p2:
+            depth_tol = st.number_input("Depth Tolerance (%)", min_value=0.0, value=10.0, step=0.1)
+            length_tol = st.number_input("Length Tolerance (mm)", min_value=0.0, value=0.0, step=1.0)
+            depth_cr = st.number_input("Depth CR (mm/yr)", min_value=0.0, value=4.0, step=0.1)
+            length_cr = st.number_input("Length CR (mm/yr)", min_value=0.0, value=25.0, step=1.0)
+            start_year = st.number_input("ILI Run Year", min_value=1900, max_value=2100, value=datetime.now().year)
+    run_clicked = st.button("🚀 Run Mass Assessment", type="primary", use_container_width=True, disabled=uploaded_file is None)
+    if run_clicked and uploaded_file:
+        with st.spinner("⏳ Processing..."):
             try:
-                # Prepare files and data
                 files = {"file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)}
                 data = {
-                    "do": do,
-                    "tp": tp,
-                    "YS": YS,
-                    "TS": TS,
-                    "depth_tolerance": depth_tol,
-                    "length_tolerance": length_tol,
-                    "depth_cr": depth_cr,
-                    "length_cr": length_cr,
-                    "start_year": int(start_year)
+                    "do": do, "tp": tp, "YS": YS, "TS": TS,
+                    "depth_tolerance": depth_tol, "length_tolerance": length_tol,
+                    "depth_cr": depth_cr, "length_cr": length_cr, "start_year": int(start_year)
                 }
-                
-                # Call the API
                 with httpx.Client(timeout=600.0) as client:
-                    response = client.post(
-                        f"{BACKEND_URL}/api/pipeline/metal-loss/mass-assess",
-                        files=files,
-                        data=data,
-                    )
-                
+                    response = client.post(f"{BACKEND_URL}/api/pipeline/metal-loss/mass-assess", files=files, data=data)
                 if response.status_code == 200:
                     st.session_state['mass_assess_result'] = response.content
                     st.session_state['mass_assess_filename'] = f"Mass_Metal_Loss_Assessment_{datetime.now().strftime('%Y%m%d')}.xlsx"
-                    st.success("✅ Mass assessment completed successfully!")
+                    st.success("✅ Done!")
                 else:
                     try:
-                        error_detail = response.json().get("detail", "Unknown error")
-                    except:
-                        error_detail = response.text
-                    st.error(f"❌ Error processing assessment: {error_detail}")
-                    
+                        err = response.json().get("detail", response.text)
+                    except Exception:
+                        err = response.text
+                    st.error(f"❌ {err}")
             except Exception as e:
-                st.error(f"❌ An error occurred: {str(e)}")
+                st.error(str(e))
 
-    # Show download button if result is in session state
+with arrow2:
+    st.markdown("<div style='text-align: center; padding-top: 2rem; font-size: 1.5rem;'>→</div>", unsafe_allow_html=True)
+
+with flow_col3:
+    st.markdown("""
+    <div style="text-align: center; padding: 0.6rem; background: linear-gradient(135deg, #e8f5e9 0%, #c8e6c9 100%); 
+                border-radius: 12px; border: 2px solid #2e7d32; margin-bottom: 0.5rem;">
+        <div style="font-size: 1.5rem;">📥 <strong>3. DOWNLOAD</strong></div>
+    </div>
+    """, unsafe_allow_html=True)
     if 'mass_assess_result' in st.session_state:
-        st.markdown("---")
-        st.subheader("📥 Results")
         st.download_button(
-            label="💾 Download Assessment Results (.xlsx)",
+            label="💾 Download Results (.xlsx)",
             data=st.session_state['mass_assess_result'],
             file_name=st.session_state['mass_assess_filename'],
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
             key="download_mass_assess"
         )
-        st.info("💡 The results will stay here until you click 'Reset Tool' or refresh the page manually.")
+    else:
+        st.caption("Run assessment to download")
+
+# --- Equation & Calculation Logic ---
+with st.expander("📐 **Equation & Calculation Logic**", expanded=False):
+    st.markdown("""
+    ### Modified B31G Methodology
+    
+    The tool uses **Modified B31G** to compute failure pressure (Pf) for each defect at each year.
+    
+    #### Step 1: Apply Tolerances
+    ```
+    dimp_0 = (depth_percent + depth_tolerance) × 0.01 × tp   [mm]
+    Limp_0 = length_raw + length_tolerance                    [mm]
+    ```
+    
+    #### Step 2: Defect Growth (per year i = 0 to 9)
+    ```
+    dimp_t = dimp_0 + (i × depth_cr)    [mm]
+    Limp_t = Limp_0 + (i × length_cr)   [mm]
+    ```
+    
+    #### Step 3: Normalized Parameters
+    ```
+    z = L² / (do × tp)     (defect length factor)
+    d/t = dimp / tp        (depth ratio)
+    ```
+    
+    #### Step 4: Flow Stress & Folias Factor
+    ```
+    Sflow = YS + 69 MPa
+    ```
+    - **If z ≤ 50**:  M = √(1 + 0.6275z - 0.003375z²)
+    - **If z > 50**:  M = 0.032z + 3.3
+    
+    #### Step 5: Remaining Strength & Failure Pressure
+    ```
+    Rs = (1 - 0.85×d/t) / (1 - 0.85×d/t / M)
+    Po = 2 × Sflow / (do/tp)
+    Pf = Po × Rs × 1000  [kPa]  →  Pf_psi = Pf × 0.14503774
+    ```
+    
+    #### Step 6: >80% Limit
+    When **dimp/tp > 0.80**, the result shows **">80% leak"** (beyond B31G applicability).
+    
+    ---
+    *Full documentation: `docs/functions/METAL_LOSS_MASS_ASSESSMENT.md`*
+    """)
 
 # Help section
 with st.expander("ℹ️ Help & Instructions"):
     st.markdown("""
-    ### How to use this tool:
-    1. **Input Pipe Properties**: Enter the outside diameter, wall thickness, and material strengths.
-    2. **Set Tolerances and Growth Rates**: 
-       - **Depth Tolerance**: Tool accuracy for depth (usually 10% WT).
-       - **Length Tolerance**: Tool accuracy for length (usually 0 mm).
-       - **Corrosion Rates**: The annual growth of the defect in depth and length.
-    3. **Upload Excel**: Your Excel file should have columns named like **'depth'** (or 'defect depth') and **'length'** (or 'defect length').
-    4. **Run Assessment**: The tool will generate 10 new columns (one for each year) with the calculated failure pressure (Pf) in psi.
-    5. **Leak Warning**: If a defect's depth exceeds 80% of the wall thickness in a given year, the result will show **'>80% leak'**.
+    **Step 1 – Upload:** Excel file with depth and length columns (e.g. `depth`, `Depth (%)`, `length`, `Length (mm)`).
+
+    **Step 2 – Calculate:** Open Parameters to set pipe specs, tolerances, and corrosion rates, then click Run.
+
+    **Step 3 – Download:** After the run completes, download the results Excel with 10 years of Pf (psi) per feature.
+
+    **Note:** If depth exceeds 80% wall thickness in a year, that cell shows `>80% leak`.
     """)
 
 # Footer

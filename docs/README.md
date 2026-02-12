@@ -18,6 +18,7 @@ Welcome to the comprehensive documentation for **Chen's Engineer Toolbox**.
 - [**functions/DASHBOARD.md**](functions/DASHBOARD.md) - Dashboard functionality guide
 - [**functions/FACILITY.md**](functions/FACILITY.md) - Facility tools development guide
 - [**functions/BACKEND_API.md**](functions/BACKEND_API.md) - Backend API development guide
+- [**functions/METAL_LOSS_MASS_ASSESSMENT.md**](functions/METAL_LOSS_MASS_ASSESSMENT.md) - Metal Loss Mass Assessment calculation logic
 - [**functions/FRONTEND_COMPONENTS.md**](functions/FRONTEND_COMPONENTS.md) - Frontend components guide
 
 ### 🚀 User Guides

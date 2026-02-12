@@ -14,6 +14,10 @@ python -m uvicorn backend.main:app --reload
 
 ### Terminal 2: Start Frontend
 ```bash
+# From project root (all platforms):
+streamlit run frontend/Home.py
+
+# Or from frontend directory:
 # macOS/Linux/Git Bash:
 cd frontend && python -m streamlit run Home.py
 
@@ -91,12 +95,14 @@ Sidebar Navigation:
 │   └─ ⚙️ TML Data Loader
 └─ 🛢️ Pipeline ▶️ (click to expand)
     ├─ 📊 ILI Visual Tool
-    └─ 🔬 Metal Loss Assessment
+    ├─ 🔬 Metal Loss Assessment
+    ├─ 📉 Metal Loss Mass Assessment
+    └─ 📦 Dig Package Generator
 ```
 
 ---
 
 ## 📚 Need More Help?
 
-See **[QUICK_START.md](QUICK_START.md)** for detailed instructions and troubleshooting.
+See **[README.md](README.md)** for full documentation and [docs/DEVELOPMENT_GUIDE.md](docs/DEVELOPMENT_GUIDE.md) for detailed setup.
 
