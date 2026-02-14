@@ -42,7 +42,12 @@ st.subheader("📊 Process Flow")
 
 # Reset button - compact
 if st.button("🔄 Reset Tool", help="Clear all inputs and results"):
-    keys_to_clear = ['mass_assess_result', 'mass_assess_filename']
+    keys_to_clear = [
+        'mass_assess_result', 'mass_assess_filename',
+        'mass_do', 'mass_tp', 'mass_YS', 'mass_TS',
+        'mass_depth_tol', 'mass_length_tol', 'mass_depth_cr', 'mass_length_cr',
+        'mass_start_year', 'mass_verified'
+    ]
     for key in keys_to_clear:
         if key in st.session_state:
             del st.session_state[key]
@@ -71,43 +76,57 @@ with flow_col2:
         <div style="font-size: 1.5rem;">⚙️ <strong>2. CALCULATE</strong></div>
     </div>
     """, unsafe_allow_html=True)
-    with st.expander("Parameters", expanded=not uploaded_file):
-        p1, p2 = st.columns(2)
-        with p1:
-            do = st.number_input("Outside Diameter (mm)", min_value=0.0, value=273.1, step=0.1)
-            tp = st.number_input("Wall Thickness (mm)", min_value=0.0, value=9.27, step=0.01)
-            YS = st.number_input("Yield Strength (MPa)", min_value=0.0, value=359.0, step=1.0)
-            TS = st.number_input("Tensile Strength (MPa)", min_value=0.0, value=455.0, step=1.0)
-        with p2:
-            depth_tol = st.number_input("Depth Tolerance (%)", min_value=0.0, value=10.0, step=0.1)
-            length_tol = st.number_input("Length Tolerance (mm)", min_value=0.0, value=0.0, step=1.0)
-            depth_cr = st.number_input("Depth CR (mm/yr)", min_value=0.0, value=4.0, step=0.1)
-            length_cr = st.number_input("Length CR (mm/yr)", min_value=0.0, value=25.0, step=1.0)
-            start_year = st.number_input("ILI Run Year", min_value=1900, max_value=2100, value=datetime.now().year)
-    run_clicked = st.button("🚀 Run Mass Assessment", type="primary", use_container_width=True, disabled=uploaded_file is None)
-    if run_clicked and uploaded_file:
-        with st.spinner("⏳ Processing..."):
-            try:
-                files = {"file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)}
-                data = {
-                    "do": do, "tp": tp, "YS": YS, "TS": TS,
-                    "depth_tolerance": depth_tol, "length_tolerance": length_tol,
-                    "depth_cr": depth_cr, "length_cr": length_cr, "start_year": int(start_year)
-                }
-                with httpx.Client(timeout=600.0) as client:
-                    response = client.post(f"{BACKEND_URL}/api/pipeline/metal-loss/mass-assess", files=files, data=data)
-                if response.status_code == 200:
-                    st.session_state['mass_assess_result'] = response.content
-                    st.session_state['mass_assess_filename'] = f"Mass_Metal_Loss_Assessment_{datetime.now().strftime('%Y%m%d')}.xlsx"
-                    st.success("✅ Done!")
-                else:
+
+    @st.fragment
+    def params_and_run():
+        """Fragment: parameter changes only rerun this block, not the whole page."""
+        with st.expander("Parameters", expanded=not uploaded_file):
+            p1, p2 = st.columns(2)
+            with p1:
+                do = st.number_input("Outside Diameter (mm)", min_value=0.0, value=273.1, step=0.1, key="mass_do")
+                tp = st.number_input("Wall Thickness (mm)", min_value=0.0, value=9.27, step=0.01, key="mass_tp")
+                YS = st.number_input("Yield Strength (MPa)", min_value=0.0, value=359.0, step=1.0, key="mass_YS")
+                TS = st.number_input("Tensile Strength (MPa)", min_value=0.0, value=455.0, step=1.0, key="mass_TS")
+            with p2:
+                depth_tol = st.number_input("Depth Tolerance (%)", min_value=0.0, value=10.0, step=0.1, key="mass_depth_tol")
+                length_tol = st.number_input("Length Tolerance (mm)", min_value=0.0, value=0.0, step=1.0, key="mass_length_tol")
+                depth_cr = st.number_input("Depth CR (mm/yr)", min_value=0.0, value=4.0, step=0.1, key="mass_depth_cr")
+                length_cr = st.number_input("Length CR (mm/yr)", min_value=0.0, value=25.0, step=1.0, key="mass_length_cr")
+                start_year = st.number_input("ILI Run Year", min_value=1900, max_value=2100, value=datetime.now().year, key="mass_start_year")
+            st.caption("⚠️ Verify all parameters above, then check the box and click the button to run.")
+            verified = st.checkbox("I have verified the parameters and am ready to run", value=False, key="mass_verified")
+            run_clicked = st.button("🚀 Run Mass Assessment", type="primary", use_container_width=True, key="mass_run_btn")
+        if run_clicked:
+            if not uploaded_file:
+                st.warning("⚠️ Please upload an Excel file first.")
+            elif not verified:
+                st.warning("⚠️ Please check the box to confirm you have verified the parameters before running.")
+            elif verified:
+                with st.spinner("⏳ Processing..."):
                     try:
-                        err = response.json().get("detail", response.text)
-                    except Exception:
-                        err = response.text
-                    st.error(f"❌ {err}")
-            except Exception as e:
-                st.error(str(e))
+                        files = {"file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)}
+                        data = {
+                            "do": do, "tp": tp, "YS": YS, "TS": TS,
+                            "depth_tolerance": depth_tol, "length_tolerance": length_tol,
+                            "depth_cr": depth_cr, "length_cr": length_cr, "start_year": int(start_year)
+                        }
+                        with httpx.Client(timeout=600.0) as client:
+                            response = client.post(f"{BACKEND_URL}/api/pipeline/metal-loss/mass-assess", files=files, data=data)
+                        if response.status_code == 200:
+                            st.session_state['mass_assess_result'] = response.content
+                            st.session_state['mass_assess_filename'] = f"Mass_Metal_Loss_Assessment_{datetime.now().strftime('%Y%m%d')}.xlsx"
+                            st.success("✅ Done!")
+                            st.rerun()
+                        else:
+                            try:
+                                err = response.json().get("detail", response.text)
+                            except Exception:
+                                err = response.text
+                            st.error(f"❌ {err}")
+                    except Exception as e:
+                        st.error(str(e))
+
+    params_and_run()
 
 with arrow2:
     st.markdown("<div style='text-align: center; padding-top: 2rem; font-size: 1.5rem;'>→</div>", unsafe_allow_html=True)

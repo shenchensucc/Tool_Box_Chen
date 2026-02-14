@@ -1,3 +1,4 @@
+import asyncio
 import os
 import shutil
 import tempfile
@@ -8,6 +9,9 @@ from pathlib import Path
 from typing import Dict, List
 
 import numpy as np
+from backend.logging_config import get_logger, log_params, log_error
+
+logger = get_logger("backend.main")
 import pandas as pd
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -197,6 +201,7 @@ async def preview_excel(file: UploadFile = File(...)):
     """
     Preview an Excel file and return sheet names, columns, and row counts
     """
+    log_params(logger, "ili/preview", {"filename": file.filename, "content_type": file.content_type})
     validate_excel_file(file)
 
     temp_path = save_temp_file(file)
@@ -216,6 +221,7 @@ async def preview_excel(file: UploadFile = File(...)):
 
         wb.close()
 
+        logger.info(f"[ili/preview] Processed: {len(sheet_names)} sheets, row_counts={row_counts}")
         return PreviewResponse(
             filename=file.filename,
             sheet_names=sheet_names,
@@ -224,6 +230,7 @@ async def preview_excel(file: UploadFile = File(...)):
         )
 
     except Exception as e:
+        log_error(logger, "ili/preview", e)
         raise HTTPException(status_code=400, detail=f"Error reading Excel file: {str(e)}")
     finally:
         # Clean up temp file
@@ -242,6 +249,13 @@ async def process_ili_data(
     """
     Process ILI data from Excel file and return statistics and plot data
     """
+    log_params(logger, "ili/process", {
+        "filename": file.filename,
+        "sheet_name": sheet_name,
+        "distance_column": distance_column,
+        "depth_column": depth_column,
+        "metal_loss_column": metal_loss_column,
+    })
     validate_excel_file(file)
 
     temp_path = save_temp_file(file)
@@ -301,6 +315,10 @@ async def process_ili_data(
 
             scatter_data["y_data"] = y_data
 
+        logger.info(
+            f"[ili/process] Processed: sheet={sheet_name}, total_rows={len(df)}, "
+            f"stats_columns={list(stats.keys())}, histograms={len(histograms)}"
+        )
         return ProcessResponse(
             filename=file.filename,
             sheet_name=sheet_name,
@@ -313,6 +331,7 @@ async def process_ili_data(
     except HTTPException:
         raise
     except Exception as e:
+        log_error(logger, "ili/process", e)
         raise HTTPException(status_code=400, detail=f"Error processing Excel file: {str(e)}")
     finally:
         # Clean up temp file
@@ -337,6 +356,11 @@ async def process_tml_data(
     Returns:
         JSON with tokens to download ZIP file and combined file separately
     """
+    log_params(logger, "tml/process", {
+        "source_filename": source_file.filename,
+        "template_filename": template_file.filename,
+        "workflows_raw": workflows,
+    })
     # Validate file types and sizes
     validate_excel_file(source_file)
     validate_excel_file(template_file)
@@ -375,7 +399,7 @@ async def process_tml_data(
         # Read source data and filter
         try:
             source = file_handler.read_excel("source", "Source_Data")
-            print(f"Source data shape: {source.shape}")
+            logger.info(f"[tml/process] Source data shape: {source.shape}")
         except Exception as e:
             raise HTTPException(
                 status_code=400, 
@@ -391,7 +415,7 @@ async def process_tml_data(
         
         # Filter source data for AER_Status_CML with value "Yes"
         source = source[source["AER_Status_CML"].str.contains("Yes", na=False)].copy()
-        print(f"Filtered source data shape: {source.shape}")
+        logger.info(f"[tml/process] Filtered source data shape: {source.shape}")
         
         if source.empty:
             raise HTTPException(
@@ -443,7 +467,7 @@ async def process_tml_data(
         
         for workflow_id in workflow_ids:
             if workflow_id not in workflow_map:
-                print(f"Warning: Invalid workflow ID {workflow_id}, skipping")
+                logger.warning(f"[tml/process] Invalid workflow ID {workflow_id}, skipping")
                 workflow_summary[workflow_id] = 0
                 continue
             
@@ -451,18 +475,18 @@ async def process_tml_data(
             output_file = file_handler.output_files[file_key]
             
             try:
-                print(f"\nProcessing workflow {workflow_id}...")
+                logger.info(f"[tml/process] Processing workflow {workflow_id}...")
                 records_count, result_file = process_func(source, loader_Assets, loader_TML, output_file)
                 workflow_summary[workflow_id] = records_count
                 
                 # Only add to processed_files if records were actually added
                 if result_file and records_count > 0:
                     processed_files.append(result_file)
-                    print(f"Workflow {workflow_id}: Added {records_count} records")
+                    logger.info(f"[tml/process] Workflow {workflow_id}: Added {records_count} records")
                 else:
-                    print(f"Workflow {workflow_id}: No records to add, skipping file creation")
+                    logger.info(f"[tml/process] Workflow {workflow_id}: No records to add, skipping file creation")
             except Exception as e:
-                print(f"Error processing workflow {workflow_id}: {str(e)}")
+                log_error(logger, f"tml/process workflow {workflow_id}", e)
                 workflow_summary[workflow_id] = 0
                 # Continue with other workflows even if one fails
         
@@ -496,6 +520,10 @@ async def process_tml_data(
         TML_FILE_STORAGE[zip_token] = str(zip_path)
         TML_FILE_STORAGE[combined_token] = str(combined_path)
         
+        logger.info(
+            f"[tml/process] Completed: {len(processed_files)} workflows, "
+            f"workflow_summary={workflow_summary}"
+        )
         # Return tokens and metadata
         return TMLProcessResponse(
             success=True,
@@ -510,6 +538,7 @@ async def process_tml_data(
     except HTTPException:
         raise
     except Exception as e:
+        log_error(logger, "tml/process", e)
         raise HTTPException(status_code=500, detail=f"Error processing TML data: {str(e)}")
 
 
@@ -580,6 +609,15 @@ async def assess_metal_loss(
     Returns:
         JSON with assessment results including depth/pressure arrays
     """
+    log_params(logger, "metal-loss/assess", {
+        "do": do, "tp": tp, "YS": YS, "TS": TS,
+        "dimp_org_percent": dimp_org_percent, "Limp_org": Limp_org,
+        "date_ILI": date_ILI, "ILI_dimp_tolerance": ILI_dimp_tolerance,
+        "ILI_Limp_tolerance": ILI_Limp_tolerance,
+        "CR_low": CR_low, "CR_ave": CR_ave, "CR_high": CR_high,
+        "month_CR": month_CR, "feature_ID": feature_ID,
+        "vendor_ILI": vendor_ILI, "CR_Limp": CR_Limp,
+    })
     try:
         results = assess_metal_loss_feature(
             do=do,
@@ -599,8 +637,10 @@ async def assess_metal_loss(
             vendor_ILI=vendor_ILI,
             CR_Limp=CR_Limp
         )
+        logger.info(f"[metal-loss/assess] Success for feature_ID={feature_ID}")
         return results
     except Exception as e:
+        log_error(logger, "metal-loss/assess", e)
         raise HTTPException(status_code=400, detail=f"Error in assessment: {str(e)}")
 
 
@@ -620,12 +660,19 @@ async def mass_assess_metal_loss_endpoint(
     """
     Mass assess metal loss features from an Excel file.
     """
+    log_params(logger, "metal-loss/mass-assess", {
+        "filename": file.filename,
+        "do": do, "tp": tp, "YS": YS, "TS": TS,
+        "depth_tolerance": depth_tolerance, "length_tolerance": length_tolerance,
+        "depth_cr": depth_cr, "length_cr": length_cr, "start_year": start_year,
+    })
     validate_excel_file(file)
     temp_input = save_temp_file(file)
     
     try:
         # Read Excel using the centralized ILI reader
         df = read_ili_data(temp_input)
+        logger.info(f"[metal-loss/mass-assess] Read {len(df)} rows from Excel")
         
         # Process
         df_result = mass_assess_metal_loss(
@@ -641,6 +688,7 @@ async def mass_assess_metal_loss_endpoint(
             start_year=start_year
         )
         
+        logger.info(f"[metal-loss/mass-assess] Processed {len(df_result)} rows, output columns={list(df_result.columns)}")
         # Save to temporary Excel file
         with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp:
             df_result.to_excel(tmp.name, index=False)
@@ -679,6 +727,12 @@ async def export_word_report(
     Returns:
         Word document (.docx) file
     """
+    log_params(logger, "metal-loss/export-word", {
+        "assessment_results_len": len(assessment_results) if assessment_results else 0,
+        "depth_growth_chart": depth_growth_chart.filename,
+        "sop_decay_chart": sop_decay_chart.filename,
+        "sop_cutoff_chart": sop_cutoff_chart.filename,
+    })
     try:
         import json
         
@@ -692,14 +746,15 @@ async def export_word_report(
             'sop_cutoff': await sop_cutoff_chart.read()
         }
         
-        # Generate Word document
-        doc_bytes = generate_word_report(results, chart_images)
+        # Generate Word document (run in thread pool to avoid blocking async event loop)
+        doc_bytes = await asyncio.to_thread(generate_word_report, results, chart_images)
         
         # Create temporary file
         with tempfile.NamedTemporaryFile(delete=False, suffix='.docx') as tmp:
             tmp.write(doc_bytes)
             tmp_path = tmp.name
         
+        logger.info("[metal-loss/export-word] Word report generated successfully")
         # Return file
         return FileResponse(
             path=tmp_path,
@@ -708,9 +763,11 @@ async def export_word_report(
             headers={"Content-Disposition": f"attachment; filename=Metal_Loss_Assessment_{datetime.now().strftime('%Y%m%d_%H%M%S')}.docx"}
         )
     
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
+        log_error(logger, "metal-loss/export-word (JSON decode)", e)
         raise HTTPException(status_code=400, detail="Invalid assessment results JSON")
     except Exception as e:
+        log_error(logger, "metal-loss/export-word", e)
         raise HTTPException(status_code=500, detail=f"Error generating report: {str(e)}")
 
 
@@ -725,6 +782,14 @@ async def generate_dig_package_endpoint(
     """
     Generate dig packages from MDL, multiple ILI data files, and template files.
     """
+    log_params(logger, "dig-package/generate", {
+        "mdl_filename": mdl_file.filename,
+        "ili_count": len(ili_files),
+        "ili_filenames": [f.filename for f in ili_files],
+        "template_filename": template_file.filename,
+        "revision": revision,
+        "ili_formats": ili_formats,
+    })
     try:
         # Validate file sizes
         validate_file_size(mdl_file)
@@ -742,6 +807,7 @@ async def generate_dig_package_endpoint(
             
         # Parse formats
         formats_list = ili_formats.split(",") if ili_formats else ["Rosen-MFLA"] * len(ili_files)
+        logger.info(f"[dig-package/generate] Parsed: {len(ili_contents)} ILI files, formats={formats_list}")
 
         # Generate dig packages
         from backend.pipeline.dig_package import generate_dig_packages
@@ -754,6 +820,7 @@ async def generate_dig_package_endpoint(
             ili_formats=formats_list
         )
         
+        logger.info("[dig-package/generate] Dig packages generated successfully")
         # Create temporary file for ZIP
         with tempfile.NamedTemporaryFile(delete=False, suffix='.zip') as tmp:
             tmp.write(zip_buffer.getvalue())
@@ -769,8 +836,7 @@ async def generate_dig_package_endpoint(
         )
 
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        log_error(logger, "dig-package/generate", e)
         raise HTTPException(status_code=500, detail=f"Error generating dig packages: {str(e)}")
 
 

@@ -911,10 +911,10 @@ if st.session_state.get('assessment_complete', False):
     if st.button("📄 Generate Word Report", key="generate_word", type="primary", use_container_width=True):
         with st.spinner("⏳ Generating Word document..."):
             try:
-                # Save Plotly charts as PNG images using our fallback function
-                depth_img = export_plot_as_image(fig_depth, format="png", width=1200, height=600)
-                sop_img = export_plot_as_image(fig_sop, format="png", width=1200, height=600)
-                cutoff_img = export_plot_as_image(fig_cutoff, format="png", width=1200, height=600)
+                # Save Plotly charts as PNG images (800x400 is sufficient for Word report, faster than 1200x600)
+                depth_img = export_plot_as_image(fig_depth, format="png", width=800, height=400)
+                sop_img = export_plot_as_image(fig_sop, format="png", width=800, height=400)
+                cutoff_img = export_plot_as_image(fig_cutoff, format="png", width=800, height=400)
                 
                 # Check if any image export failed
                 if not any([depth_img, sop_img, cutoff_img]):
@@ -924,23 +924,20 @@ if st.session_state.get('assessment_complete', False):
                     sop_img = sop_img or b''
                     cutoff_img = cutoff_img or b''
                 
-                # Prepare files for upload
-                files = {
-                    'depth_growth_chart': ('depth_growth.png', io.BytesIO(depth_img), 'image/png'),
-                    'sop_decay_chart': ('sop_decay.png', io.BytesIO(sop_img), 'image/png'),
-                    'sop_cutoff_chart': ('sop_cutoff.png', io.BytesIO(cutoff_img), 'image/png')
-                }
-                
-                data_form = {
-                    'assessment_results': json.dumps(results)
-                }
+                # Prepare multipart: form field + files (same format as dig-package for reliability)
+                # Use raw bytes for file content - some clients have issues with BytesIO
+                multipart = [
+                    ("assessment_results", (None, json.dumps(results, default=str))),
+                    ("depth_growth_chart", ("depth_growth.png", depth_img or b"", "image/png")),
+                    ("sop_decay_chart", ("sop_decay.png", sop_img or b"", "image/png")),
+                    ("sop_cutoff_chart", ("sop_cutoff.png", cutoff_img or b"", "image/png")),
+                ]
                 
                 # Call export API
                 with httpx.Client(timeout=120.0) as client:
                     export_response = client.post(
                         f"{BACKEND_URL}/api/pipeline/metal-loss/export-word",
-                        files=files,
-                        data=data_form
+                        files=multipart
                     )
                 
                 if export_response.status_code == 200:

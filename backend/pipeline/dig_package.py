@@ -25,6 +25,9 @@ from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from backend.pipeline.ili_reader import find_column_names, identify_ili_columns, COLUMN_KEYWORDS as GLOBAL_KEYWORDS
+from backend.logging_config import get_logger
+
+logger = get_logger("backend.pipeline.dig_package")
 
 
 # ============================================================================
@@ -137,7 +140,7 @@ def get_cell_from_named_range(workbook, range_name: str):
         sheet = workbook[sheet_name]
         return sheet[cell_address]
     except Exception as e:
-        print(f"Error getting named range '{range_name}': {e}")
+        logger.debug(f"Error getting named range '{range_name}': {e}")
         return None
 
 
@@ -629,10 +632,10 @@ def convert_excel_to_pdf(excel_path: str, pdf_path: str) -> bool:
         # Fallback: Copy Excel as PDF placeholder
         # Note: This won't create actual PDF, just copy the Excel
         # For production, consider weasyprint or reportlab
-        print(f"Warning: win32com not available. PDF conversion skipped for {excel_path}")
+        logger.warning(f"win32com not available. PDF conversion skipped for {excel_path}")
         return False
     except Exception as e:
-        print(f"Error converting Excel to PDF: {e}")
+        logger.error(f"Error converting Excel to PDF: {type(e).__name__}: {e}")
         return False
 
 
@@ -746,11 +749,13 @@ def generate_dig_packages(mdl_content: bytes, ili_contents: List[bytes], templat
         BytesIO object containing the ZIP file
     """
     # Parse MDL
+    logger.info(f"generate_dig_packages: Parsing MDL, {len(ili_contents)} ILI files, formats={ili_formats}")
     mdl_df, mdl_col_map = parse_mdl_file(mdl_content)
+    logger.debug(f"MDL columns mapped: {list(mdl_col_map.keys())}")
     
     # Parse all ILI files
     ili_data_parsed = []
-    for content, v_format in zip(ili_contents, ili_formats):
+    for i, (content, v_format) in enumerate(zip(ili_contents, ili_formats)):
         try:
             df, col_map, sheet = parse_ili_file(content, v_format)
             ili_data_parsed.append({
@@ -758,15 +763,19 @@ def generate_dig_packages(mdl_content: bytes, ili_contents: List[bytes], templat
                 "col_map": col_map,
                 "format": v_format
             })
+            logger.info(f"ILI file {i+1} ({v_format}): sheet={sheet}, shape={df.shape}")
         except Exception as e:
-            print(f"Error parsing ILI file ({v_format}): {e}")
+            logger.error(f"Error parsing ILI file ({v_format}): {type(e).__name__}: {e}")
     
     if not ili_data_parsed:
+        logger.error("No ILI files could be parsed successfully")
         raise ValueError("No ILI files could be parsed successfully")
 
     # Extract dig IDs
     dig_ids = extract_dig_ids(mdl_df, mdl_col_map)
+    logger.info(f"Extracted {len(dig_ids)} dig IDs: {dig_ids[:5]}..." if len(dig_ids) > 5 else f"Extracted dig IDs: {dig_ids}")
     if not dig_ids:
+        logger.error("No valid Dig IDs found in MDL file")
         raise ValueError("No valid Dig IDs found in MDL file")
         
     # Create temporary directory for files
@@ -843,5 +852,7 @@ def generate_dig_packages(mdl_content: bytes, ili_contents: List[bytes], templat
                     zip_file.write(file_path, file_path.name)
         
         zip_buffer.seek(0)
+        file_count = len([f for f in temp_path.glob("*") if f.is_file()])
+        logger.info(f"generate_dig_packages: Created ZIP with {file_count} files for {len(dig_ids)} dig IDs")
         return zip_buffer
 

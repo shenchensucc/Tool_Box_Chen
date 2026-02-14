@@ -5,6 +5,9 @@ import numpy as np
 import pandas as pd
 from typing import Dict, List, Optional, Union
 from backend.pipeline.ili_reader import identify_ili_columns
+from backend.logging_config import get_logger
+
+logger = get_logger("backend.pipeline.metal_loss")
 
 
 def calculate_folias_factor(
@@ -414,10 +417,10 @@ def mass_assess_metal_loss(
     feature_id_col = ili_cols.get("feature_id")
     
     if not depth_col or not length_col:
+        logger.error(f"Required columns (depth, length) not found. Found: {list(df.columns)}")
         raise ValueError(f"Required columns (depth, length) not found in Excel file. Found: {list(df.columns)}")
 
-    # Log which columns were found
-    print(f"Using depth column: '{depth_col}', length column: '{length_col}', feature id column: '{feature_id_col}'")
+    logger.info(f"Using depth column: '{depth_col}', length column: '{length_col}', feature id column: '{feature_id_col}'")
     
     # 2. Create working copy and initialize result columns
     df_result = df.copy()
@@ -437,9 +440,8 @@ def mass_assess_metal_loss(
     depth_raw = pd.to_numeric(df[depth_col], errors='coerce')
     length_raw = pd.to_numeric(df[length_col], errors='coerce')
     
-    # Log sample values for debugging
-    print(f"First 5 depth values: {depth_raw.head().tolist()}")
-    print(f"First 5 length values: {length_raw.head().tolist()}")
+    logger.debug(f"First 5 depth values: {depth_raw.head().tolist()}")
+    logger.debug(f"First 5 length values: {length_raw.head().tolist()}")
     
     # Valid mask: both depth and length must be > 0 and not NaN
     valid_mask = (depth_raw.notna()) & (depth_raw > 0) & \
@@ -449,16 +451,15 @@ def mass_assess_metal_loss(
     skipped_mask = ~valid_mask
     if skipped_mask.any():
         skipped_indices = df[skipped_mask].index.tolist()
-        print(f"Skipping {skipped_mask.sum()} rows with 0/empty depth or length at indices: {skipped_indices[:10]}...")
-        # Show the actual values being skipped
+        logger.info(f"Skipping {skipped_mask.sum()} rows with 0/empty depth or length at indices: {skipped_indices[:10]}...")
         for idx in skipped_indices[:5]:
-            print(f"  Row {idx}: depth={depth_raw.iloc[idx]}, length={length_raw.iloc[idx]}")
+            logger.debug(f"  Row {idx}: depth={depth_raw.iloc[idx]}, length={length_raw.iloc[idx]}")
     
-    print(f"Valid rows: {valid_mask.sum()} out of {len(df)}")
+    logger.info(f"Valid rows: {valid_mask.sum()} out of {len(df)}")
         
     # If no valid rows, return the dataframe as is
     if not valid_mask.any():
-        print("No valid rows found, returning empty results")
+        logger.warning("No valid rows found, returning empty results")
         return df_result
 
     # 4. Extract only valid data for calculation
@@ -467,7 +468,7 @@ def mass_assess_metal_loss(
     
     # Get indices of valid rows for logging
     valid_indices = df[valid_mask].index.tolist()
-    print(f"Processing {len(dimp_percent_vals)} valid features at indices: {valid_indices[:10]}...")
+    logger.info(f"Processing {len(dimp_percent_vals)} valid features at indices: {valid_indices[:10]}...")
     
     # Apply tool tolerances to valid data only
     dimp_0 = (dimp_percent_vals + depth_tolerance) * 0.01 * tp

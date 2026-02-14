@@ -2,10 +2,8 @@
 Word Document Report Generator for Metal Loss Assessment
 """
 import io
-import tempfile
 from datetime import datetime
-from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Union
 
 import pandas as pd
 from docx import Document
@@ -81,26 +79,43 @@ def add_data_table(doc: Document, title: str, df: pd.DataFrame, caption: str = "
         header_cells[i].text = str(col)
         header_cells[i].paragraphs[0].runs[0].font.bold = True
     
-    # Add data
-    for i, row in df.iterrows():
+    # Add data (use values for faster iteration than iterrows())
+    # Handle both Python float and numpy types for proper formatting
+    values = df.values
+    for i in range(len(df)):
         row_cells = table.rows[i + 1].cells
-        for j, value in enumerate(row):
+        for j, value in enumerate(values[i]):
             if pd.isna(value):
                 row_cells[j].text = ""
-            elif isinstance(value, float):
-                row_cells[j].text = f"{value:.2f}"
             else:
-                row_cells[j].text = str(value)
+                try:
+                    fval = float(value)
+                    if pd.isna(fval):
+                        row_cells[j].text = ""
+                    elif fval == int(fval):
+                        row_cells[j].text = str(int(fval))
+                    else:
+                        row_cells[j].text = f"{fval:.2f}"
+                except (TypeError, ValueError):
+                    row_cells[j].text = str(value)
     
     doc.add_paragraph()  # Add spacing
 
 
-def add_chart_image(doc: Document, image_path: str, title: str, width: float = 6.0):
-    """Add a chart image to the document."""
+def add_chart_image(doc: Document, image_data: Union[str, bytes], title: str, width: float = 6.0):
+    """Add a chart image to the document. image_data can be file path (str) or image bytes."""
     add_heading_with_style(doc, title, level=2)
     
+    # Skip empty/invalid image data
+    if isinstance(image_data, bytes) and len(image_data) == 0:
+        doc.add_paragraph("⚠️ Chart image was not available.")
+        doc.add_paragraph()
+        return
+    
     try:
-        doc.add_picture(image_path, width=Inches(width))
+        # Use BytesIO for in-memory images to avoid slow temp file I/O
+        stream = io.BytesIO(image_data) if isinstance(image_data, bytes) else image_data
+        doc.add_picture(stream, width=Inches(width))
         last_paragraph = doc.paragraphs[-1]
         last_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
     except Exception as e:
@@ -183,13 +198,9 @@ def generate_word_report(
     
     doc.add_page_break()
     
-    # Depth Growth Chart
+    # Depth Growth Chart (use bytes directly - no temp file I/O)
     if 'depth_growth' in chart_images and chart_images['depth_growth']:
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
-            tmp.write(chart_images['depth_growth'])
-            tmp_path = tmp.name
-        add_chart_image(doc, tmp_path, "Evaluation Results - Depth Growth Figure")
-        Path(tmp_path).unlink()
+        add_chart_image(doc, chart_images['depth_growth'], "Evaluation Results - Depth Growth Figure")
     else:
         doc.add_paragraph("⚠️ Depth Growth Chart could not be generated due to image export issues.")
     
@@ -219,13 +230,9 @@ def generate_word_report(
     
     doc.add_page_break()
     
-    # SOP Decay Chart
+    # SOP Decay Chart (use bytes directly - no temp file I/O)
     if 'sop_decay' in chart_images and chart_images['sop_decay']:
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
-            tmp.write(chart_images['sop_decay'])
-            tmp_path = tmp.name
-        add_chart_image(doc, tmp_path, "Evaluation Results - SOP Decay Figure")
-        Path(tmp_path).unlink()
+        add_chart_image(doc, chart_images['sop_decay'], "Evaluation Results - SOP Decay Figure")
     else:
         doc.add_paragraph("⚠️ SOP Decay Chart could not be generated due to image export issues.")
     
@@ -250,13 +257,9 @@ def generate_word_report(
     
     doc.add_page_break()
     
-    # SOP Decay with Cutoff Chart
+    # SOP Decay with Cutoff Chart (use bytes directly - no temp file I/O)
     if 'sop_cutoff' in chart_images and chart_images['sop_cutoff']:
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
-            tmp.write(chart_images['sop_cutoff'])
-            tmp_path = tmp.name
-        add_chart_image(doc, tmp_path, "Evaluation Results - SOP Decay with 80% Wall Thickness Cutoff")
-        Path(tmp_path).unlink()
+        add_chart_image(doc, chart_images['sop_cutoff'], "Evaluation Results - SOP Decay with 80% Wall Thickness Cutoff")
     else:
         doc.add_paragraph("⚠️ SOP Decay with Cutoff Chart could not be generated due to image export issues.")
     
