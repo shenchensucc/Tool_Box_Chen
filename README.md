@@ -118,7 +118,15 @@ git clone <repository-url>
 cd Tool_Box_Chen
 ```
 
-2. **Install dependencies** (choose one method):
+2. **Set up environment variables** (required for Chat with Chen and web search):
+```bash
+# Copy the example and add your token (never commit .env)
+# Windows: copy .env.example .env
+# macOS/Linux: cp .env.example .env
+# Edit .env and set AI_BUILDER_TOKEN=your_token_here
+```
+
+3. **Install dependencies** (choose one method):
 
 **Using uv (recommended):**
 ```bash
@@ -143,6 +151,8 @@ source venv/bin/activate
 # Install dependencies
 pip install -e ".[dev]"
 ```
+
+> ⚠️ **Secrets**: Keep `AI_BUILDER_TOKEN` in `.env` only. `.env` is in `.gitignore` and must never be committed.
 
 ### Running the Application
 

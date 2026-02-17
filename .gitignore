@@ -33,8 +33,10 @@ ENV/
 *.swo
 *~
 
-# Environment
+# Environment and secrets (never commit)
 .env
+.env.local
+.env.*.local
 
 # Testing
 .pytest_cache/

@@ -112,9 +112,11 @@ from frontend_utils import (
     check_backend_health,
     display_header,
     display_sidebar_navigation,
+    get_layout_with_chat,
     set_page_config,
     show_backend_unavailable_and_retry,
 )
+from chat_panel import render_chat_expander
 
 # Page configuration
 set_page_config("Metal Loss Assessment", "🔬")
@@ -123,907 +125,913 @@ apply_custom_styling()
 # Custom Sidebar Navigation
 display_sidebar_navigation()
 
-# Header
-display_header(
-    "🔬 Metal Loss Assessment",
-    "Assess metal loss features using modified B31G methodology",
-)
+(left_col, right_col), chat_visible = get_layout_with_chat()
 
-# Check backend status
-if not check_backend_health():
-    show_backend_unavailable_and_retry()
-    st.stop()
+with left_col:
+    # Header
+    display_header(
+        "🔬 Metal Loss Assessment",
+        "Assess metal loss features using modified B31G methodology",
+    )
 
-# Preset scenarios dictionary
-# User can modify this table with their own NPS configurations
-PRESET_SCENARIOS = {
-    "Customized": {
-        "description": "Manually input all parameters",
-        "do": 0.0,
-        "tp": 0.0,
-        "YS": 0.0,
-        "TS": 0.0
-    },
-    "NPS 8 - Sch 40 - Grade X52": {
-        "description": "NPS 8, Schedule 40, Grade X52",
-        "do": 219.1,
-        "tp": 8.18,
-        "YS": 359.0,
-        "TS": 455.0
-    },
-    "NPS 8 - Sch 80 - Grade X52": {
-        "description": "NPS 8, Schedule 80, Grade X52",
-        "do": 219.1,
-        "tp": 12.7,
-        "YS": 359.0,
-        "TS": 455.0
-    },
-    "NPS 10 - Sch 40 - Grade X52": {
-        "description": "NPS 10, Schedule 40, Grade X52",
-        "do": 273.1,
-        "tp": 9.27,
-        "YS": 359.0,
-        "TS": 455.0
-    },
-    "NPS 10 - Sch 80 - Grade X52": {
-        "description": "NPS 10, Schedule 80, Grade X52",
-        "do": 273.1,
-        "tp": 15.09,
-        "YS": 359.0,
-        "TS": 455.0
-    },
-    "NPS 12 - Sch 40 - Grade X52": {
-        "description": "NPS 12, Schedule 40, Grade X52",
-        "do": 323.9,
-        "tp": 10.31,
-        "YS": 359.0,
-        "TS": 455.0
-    },
-    "NPS 12 - Sch 80 - Grade X52": {
-        "description": "NPS 12, Schedule 80, Grade X52",
-        "do": 323.9,
-        "tp": 17.48,
-        "YS": 359.0,
-        "TS": 455.0
-    },
-    "NPS 10 - Sch 40 - Grade X60": {
-        "description": "NPS 10, Schedule 40, Grade X60",
-        "do": 273.1,
-        "tp": 9.27,
-        "YS": 414.0,
-        "TS": 517.0
-    },
-}
+    # Check backend status
+    if not check_backend_health():
+        show_backend_unavailable_and_retry()
+        st.stop()
 
-# Information section
-st.info("📋 **About This Tool**: Assess pipeline metal loss features over time using industry-standard modified B31G methodology.")
+    # Preset scenarios dictionary
+    # User can modify this table with their own NPS configurations
+    PRESET_SCENARIOS = {
+        "Customized": {
+            "description": "Manually input all parameters",
+            "do": 0.0,
+            "tp": 0.0,
+            "YS": 0.0,
+            "TS": 0.0
+        },
+        "NPS 8 - Sch 40 - Grade X52": {
+            "description": "NPS 8, Schedule 40, Grade X52",
+            "do": 219.1,
+            "tp": 8.18,
+            "YS": 359.0,
+            "TS": 455.0
+        },
+        "NPS 8 - Sch 80 - Grade X52": {
+            "description": "NPS 8, Schedule 80, Grade X52",
+            "do": 219.1,
+            "tp": 12.7,
+            "YS": 359.0,
+            "TS": 455.0
+        },
+        "NPS 10 - Sch 40 - Grade X52": {
+            "description": "NPS 10, Schedule 40, Grade X52",
+            "do": 273.1,
+            "tp": 9.27,
+            "YS": 359.0,
+            "TS": 455.0
+        },
+        "NPS 10 - Sch 80 - Grade X52": {
+            "description": "NPS 10, Schedule 80, Grade X52",
+            "do": 273.1,
+            "tp": 15.09,
+            "YS": 359.0,
+            "TS": 455.0
+        },
+        "NPS 12 - Sch 40 - Grade X52": {
+            "description": "NPS 12, Schedule 40, Grade X52",
+            "do": 323.9,
+            "tp": 10.31,
+            "YS": 359.0,
+            "TS": 455.0
+        },
+        "NPS 12 - Sch 80 - Grade X52": {
+            "description": "NPS 12, Schedule 80, Grade X52",
+            "do": 323.9,
+            "tp": 17.48,
+            "YS": 359.0,
+            "TS": 455.0
+        },
+        "NPS 10 - Sch 40 - Grade X60": {
+            "description": "NPS 10, Schedule 40, Grade X60",
+            "do": 273.1,
+            "tp": 9.27,
+            "YS": 414.0,
+            "TS": 517.0
+        },
+    }
 
-# Main content area
-st.subheader("📝 Assessment Parameters")
+    # Information section
+    st.info("📋 **About This Tool**: Assess pipeline metal loss features over time using industry-standard modified B31G methodology.")
 
-# Reset button
-if st.button("🔄 Reset All Parameters", help="Clear all inputs and reset to default state"):
-    # Clear session state keys related to this page
-    keys_to_clear = [
-        'test_case', 
-        'scenario', 
-        'selected_scenario',
-        'selected_test_case',
-        'metal_loss_results', 
-        'assessment_complete', 
-        'word_doc', 
-        'doc_filename',
-        'fig_depth',
-        'fig_sop',
-        'fig_cutoff',
-        'feature_ID',
-        'do_input',
-        'tp_input',
-        'YS_input',
-        'TS_input'
-    ]
-    for key in keys_to_clear:
-        if key in st.session_state:
-            del st.session_state[key]
-    st.rerun()
+    # Main content area
+    st.subheader("📝 Assessment Parameters")
 
-# Initialize selected scenario if not present
-if 'selected_scenario' not in st.session_state:
-    st.session_state['selected_scenario'] = 'Customized'
-if 'selected_test_case' not in st.session_state:
-    st.session_state['selected_test_case'] = None
+    # Reset button
+    if st.button("🔄 Reset All Parameters", help="Clear all inputs and reset to default state"):
+        # Clear session state keys related to this page
+        keys_to_clear = [
+            'test_case', 
+            'scenario', 
+            'selected_scenario',
+            'selected_test_case',
+            'metal_loss_results', 
+            'assessment_complete', 
+            'word_doc', 
+            'doc_filename',
+            'fig_depth',
+            'fig_sop',
+            'fig_cutoff',
+            'feature_ID',
+            'do_input',
+            'tp_input',
+            'YS_input',
+            'TS_input'
+        ]
+        for key in keys_to_clear:
+            if key in st.session_state:
+                del st.session_state[key]
+        st.rerun()
 
-# Combined Preset Scenarios and Test Cases selection
-st.markdown("### Select Configuration")
-st.caption("Choose a preset scenario, test case, or 'Customized' to input all parameters manually")
+    # Initialize selected scenario if not present
+    if 'selected_scenario' not in st.session_state:
+        st.session_state['selected_scenario'] = 'Customized'
+    if 'selected_test_case' not in st.session_state:
+        st.session_state['selected_test_case'] = None
 
-# Define all configurations in one unified grid
-all_configs = []
+    # Combined Preset Scenarios and Test Cases selection
+    st.markdown("### Select Configuration")
+    st.caption("Choose a preset scenario, test case, or 'Customized' to input all parameters manually")
 
-# Add test cases first with visual distinction
-all_configs.append({
-    'name': '🧪 Test Case 1: z > 50',
-    'key': 'test_case_1',
-    'type': 'test',
-    'test_num': 1,
-    'params': {'do': 273.1, 'tp': 5.16, 'YS': 359.0, 'TS': 455.0},
-    'description': 'Standard Test: Long defect (Linear Folias factor)'
-})
-all_configs.append({
-    'name': '🧪 Test Case 2: z ≤ 50',
-    'key': 'test_case_2',
-    'type': 'test',
-    'test_num': 2,
-    'params': {'do': 273.1, 'tp': 5.16, 'YS': 359.0, 'TS': 455.0},
-    'description': 'Standard Test: Short defect (Polynomial Folias factor)'
-})
-all_configs.append({
-    'name': '🧪 Standard Example',
-    'key': 'test_case_3',
-    'type': 'test',
-    'test_num': 3,
-    'params': {'do': 273.1, 'tp': 6.35, 'YS': 359.0, 'TS': 455.0},
-    'description': 'Standard Test: Complete assessment scenario'
-})
+    # Define all configurations in one unified grid
+    all_configs = []
 
-# Add all preset scenarios
-for scenario_name, scenario_data in PRESET_SCENARIOS.items():
+    # Add test cases first with visual distinction
     all_configs.append({
-        'name': scenario_name,
-        'key': f'scenario_{scenario_name}',
-        'type': 'scenario',
-        'params': {'do': scenario_data['do'], 'tp': scenario_data['tp'], 
-                   'YS': scenario_data['YS'], 'TS': scenario_data['TS']},
-        'description': scenario_data['description']
+        'name': '🧪 Test Case 1: z > 50',
+        'key': 'test_case_1',
+        'type': 'test',
+        'test_num': 1,
+        'params': {'do': 273.1, 'tp': 5.16, 'YS': 359.0, 'TS': 455.0},
+        'description': 'Standard Test: Long defect (Linear Folias factor)'
+    })
+    all_configs.append({
+        'name': '🧪 Test Case 2: z ≤ 50',
+        'key': 'test_case_2',
+        'type': 'test',
+        'test_num': 2,
+        'params': {'do': 273.1, 'tp': 5.16, 'YS': 359.0, 'TS': 455.0},
+        'description': 'Standard Test: Short defect (Polynomial Folias factor)'
+    })
+    all_configs.append({
+        'name': '🧪 Standard Example',
+        'key': 'test_case_3',
+        'type': 'test',
+        'test_num': 3,
+        'params': {'do': 273.1, 'tp': 6.35, 'YS': 359.0, 'TS': 455.0},
+        'description': 'Standard Test: Complete assessment scenario'
     })
 
-# Create button grid (3 columns per row)
-num_cols = 3
-rows = [all_configs[i:i+num_cols] for i in range(0, len(all_configs), num_cols)]
+    # Add all preset scenarios
+    for scenario_name, scenario_data in PRESET_SCENARIOS.items():
+        all_configs.append({
+            'name': scenario_name,
+            'key': f'scenario_{scenario_name}',
+            'type': 'scenario',
+            'params': {'do': scenario_data['do'], 'tp': scenario_data['tp'], 
+                       'YS': scenario_data['YS'], 'TS': scenario_data['TS']},
+            'description': scenario_data['description']
+        })
 
-for row in rows:
-    cols = st.columns(num_cols)
-    for idx, config in enumerate(row):
-        with cols[idx]:
-            # Determine if this config is selected
-            if config['type'] == 'test':
-                is_selected = st.session_state['selected_test_case'] == config['test_num']
-            else:
-                is_selected = (st.session_state['selected_scenario'] == config['name'] and 
-                              st.session_state['selected_test_case'] is None)
-            
-            button_type = "primary" if is_selected else "secondary"
-            
-            if st.button(
-                config['name'],
-                key=config['key'],
-                type=button_type,
-                use_container_width=True
-            ):
-                # Handle test case selection
+    # Create button grid (3 columns per row)
+    num_cols = 3
+    rows = [all_configs[i:i+num_cols] for i in range(0, len(all_configs), num_cols)]
+
+    for row in rows:
+        cols = st.columns(num_cols)
+        for idx, config in enumerate(row):
+            with cols[idx]:
+                # Determine if this config is selected
                 if config['type'] == 'test':
-                    st.session_state['test_case'] = config['test_num']
-                    st.session_state['selected_test_case'] = config['test_num']
-                    st.session_state['selected_scenario'] = 'Customized'
-                    # Set pipe parameters
-                    st.session_state.do_input = config['params']['do']
-                    st.session_state.tp_input = config['params']['tp']
-                    st.session_state.YS_input = config['params']['YS']
-                    st.session_state.TS_input = config['params']['TS']
+                    is_selected = st.session_state['selected_test_case'] == config['test_num']
                 else:
-                    # Handle scenario selection
-                    st.session_state['selected_scenario'] = config['name']
-                    st.session_state['selected_test_case'] = None
-                    if 'test_case' in st.session_state:
-                        del st.session_state['test_case']
-                    # Auto-fill parameters if not customized
-                    if config['params']['do'] > 0:
+                    is_selected = (st.session_state['selected_scenario'] == config['name'] and 
+                                  st.session_state['selected_test_case'] is None)
+            
+                button_type = "primary" if is_selected else "secondary"
+            
+                if st.button(
+                    config['name'],
+                    key=config['key'],
+                    type=button_type,
+                    width="stretch"
+                ):
+                    # Handle test case selection
+                    if config['type'] == 'test':
+                        st.session_state['test_case'] = config['test_num']
+                        st.session_state['selected_test_case'] = config['test_num']
+                        st.session_state['selected_scenario'] = 'Customized'
+                        # Set pipe parameters
                         st.session_state.do_input = config['params']['do']
                         st.session_state.tp_input = config['params']['tp']
                         st.session_state.YS_input = config['params']['YS']
                         st.session_state.TS_input = config['params']['TS']
+                    else:
+                        # Handle scenario selection
+                        st.session_state['selected_scenario'] = config['name']
+                        st.session_state['selected_test_case'] = None
+                        if 'test_case' in st.session_state:
+                            del st.session_state['test_case']
+                        # Auto-fill parameters if not customized
+                        if config['params']['do'] > 0:
+                            st.session_state.do_input = config['params']['do']
+                            st.session_state.tp_input = config['params']['tp']
+                            st.session_state.YS_input = config['params']['YS']
+                            st.session_state.TS_input = config['params']['TS']
                 
-                st.rerun()
+                    st.rerun()
 
-# Display description of selected configuration
-if st.session_state['selected_test_case'] is not None:
-    selected_config = next((c for c in all_configs if c.get('test_num') == st.session_state['selected_test_case']), None)
-else:
-    selected_config = next((c for c in all_configs if c['name'] == st.session_state['selected_scenario']), None)
+    # Display description of selected configuration
+    if st.session_state['selected_test_case'] is not None:
+        selected_config = next((c for c in all_configs if c.get('test_num') == st.session_state['selected_test_case']), None)
+    else:
+        selected_config = next((c for c in all_configs if c['name'] == st.session_state['selected_scenario']), None)
 
-if selected_config:
-    st.caption(f"*{selected_config['description']}*")
+    if selected_config:
+        st.caption(f"*{selected_config['description']}*")
 
-# Set scenario variable for backward compatibility
-scenario = st.session_state['selected_scenario']
-selected_preset = PRESET_SCENARIOS.get(scenario, PRESET_SCENARIOS['Customized'])
+    # Set scenario variable for backward compatibility
+    scenario = st.session_state['selected_scenario']
+    selected_preset = PRESET_SCENARIOS.get(scenario, PRESET_SCENARIOS['Customized'])
 
-# Load test case parameters if selected
-test_case_params = {}
-if 'test_case' in st.session_state:
-    test_case_num = st.session_state['test_case']
+    # Load test case parameters if selected
+    test_case_params = {}
+    if 'test_case' in st.session_state:
+        test_case_num = st.session_state['test_case']
     
-    # Standardized parameters for all test cases
-    standard_params = {
-        'do': 273.1,
-        'tp': 5.16,
-        'YS': 359.0,
-        'TS': 455.0,
-        'vendor_ILI': 'Test Vendor',
-        'ILI_dimp_tolerance': 10.0,
-        'ILI_Limp_tolerance': 0.0,
-        'CR_low': 0.1,
-        'CR_ave': 0.2,
-        'CR_high': 0.4,
-        'month_CR': 60,  # Changed default from 48 to 60 months
-        'CR_Limp': 10.0
-    }
+        # Standardized parameters for all test cases
+        standard_params = {
+            'do': 273.1,
+            'tp': 5.16,
+            'YS': 359.0,
+            'TS': 455.0,
+            'vendor_ILI': 'Test Vendor',
+            'ILI_dimp_tolerance': 10.0,
+            'ILI_Limp_tolerance': 0.0,
+            'CR_low': 0.1,
+            'CR_ave': 0.2,
+            'CR_high': 0.4,
+            'month_CR': 60,  # Changed default from 48 to 60 months
+            'CR_Limp': 10.0
+        }
     
-    if test_case_num == 1:
-        # Test Case 1: z > 50
-        test_case_params = standard_params.copy()
-        test_case_params.update({
-            'dimp_org_percent': 50.0,
-            'Limp_org': 300.0,
-            'feature_ID': 'Test-Case-1-z-greater-50'
-            # Removed month_CR override - now uses default 60 months
-        })
-        st.info("✅ **Test Case 1 Loaded**: z > 50 (Limp=300mm). This tests the linear Folias factor formula.")
+        if test_case_num == 1:
+            # Test Case 1: z > 50
+            test_case_params = standard_params.copy()
+            test_case_params.update({
+                'dimp_org_percent': 50.0,
+                'Limp_org': 300.0,
+                'feature_ID': 'Test-Case-1-z-greater-50'
+                # Removed month_CR override - now uses default 60 months
+            })
+            st.info("✅ **Test Case 1 Loaded**: z > 50 (Limp=300mm). This tests the linear Folias factor formula.")
         
-    elif test_case_num == 2:
-        # Test Case 2: z ≤ 50
-        test_case_params = standard_params.copy()
-        test_case_params.update({
-            'dimp_org_percent': 50.0,
-            'Limp_org': 200.0,
-            'feature_ID': 'Test-Case-2-z-less-equal-50'
-            # Removed month_CR override - now uses default 60 months
-        })
-        st.info("✅ **Test Case 2 Loaded**: z ≤ 50 (Limp=200mm). This tests the polynomial Folias factor formula.")
+        elif test_case_num == 2:
+            # Test Case 2: z ≤ 50
+            test_case_params = standard_params.copy()
+            test_case_params.update({
+                'dimp_org_percent': 50.0,
+                'Limp_org': 200.0,
+                'feature_ID': 'Test-Case-2-z-less-equal-50'
+                # Removed month_CR override - now uses default 60 months
+            })
+            st.info("✅ **Test Case 2 Loaded**: z ≤ 50 (Limp=200mm). This tests the polynomial Folias factor formula.")
         
-    elif test_case_num == 3:
-        # Standard Example - Updated with standardized rates
-        test_case_params = standard_params.copy()
-        test_case_params.update({
-            'tp': 6.35,  # Standard test case uses 6.35mm
-            'dimp_org_percent': 41.0,
-            'Limp_org': 361.0,
-            'feature_ID': '7',
-            'vendor_ILI': 'ROSEN MFL-C'
-        })
-        st.info("✅ **Standard Example Loaded**: Complete assessment scenario with updated standardized rates.")
+        elif test_case_num == 3:
+            # Standard Example - Updated with standardized rates
+            test_case_params = standard_params.copy()
+            test_case_params.update({
+                'tp': 6.35,  # Standard test case uses 6.35mm
+                'dimp_org_percent': 41.0,
+                'Limp_org': 361.0,
+                'feature_ID': '7',
+                'vendor_ILI': 'ROSEN MFL-C'
+            })
+            st.info("✅ **Standard Example Loaded**: Complete assessment scenario with updated standardized rates.")
     
-    # Clear the test case after loading
-    if st.button("🔄 Clear Test Case and Reset", type="secondary"):
-        del st.session_state['test_case']
-        if 'scenario' in st.session_state:
-            del st.session_state['scenario']
-        st.rerun()
+        # Clear the test case after loading
+        if st.button("🔄 Clear Test Case and Reset", type="secondary"):
+            del st.session_state['test_case']
+            if 'scenario' in st.session_state:
+                del st.session_state['scenario']
+            st.rerun()
 
-# Create tabs for organized input
-tab1, tab2, tab3 = st.tabs(["🔧 Pipe & Material", "📏 Defect Information", "📈 Growth Rates & Assessment"])
+    # Create tabs for organized input
+    tab1, tab2, tab3 = st.tabs(["🔧 Pipe & Material", "📏 Defect Information", "📈 Growth Rates & Assessment"])
 
-with tab1:
-    st.markdown("### Pipe Properties")
-    col1, col2 = st.columns(2)
+    with tab1:
+        st.markdown("### Pipe Properties")
+        col1, col2 = st.columns(2)
     
-    with col1:
-        is_customized = (scenario == "Customized")
+        with col1:
+            is_customized = (scenario == "Customized")
         
-        do = st.number_input(
-            "Outside Diameter (mm)",
-            min_value=0.0,
-            value=float(test_case_params.get('do', selected_preset['do'])),
-            step=0.1,
-            key="do_input",
-            help="Pipe outside diameter in millimeters"
-        )
+            do = st.number_input(
+                "Outside Diameter (mm)",
+                min_value=0.0,
+                value=float(test_case_params.get('do', selected_preset['do'])),
+                step=0.1,
+                key="do_input",
+                help="Pipe outside diameter in millimeters"
+            )
         
-        tp = st.number_input(
-            "Wall Thickness (mm)",
-            min_value=0.0,
-            value=float(test_case_params.get('tp', selected_preset['tp'])),
-            step=0.01,
-            key="tp_input",
-            help="Nominal wall thickness in millimeters"
-        )
+            tp = st.number_input(
+                "Wall Thickness (mm)",
+                min_value=0.0,
+                value=float(test_case_params.get('tp', selected_preset['tp'])),
+                step=0.01,
+                key="tp_input",
+                help="Nominal wall thickness in millimeters"
+            )
     
-    with col2:
-        YS = st.number_input(
-            "Yield Strength (MPa)",
-            min_value=0.0,
-            value=float(test_case_params.get('YS', selected_preset['YS'])),
-            step=1.0,
-            key="YS_input",
-            help="Specified Minimum Yield Strength"
-        )
+        with col2:
+            YS = st.number_input(
+                "Yield Strength (MPa)",
+                min_value=0.0,
+                value=float(test_case_params.get('YS', selected_preset['YS'])),
+                step=1.0,
+                key="YS_input",
+                help="Specified Minimum Yield Strength"
+            )
         
-        TS = st.number_input(
-            "Tensile Strength (MPa)",
-            min_value=0.0,
-            value=float(test_case_params.get('TS', selected_preset['TS'])),
-            step=1.0,
-            key="TS_input",
-            help="Specified Minimum Tensile Strength"
-        )
+            TS = st.number_input(
+                "Tensile Strength (MPa)",
+                min_value=0.0,
+                value=float(test_case_params.get('TS', selected_preset['TS'])),
+                step=1.0,
+                key="TS_input",
+                help="Specified Minimum Tensile Strength"
+            )
 
-with tab2:
-    st.markdown("### Defect Dimensions")
-    col1, col2 = st.columns(2)
+    with tab2:
+        st.markdown("### Defect Dimensions")
+        col1, col2 = st.columns(2)
     
-    with col1:
-        dimp_org_percent = st.number_input(
-            "Defect Depth (% of wall thickness)",
-            min_value=0.0,
-            max_value=100.0,
-            value=float(test_case_params.get('dimp_org_percent', 41.0)),
-            step=0.1,
-            help="Depth of the defect as percentage of nominal wall thickness"
-        )
+        with col1:
+            dimp_org_percent = st.number_input(
+                "Defect Depth (% of wall thickness)",
+                min_value=0.0,
+                max_value=100.0,
+                value=float(test_case_params.get('dimp_org_percent', 41.0)),
+                step=0.1,
+                help="Depth of the defect as percentage of nominal wall thickness"
+            )
         
-        Limp_org = st.number_input(
-            "Defect Length (mm)",
-            min_value=0.0,
-            value=float(test_case_params.get('Limp_org', 361.0)),
-            step=1.0,
-            help="Axial length of the defect"
-        )
+            Limp_org = st.number_input(
+                "Defect Length (mm)",
+                min_value=0.0,
+                value=float(test_case_params.get('Limp_org', 361.0)),
+                step=1.0,
+                help="Axial length of the defect"
+            )
     
-    with col2:
-        feature_ID = st.text_input(
-            "Feature ID",
-            value=test_case_params.get('feature_ID', "Feature-001"),
-            help="Unique identifier for this feature"
-        )
+        with col2:
+            feature_ID = st.text_input(
+                "Feature ID",
+                value=test_case_params.get('feature_ID', "Feature-001"),
+                help="Unique identifier for this feature"
+            )
     
-    st.markdown("### ILI Information")
-    col1, col2, col3 = st.columns(3)
+        st.markdown("### ILI Information")
+        col1, col2, col3 = st.columns(3)
     
-    with col1:
-        vendor_ILI = st.text_input(
-            "ILI Vendor",
-            value=test_case_params.get('vendor_ILI', "ROSEN MFL-C"),
-            help="In-Line Inspection vendor name"
-        )
+        with col1:
+            vendor_ILI = st.text_input(
+                "ILI Vendor",
+                value=test_case_params.get('vendor_ILI', "ROSEN MFL-C"),
+                help="In-Line Inspection vendor name"
+            )
     
-    with col2:
-        date_ILI = st.date_input(
-            "ILI Date",
-            value=datetime.now() - timedelta(days=180),
-            help="Date of the ILI run"
-        )
+        with col2:
+            date_ILI = st.date_input(
+                "ILI Date",
+                value=datetime.now() - timedelta(days=180),
+                help="Date of the ILI run"
+            )
     
-    with col3:
-        ILI_dimp_tolerance = st.number_input(
-            "Depth Tolerance (%)",
-            min_value=0.0,
-            value=float(test_case_params.get('ILI_dimp_tolerance', 15.0)),
-            step=0.1,
-            help="ILI tool tolerance for depth measurement"
-        )
+        with col3:
+            ILI_dimp_tolerance = st.number_input(
+                "Depth Tolerance (%)",
+                min_value=0.0,
+                value=float(test_case_params.get('ILI_dimp_tolerance', 15.0)),
+                step=0.1,
+                help="ILI tool tolerance for depth measurement"
+            )
         
-        ILI_Limp_tolerance = st.number_input(
-            "Length Tolerance (mm)",
-            min_value=0.0,
-            value=float(test_case_params.get('ILI_Limp_tolerance', 0.0)),
-            step=1.0,
-            help="ILI tool tolerance for length measurement"
-        )
+            ILI_Limp_tolerance = st.number_input(
+                "Length Tolerance (mm)",
+                min_value=0.0,
+                value=float(test_case_params.get('ILI_Limp_tolerance', 0.0)),
+                step=1.0,
+                help="ILI tool tolerance for length measurement"
+            )
 
-with tab3:
-    st.markdown("### Corrosion Growth Rates")
-    st.caption("Based on industry standards and historical ILI data correlation")
+    with tab3:
+        st.markdown("### Corrosion Growth Rates")
+        st.caption("Based on industry standards and historical ILI data correlation")
     
-    col1, col2, col3 = st.columns(3)
+        col1, col2, col3 = st.columns(3)
     
-    with col1:
-        CR_low = st.number_input(
-            "Low Rate - 50th Percentile (mm/yr)",
-            min_value=0.0,
-            value=float(test_case_params.get('CR_low', 0.196)),
-            step=0.001,
-            format="%.3f",
-            help="Conservative corrosion growth rate"
-        )
+        with col1:
+            CR_low = st.number_input(
+                "Low Rate - 50th Percentile (mm/yr)",
+                min_value=0.0,
+                value=float(test_case_params.get('CR_low', 0.196)),
+                step=0.001,
+                format="%.3f",
+                help="Conservative corrosion growth rate"
+            )
     
-    with col2:
-        CR_ave = st.number_input(
-            "Average Rate - 90th Percentile (mm/yr)",
-            min_value=0.0,
-            value=float(test_case_params.get('CR_ave', 0.245)),
-            step=0.001,
-            format="%.3f",
-            help="Expected corrosion growth rate"
-        )
+        with col2:
+            CR_ave = st.number_input(
+                "Average Rate - 90th Percentile (mm/yr)",
+                min_value=0.0,
+                value=float(test_case_params.get('CR_ave', 0.245)),
+                step=0.001,
+                format="%.3f",
+                help="Expected corrosion growth rate"
+            )
     
-    with col3:
-        CR_high = st.number_input(
-            "High Rate - 99th Percentile (mm/yr)",
-            min_value=0.0,
-            value=float(test_case_params.get('CR_high', 0.452)),
-            step=0.001,
-            format="%.3f",
-            help="Worst-case corrosion growth rate"
-        )
+        with col3:
+            CR_high = st.number_input(
+                "High Rate - 99th Percentile (mm/yr)",
+                min_value=0.0,
+                value=float(test_case_params.get('CR_high', 0.452)),
+                step=0.001,
+                format="%.3f",
+                help="Worst-case corrosion growth rate"
+            )
     
-    st.markdown("### Assessment Period")
-    col1, col2 = st.columns(2)
+        st.markdown("### Assessment Period")
+        col1, col2 = st.columns(2)
     
-    with col1:
-        month_CR = st.number_input(
-            "Projection Period (months)",
-            min_value=1,
-            max_value=120,
-            value=int(test_case_params.get('month_CR', 60)),
-            step=1,
-            help="Number of months to project forward"
-        )
+        with col1:
+            month_CR = st.number_input(
+                "Projection Period (months)",
+                min_value=1,
+                max_value=120,
+                value=int(test_case_params.get('month_CR', 60)),
+                step=1,
+                help="Number of months to project forward"
+            )
     
-    with col2:
-        CR_Limp = st.number_input(
-            "Length Growth Rate (mm/yr)",
-            min_value=0.0,
-            value=float(test_case_params.get('CR_Limp', 0.0)),
-            step=0.1,
-            help="Defect length growth rate (typically 0)"
-        )
+        with col2:
+            CR_Limp = st.number_input(
+                "Length Growth Rate (mm/yr)",
+                min_value=0.0,
+                value=float(test_case_params.get('CR_Limp', 0.0)),
+                step=0.1,
+                help="Defect length growth rate (typically 0)"
+            )
 
-# Process button
-st.write("")  # Add spacing
-process_button = st.button(
-    "🚀 Run Assessment",
-    type="primary",
-    use_container_width=True
-)
+    # Process button
+    st.write("")  # Add spacing
+    process_button = st.button(
+        "🚀 Run Assessment",
+        type="primary",
+        width="stretch"
+    )
 
-if process_button:
-    # Validation
-    if do <= 0 or tp <= 0:
-        st.error("❌ Please provide valid pipe dimensions (diameter and thickness must be > 0)")
-        st.stop()
+    if process_button:
+        # Validation
+        if do <= 0 or tp <= 0:
+            st.error("❌ Please provide valid pipe dimensions (diameter and thickness must be > 0)")
+            st.stop()
     
-    if YS <= 0 or TS <= 0:
-        st.error("❌ Please provide valid material properties (YS and TS must be > 0)")
-        st.stop()
+        if YS <= 0 or TS <= 0:
+            st.error("❌ Please provide valid material properties (YS and TS must be > 0)")
+            st.stop()
     
-    # Process the assessment
-    with st.spinner("⏳ Calculating metal loss assessment... This may take a moment."):
-        try:
-            # Prepare the request
-            data = {
-                "do": do,
-                "tp": tp,
-                "YS": YS,
-                "TS": TS,
-                "dimp_org_percent": dimp_org_percent,
-                "Limp_org": Limp_org,
-                "date_ILI": date_ILI.strftime("%Y-%m-%d"),
-                "ILI_dimp_tolerance": ILI_dimp_tolerance,
-                "ILI_Limp_tolerance": ILI_Limp_tolerance,
-                "CR_low": CR_low,
-                "CR_ave": CR_ave,
-                "CR_high": CR_high,
-                "month_CR": month_CR,
-                "feature_ID": feature_ID,
-                "vendor_ILI": vendor_ILI,
-                "CR_Limp": CR_Limp
-            }
-            
-            # Call the API
-            with httpx.Client(timeout=60.0) as client:
-                response = client.post(
-                    f"{BACKEND_URL}/api/pipeline/metal-loss/assess",
-                    data=data,
-                )
-            
-            if response.status_code == 200:
-                results = response.json()
-                
-                st.success("✅ Assessment completed successfully!")
-                
-                # Display results
-                st.markdown("---")
-                st.header("📊 Assessment Results")
-                
-                # Input Parameters Summary Table
-                with st.expander("📋 Input Parameters Summary", expanded=True):
-                    inputs = results['inputs']
-                    
-                    params_data = {
-                        "Parameter": [
-                            "Feature Number/Identifier",
-                            "Depth of the defect, %NWT",
-                            "Length of the defect, mm",
-                            "Outside diameter of the pipe, mm",
-                            "Pipe wall thickness, mm",
-                            "Yield strength of the material, MPa",
-                            "Tensile strength of the material, MPa",
-                            "ILI vendor",
-                            "ILI time",
-                            "ILI tool tolerance for depth, %",
-                            "ILI tool tolerance for length, mm",
-                            "Feature depth growth rate, mm/yr",
-                            "Feature length growth rate, mm/yr"
-                        ],
-                        "Value": [
-                            inputs['feature_ID'],
-                            f"{inputs['dimp_org_percent']}",
-                            f"{inputs['Limp_org']}",
-                            f"{inputs['do']}",
-                            f"{inputs['tp']}",
-                            f"{inputs['YS']}",
-                            f"{inputs['TS']}",
-                            inputs['vendor_ILI'],
-                            inputs['date_ILI'],
-                            f"{inputs['ILI_dimp_tolerance']}",
-                            f"{inputs['ILI_Limp_tolerance']}",
-                            f"{inputs['CR_low']} (low), {inputs['CR_ave']} (avg), {inputs['CR_high']} (high)",
-                            f"{inputs.get('CR_Limp', 0)}"
-                        ]
-                    }
-                    
-                    df_params = pd.DataFrame(params_data)
-                    st.dataframe(df_params, use_container_width=True, hide_index=True)
-                
-                # Generate date sequence for x-axis
-                date_start = datetime.strptime(inputs['date_ILI'], "%Y-%m-%d")
-                date_seq = [date_start + timedelta(days=30*i) for i in range(month_CR)]
-                
-                # Depth Growth Chart
-                st.markdown("### 📈 Predicted Defect Depth Growth")
-                
-                fig_depth = go.Figure()
-                
-                depth_low = results['depth_arrays']['low']
-                depth_ave = results['depth_arrays']['ave']
-                depth_high = results['depth_arrays']['high']
-                
-                fig_depth.add_trace(go.Scatter(
-                    x=date_seq,
-                    y=depth_low,
-                    mode='lines',
-                    name='Low Growth Rate',
-                    line=dict(color='green', width=2)
-                ))
-                
-                fig_depth.add_trace(go.Scatter(
-                    x=date_seq,
-                    y=depth_ave,
-                    mode='lines',
-                    name='Average Growth Rate',
-                    line=dict(color='orange', width=2)
-                ))
-                
-                fig_depth.add_trace(go.Scatter(
-                    x=date_seq,
-                    y=depth_high,
-                    mode='lines',
-                    name='High Growth Rate',
-                    line=dict(color='red', width=2)
-                ))
-                
-                # Add 80% wall thickness line
-                wall_80 = results['calculated']['wall_thickness_80']
-                fig_depth.add_hline(
-                    y=wall_80,
-                    line_dash="dash",
-                    line_color="red",
-                    annotation_text="80% Wall Thickness",
-                    annotation_position="right"
-                )
-                
-                fig_depth.update_layout(
-                    title="Predicted Defect Depth Growth",
-                    xaxis_title="Date",
-                    yaxis_title="Defect Depth (mm)",
-                    hovermode='x unified',
-                    legend=dict(x=0.02, y=0.98),
-                    height=500
-                )
-                
-                st.plotly_chart(fig_depth, use_container_width=True)
-                
-                # Depth Growth Table
-                with st.expander("📋 Depth Growth Data Table"):
-                    df_depth = pd.DataFrame({
-                        'Month': list(range(month_CR)),
-                        'Date': [d.strftime("%Y-%m-%d") for d in date_seq],
-                        'Depth Low (mm)': [f"{d:.2f}" for d in depth_low],
-                        'Depth Low (%)': [f"{d/tp*100:.2f}" for d in depth_low],
-                        'Depth Ave (mm)': [f"{d:.2f}" for d in depth_ave],
-                        'Depth Ave (%)': [f"{d/tp*100:.2f}" for d in depth_ave],
-                        'Depth High (mm)': [f"{d:.2f}" for d in depth_high],
-                        'Depth High (%)': [f"{d/tp*100:.2f}" for d in depth_high]
-                    })
-                    st.dataframe(df_depth, use_container_width=True, hide_index=True)
-                
-                # SOP Decay Chart
-                st.markdown("### 📉 Predicted Safe Operating Pressure Decay")
-                
-                fig_sop = go.Figure()
-                
-                sop_low = results['sop_arrays']['low']
-                sop_ave = results['sop_arrays']['ave']
-                sop_high = results['sop_arrays']['high']
-                
-                fig_sop.add_trace(go.Scatter(
-                    x=date_seq,
-                    y=sop_low,
-                    mode='lines',
-                    name='Low Growth Rate',
-                    line=dict(color='green', width=2)
-                ))
-                
-                fig_sop.add_trace(go.Scatter(
-                    x=date_seq,
-                    y=sop_ave,
-                    mode='lines',
-                    name='Average Growth Rate',
-                    line=dict(color='orange', width=2)
-                ))
-                
-                fig_sop.add_trace(go.Scatter(
-                    x=date_seq,
-                    y=sop_high,
-                    mode='lines',
-                    name='High Growth Rate',
-                    line=dict(color='red', width=2)
-                ))
-                
-                # Add threshold line (example: 800 psi)
-                fig_sop.add_hline(
-                    y=800,
-                    line_dash="dash",
-                    line_color="red",
-                    annotation_text="800 psi Threshold",
-                    annotation_position="right"
-                )
-                
-                fig_sop.update_layout(
-                    title="Predicted Safe Operating Pressure Decay",
-                    xaxis_title="Date",
-                    yaxis_title="Safe Operating Pressure (psi)",
-                    hovermode='x unified',
-                    legend=dict(x=0.02, y=0.98),
-                    height=500
-                )
-                
-                st.plotly_chart(fig_sop, use_container_width=True)
-                
-                # SOP Table
-                with st.expander("📋 SOP Decay Data Table"):
-                    df_sop = pd.DataFrame({
-                        'Month': list(range(month_CR)),
-                        'Date': [d.strftime("%Y-%m-%d") for d in date_seq],
-                        'SOP Low (psi)': [f"{s:.2f}" for s in sop_low],
-                        'SOP Ave (psi)': [f"{s:.2f}" for s in sop_ave],
-                        'SOP High (psi)': [f"{s:.2f}" for s in sop_high]
-                    })
-                    st.dataframe(df_sop, use_container_width=True, hide_index=True)
-                
-                # SOP with Cutoff Chart
-                st.markdown("### 📊 SOP Decay with 80% Wall Thickness Cutoff")
-                
-                cutoff_months = results['cutoff_months']
-                
-                fig_cutoff = go.Figure()
-                
-                # Truncate data at cutoff points (handle -1 for safe condition)
-                cutoff_low_idx = month_CR if cutoff_months['low'] == -1 else min(cutoff_months['low'], month_CR)
-                cutoff_ave_idx = month_CR if cutoff_months['ave'] == -1 else min(cutoff_months['ave'], month_CR)
-                cutoff_high_idx = month_CR if cutoff_months['high'] == -1 else min(cutoff_months['high'], month_CR)
-                
-                # Create labels
-                low_label = f'Low (Safe)' if cutoff_months['low'] == -1 else f'Low (Cutoff: Month {cutoff_low_idx})'
-                ave_label = f'Average (Safe)' if cutoff_months['ave'] == -1 else f'Average (Cutoff: Month {cutoff_ave_idx})'
-                high_label = f'High (Safe)' if cutoff_months['high'] == -1 else f'High (Cutoff: Month {cutoff_high_idx})'
-                
-                fig_cutoff.add_trace(go.Scatter(
-                    x=date_seq[:cutoff_low_idx],
-                    y=sop_low[:cutoff_low_idx],
-                    mode='lines+markers',
-                    name=low_label,
-                    line=dict(color='green', width=2),
-                    marker=dict(size=6)
-                ))
-                
-                fig_cutoff.add_trace(go.Scatter(
-                    x=date_seq[:cutoff_ave_idx],
-                    y=sop_ave[:cutoff_ave_idx],
-                    mode='lines+markers',
-                    name=ave_label,
-                    line=dict(color='orange', width=2),
-                    marker=dict(size=6)
-                ))
-                
-                fig_cutoff.add_trace(go.Scatter(
-                    x=date_seq[:cutoff_high_idx],
-                    y=sop_high[:cutoff_high_idx],
-                    mode='lines+markers',
-                    name=high_label,
-                    line=dict(color='red', width=2),
-                    marker=dict(size=6)
-                ))
-                
-                fig_cutoff.add_hline(
-                    y=800,
-                    line_dash="dash",
-                    line_color="red",
-                    annotation_text="800 psi Threshold",
-                    annotation_position="right"
-                )
-                
-                fig_cutoff.update_layout(
-                    title="SOP Decay (Up to 80% Wall Thickness)",
-                    xaxis_title="Date",
-                    yaxis_title="Safe Operating Pressure (psi)",
-                    hovermode='x unified',
-                    legend=dict(x=0.02, y=0.98),
-                    height=500
-                )
-                
-                st.plotly_chart(fig_cutoff, use_container_width=True)
-                
-                # Cutoff information
-                with st.expander("ℹ️ 80% Wall Thickness Cutoff Information"):
-                    for rate_name, rate_key in [("Low", "low"), ("Average", "ave"), ("High", "high")]:
-                        cutoff = cutoff_months[rate_key]
-                        # -1 indicates safe (from backend update)
-                        if cutoff == -1:
-                            st.write(f"**{rate_name} corrosion rate:** Safe for full projection period ({month_CR} months)")
-                        else:
-                            st.write(f"**{rate_name} corrosion rate:** Reaches 80% wall thickness at Month {cutoff}")
-                
-                # Store results and figures in session state for export and persistence
-                st.session_state['metal_loss_results'] = results
-                st.session_state['fig_depth'] = fig_depth
-                st.session_state['fig_sop'] = fig_sop
-                st.session_state['fig_cutoff'] = fig_cutoff
-                st.session_state['feature_ID'] = feature_ID
-                st.session_state['assessment_complete'] = True
-                
-            else:
-                error_detail = response.json().get("detail", "Unknown error")
-                st.error(f"❌ Error processing assessment: {error_detail}")
-                
-        except httpx.TimeoutException:
-            st.error("❌ Request timed out. The calculation might be too complex.")
-        except httpx.ConnectError:
-            st.error("❌ Could not connect to the backend server. Please make sure it's running.")
-        except Exception as e:
-            st.error(f"❌ An error occurred: {str(e)}")
-
-# Export section - show if assessment is complete
-if st.session_state.get('assessment_complete', False):
-    st.markdown("---")
-    st.subheader("📥 Export Report")
-    
-    st.info("💡 **Export to Word**: Download a comprehensive assessment report with all tables and charts.")
-    
-    # Retrieve stored data
-    results = st.session_state['metal_loss_results']
-    fig_depth = st.session_state['fig_depth']
-    fig_sop = st.session_state['fig_sop']
-    fig_cutoff = st.session_state['fig_cutoff']
-    feature_ID = st.session_state['feature_ID']
-    
-    # Generate Word report button
-    if st.button("📄 Generate Word Report", key="generate_word", type="primary", use_container_width=True):
-        with st.spinner("⏳ Generating Word document..."):
+        # Process the assessment
+        with st.spinner("⏳ Calculating metal loss assessment... This may take a moment."):
             try:
-                # Save Plotly charts as PNG images (800x400 is sufficient for Word report, faster than 1200x600)
-                depth_img = export_plot_as_image(fig_depth, format="png", width=800, height=400)
-                sop_img = export_plot_as_image(fig_sop, format="png", width=800, height=400)
-                cutoff_img = export_plot_as_image(fig_cutoff, format="png", width=800, height=400)
+                # Prepare the request
+                data = {
+                    "do": do,
+                    "tp": tp,
+                    "YS": YS,
+                    "TS": TS,
+                    "dimp_org_percent": dimp_org_percent,
+                    "Limp_org": Limp_org,
+                    "date_ILI": date_ILI.strftime("%Y-%m-%d"),
+                    "ILI_dimp_tolerance": ILI_dimp_tolerance,
+                    "ILI_Limp_tolerance": ILI_Limp_tolerance,
+                    "CR_low": CR_low,
+                    "CR_ave": CR_ave,
+                    "CR_high": CR_high,
+                    "month_CR": month_CR,
+                    "feature_ID": feature_ID,
+                    "vendor_ILI": vendor_ILI,
+                    "CR_Limp": CR_Limp
+                }
+            
+                # Call the API
+                with httpx.Client(timeout=60.0) as client:
+                    response = client.post(
+                        f"{BACKEND_URL}/api/pipeline/metal-loss/assess",
+                        data=data,
+                    )
+            
+                if response.status_code == 200:
+                    results = response.json()
                 
-                # Check if any image export failed
-                if not any([depth_img, sop_img, cutoff_img]):
-                    st.warning("⚠️ Chart images could not be exported, but generating report without charts...")
-                    # Set empty images for failed exports
-                    depth_img = depth_img or b''
-                    sop_img = sop_img or b''
-                    cutoff_img = cutoff_img or b''
+                    st.success("✅ Assessment completed successfully!")
                 
-                # Prepare multipart: form field + files (same format as dig-package for reliability)
-                # Use raw bytes for file content - some clients have issues with BytesIO
-                multipart = [
-                    ("assessment_results", (None, json.dumps(results, default=str))),
-                    ("depth_growth_chart", ("depth_growth.png", depth_img or b"", "image/png")),
-                    ("sop_decay_chart", ("sop_decay.png", sop_img or b"", "image/png")),
-                    ("sop_cutoff_chart", ("sop_cutoff.png", cutoff_img or b"", "image/png")),
-                ]
+                    # Display results
+                    st.markdown("---")
+                    st.header("📊 Assessment Results")
                 
-                # Call export API
-                with httpx.Client(timeout=120.0) as client:
-                    export_response = client.post(
-                        f"{BACKEND_URL}/api/pipeline/metal-loss/export-word",
-                        files=multipart
+                    # Input Parameters Summary Table
+                    with st.expander("📋 Input Parameters Summary", expanded=True):
+                        inputs = results['inputs']
+                    
+                        params_data = {
+                            "Parameter": [
+                                "Feature Number/Identifier",
+                                "Depth of the defect, %NWT",
+                                "Length of the defect, mm",
+                                "Outside diameter of the pipe, mm",
+                                "Pipe wall thickness, mm",
+                                "Yield strength of the material, MPa",
+                                "Tensile strength of the material, MPa",
+                                "ILI vendor",
+                                "ILI time",
+                                "ILI tool tolerance for depth, %",
+                                "ILI tool tolerance for length, mm",
+                                "Feature depth growth rate, mm/yr",
+                                "Feature length growth rate, mm/yr"
+                            ],
+                            "Value": [
+                                inputs['feature_ID'],
+                                f"{inputs['dimp_org_percent']}",
+                                f"{inputs['Limp_org']}",
+                                f"{inputs['do']}",
+                                f"{inputs['tp']}",
+                                f"{inputs['YS']}",
+                                f"{inputs['TS']}",
+                                inputs['vendor_ILI'],
+                                inputs['date_ILI'],
+                                f"{inputs['ILI_dimp_tolerance']}",
+                                f"{inputs['ILI_Limp_tolerance']}",
+                                f"{inputs['CR_low']} (low), {inputs['CR_ave']} (avg), {inputs['CR_high']} (high)",
+                                f"{inputs.get('CR_Limp', 0)}"
+                            ]
+                        }
+                    
+                        df_params = pd.DataFrame(params_data)
+                        st.dataframe(df_params, width="stretch", hide_index=True)
+                
+                    # Generate date sequence for x-axis
+                    date_start = datetime.strptime(inputs['date_ILI'], "%Y-%m-%d")
+                    date_seq = [date_start + timedelta(days=30*i) for i in range(month_CR)]
+                
+                    # Depth Growth Chart
+                    st.markdown("### 📈 Predicted Defect Depth Growth")
+                
+                    fig_depth = go.Figure()
+                
+                    depth_low = results['depth_arrays']['low']
+                    depth_ave = results['depth_arrays']['ave']
+                    depth_high = results['depth_arrays']['high']
+                
+                    fig_depth.add_trace(go.Scatter(
+                        x=date_seq,
+                        y=depth_low,
+                        mode='lines',
+                        name='Low Growth Rate',
+                        line=dict(color='green', width=2)
+                    ))
+                
+                    fig_depth.add_trace(go.Scatter(
+                        x=date_seq,
+                        y=depth_ave,
+                        mode='lines',
+                        name='Average Growth Rate',
+                        line=dict(color='orange', width=2)
+                    ))
+                
+                    fig_depth.add_trace(go.Scatter(
+                        x=date_seq,
+                        y=depth_high,
+                        mode='lines',
+                        name='High Growth Rate',
+                        line=dict(color='red', width=2)
+                    ))
+                
+                    # Add 80% wall thickness line
+                    wall_80 = results['calculated']['wall_thickness_80']
+                    fig_depth.add_hline(
+                        y=wall_80,
+                        line_dash="dash",
+                        line_color="red",
+                        annotation_text="80% Wall Thickness",
+                        annotation_position="right"
                     )
                 
-                if export_response.status_code == 200:
-                    # Store the document in session state for download
-                    st.session_state['word_doc'] = export_response.content
-                    st.session_state['doc_filename'] = f"Metal_Loss_Assessment_{feature_ID}_{datetime.now().strftime('%Y%m%d')}.docx"
-                    st.success("✅ Word report generated successfully!")
-                    st.rerun()  # Rerun to show download button
+                    fig_depth.update_layout(
+                        title="Predicted Defect Depth Growth",
+                        xaxis_title="Date",
+                        yaxis_title="Defect Depth (mm)",
+                        hovermode='x unified',
+                        legend=dict(x=0.02, y=0.98),
+                        height=500
+                    )
+                
+                    st.plotly_chart(fig_depth, width="stretch")
+                
+                    # Depth Growth Table
+                    with st.expander("📋 Depth Growth Data Table"):
+                        df_depth = pd.DataFrame({
+                            'Month': list(range(month_CR)),
+                            'Date': [d.strftime("%Y-%m-%d") for d in date_seq],
+                            'Depth Low (mm)': [f"{d:.2f}" for d in depth_low],
+                            'Depth Low (%)': [f"{d/tp*100:.2f}" for d in depth_low],
+                            'Depth Ave (mm)': [f"{d:.2f}" for d in depth_ave],
+                            'Depth Ave (%)': [f"{d/tp*100:.2f}" for d in depth_ave],
+                            'Depth High (mm)': [f"{d:.2f}" for d in depth_high],
+                            'Depth High (%)': [f"{d/tp*100:.2f}" for d in depth_high]
+                        })
+                        st.dataframe(df_depth, width="stretch", hide_index=True)
+                
+                    # SOP Decay Chart
+                    st.markdown("### 📉 Predicted Safe Operating Pressure Decay")
+                
+                    fig_sop = go.Figure()
+                
+                    sop_low = results['sop_arrays']['low']
+                    sop_ave = results['sop_arrays']['ave']
+                    sop_high = results['sop_arrays']['high']
+                
+                    fig_sop.add_trace(go.Scatter(
+                        x=date_seq,
+                        y=sop_low,
+                        mode='lines',
+                        name='Low Growth Rate',
+                        line=dict(color='green', width=2)
+                    ))
+                
+                    fig_sop.add_trace(go.Scatter(
+                        x=date_seq,
+                        y=sop_ave,
+                        mode='lines',
+                        name='Average Growth Rate',
+                        line=dict(color='orange', width=2)
+                    ))
+                
+                    fig_sop.add_trace(go.Scatter(
+                        x=date_seq,
+                        y=sop_high,
+                        mode='lines',
+                        name='High Growth Rate',
+                        line=dict(color='red', width=2)
+                    ))
+                
+                    # Add threshold line (example: 800 psi)
+                    fig_sop.add_hline(
+                        y=800,
+                        line_dash="dash",
+                        line_color="red",
+                        annotation_text="800 psi Threshold",
+                        annotation_position="right"
+                    )
+                
+                    fig_sop.update_layout(
+                        title="Predicted Safe Operating Pressure Decay",
+                        xaxis_title="Date",
+                        yaxis_title="Safe Operating Pressure (psi)",
+                        hovermode='x unified',
+                        legend=dict(x=0.02, y=0.98),
+                        height=500
+                    )
+                
+                    st.plotly_chart(fig_sop, width="stretch")
+                
+                    # SOP Table
+                    with st.expander("📋 SOP Decay Data Table"):
+                        df_sop = pd.DataFrame({
+                            'Month': list(range(month_CR)),
+                            'Date': [d.strftime("%Y-%m-%d") for d in date_seq],
+                            'SOP Low (psi)': [f"{s:.2f}" for s in sop_low],
+                            'SOP Ave (psi)': [f"{s:.2f}" for s in sop_ave],
+                            'SOP High (psi)': [f"{s:.2f}" for s in sop_high]
+                        })
+                        st.dataframe(df_sop, width="stretch", hide_index=True)
+                
+                    # SOP with Cutoff Chart
+                    st.markdown("### 📊 SOP Decay with 80% Wall Thickness Cutoff")
+                
+                    cutoff_months = results['cutoff_months']
+                
+                    fig_cutoff = go.Figure()
+                
+                    # Truncate data at cutoff points (handle -1 for safe condition)
+                    cutoff_low_idx = month_CR if cutoff_months['low'] == -1 else min(cutoff_months['low'], month_CR)
+                    cutoff_ave_idx = month_CR if cutoff_months['ave'] == -1 else min(cutoff_months['ave'], month_CR)
+                    cutoff_high_idx = month_CR if cutoff_months['high'] == -1 else min(cutoff_months['high'], month_CR)
+                
+                    # Create labels
+                    low_label = f'Low (Safe)' if cutoff_months['low'] == -1 else f'Low (Cutoff: Month {cutoff_low_idx})'
+                    ave_label = f'Average (Safe)' if cutoff_months['ave'] == -1 else f'Average (Cutoff: Month {cutoff_ave_idx})'
+                    high_label = f'High (Safe)' if cutoff_months['high'] == -1 else f'High (Cutoff: Month {cutoff_high_idx})'
+                
+                    fig_cutoff.add_trace(go.Scatter(
+                        x=date_seq[:cutoff_low_idx],
+                        y=sop_low[:cutoff_low_idx],
+                        mode='lines+markers',
+                        name=low_label,
+                        line=dict(color='green', width=2),
+                        marker=dict(size=6)
+                    ))
+                
+                    fig_cutoff.add_trace(go.Scatter(
+                        x=date_seq[:cutoff_ave_idx],
+                        y=sop_ave[:cutoff_ave_idx],
+                        mode='lines+markers',
+                        name=ave_label,
+                        line=dict(color='orange', width=2),
+                        marker=dict(size=6)
+                    ))
+                
+                    fig_cutoff.add_trace(go.Scatter(
+                        x=date_seq[:cutoff_high_idx],
+                        y=sop_high[:cutoff_high_idx],
+                        mode='lines+markers',
+                        name=high_label,
+                        line=dict(color='red', width=2),
+                        marker=dict(size=6)
+                    ))
+                
+                    fig_cutoff.add_hline(
+                        y=800,
+                        line_dash="dash",
+                        line_color="red",
+                        annotation_text="800 psi Threshold",
+                        annotation_position="right"
+                    )
+                
+                    fig_cutoff.update_layout(
+                        title="SOP Decay (Up to 80% Wall Thickness)",
+                        xaxis_title="Date",
+                        yaxis_title="Safe Operating Pressure (psi)",
+                        hovermode='x unified',
+                        legend=dict(x=0.02, y=0.98),
+                        height=500
+                    )
+                
+                    st.plotly_chart(fig_cutoff, width="stretch")
+                
+                    # Cutoff information
+                    with st.expander("ℹ️ 80% Wall Thickness Cutoff Information"):
+                        for rate_name, rate_key in [("Low", "low"), ("Average", "ave"), ("High", "high")]:
+                            cutoff = cutoff_months[rate_key]
+                            # -1 indicates safe (from backend update)
+                            if cutoff == -1:
+                                st.write(f"**{rate_name} corrosion rate:** Safe for full projection period ({month_CR} months)")
+                            else:
+                                st.write(f"**{rate_name} corrosion rate:** Reaches 80% wall thickness at Month {cutoff}")
+                
+                    # Store results and figures in session state for export and persistence
+                    st.session_state['metal_loss_results'] = results
+                    st.session_state['fig_depth'] = fig_depth
+                    st.session_state['fig_sop'] = fig_sop
+                    st.session_state['fig_cutoff'] = fig_cutoff
+                    st.session_state['feature_ID'] = feature_ID
+                    st.session_state['assessment_complete'] = True
+                
                 else:
-                    st.error(f"❌ Error generating report: {export_response.text}")
-            
+                    error_detail = response.json().get("detail", "Unknown error")
+                    st.error(f"❌ Error processing assessment: {error_detail}")
+                
+            except httpx.TimeoutException:
+                st.error("❌ Request timed out. The calculation might be too complex.")
+            except httpx.ConnectError:
+                st.error("❌ Could not connect to the backend server. Please make sure it's running.")
             except Exception as e:
-                st.error(f"❌ Error exporting to Word: {str(e)}")
-                if "kaleido" in str(e).lower():
-                    st.info("💡 For better image export, install kaleido: `pip install kaleido`")
-                else:
-                    st.info("💡 Please try again or contact support if the issue persists.")
-    
-    # Show download button if document is ready
-    if 'word_doc' in st.session_state:
-        st.download_button(
-            label="💾 Download Report (.docx)",
-            data=st.session_state['word_doc'],
-            file_name=st.session_state['doc_filename'],
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            use_container_width=True,
-            key="download_word"
-        )
-        st.caption("Click the button above to download your report")
+                st.error(f"❌ An error occurred: {str(e)}")
 
-# Help section
-with st.expander("ℹ️ Help & Methodology"):
-    st.markdown("""
-    ### About Metal Loss Assessment
+    # Export section - show if assessment is complete
+    if st.session_state.get('assessment_complete', False):
+        st.markdown("---")
+        st.subheader("📥 Export Report")
     
-    This tool performs pipeline metal loss assessment using the **Modified B31G** methodology, 
-    which is widely accepted in the pipeline integrity industry.
+        st.info("💡 **Export to Word**: Download a comprehensive assessment report with all tables and charts.")
     
-    ### Methodology
+        # Retrieve stored data
+        results = st.session_state['metal_loss_results']
+        fig_depth = st.session_state['fig_depth']
+        fig_sop = st.session_state['fig_sop']
+        fig_cutoff = st.session_state['fig_cutoff']
+        feature_ID = st.session_state['feature_ID']
     
-    **Modified B31G (ASME B31G-2009)**:
-    - Calculates failure pressure based on defect geometry
-    - Accounts for material properties and pipe dimensions
-    - Uses Folias bulging factor for stress intensification
-    - Default flow stress: SMYS + 69 MPa
+        # Generate Word report button
+        if st.button("📄 Generate Word Report", key="generate_word", type="primary", width="stretch"):
+            with st.spinner("⏳ Generating Word document..."):
+                try:
+                    # Save Plotly charts as PNG images (800x400 is sufficient for Word report, faster than 1200x600)
+                    depth_img = export_plot_as_image(fig_depth, format="png", width=800, height=400)
+                    sop_img = export_plot_as_image(fig_sop, format="png", width=800, height=400)
+                    cutoff_img = export_plot_as_image(fig_cutoff, format="png", width=800, height=400)
+                
+                    # Check if any image export failed
+                    if not any([depth_img, sop_img, cutoff_img]):
+                        st.warning("⚠️ Chart images could not be exported, but generating report without charts...")
+                        # Set empty images for failed exports
+                        depth_img = depth_img or b''
+                        sop_img = sop_img or b''
+                        cutoff_img = cutoff_img or b''
+                
+                    # Prepare multipart: form field + files (same format as dig-package for reliability)
+                    # Use raw bytes for file content - some clients have issues with BytesIO
+                    multipart = [
+                        ("assessment_results", (None, json.dumps(results, default=str))),
+                        ("depth_growth_chart", ("depth_growth.png", depth_img or b"", "image/png")),
+                        ("sop_decay_chart", ("sop_decay.png", sop_img or b"", "image/png")),
+                        ("sop_cutoff_chart", ("sop_cutoff.png", cutoff_img or b"", "image/png")),
+                    ]
+                
+                    # Call export API
+                    with httpx.Client(timeout=120.0) as client:
+                        export_response = client.post(
+                            f"{BACKEND_URL}/api/pipeline/metal-loss/export-word",
+                            files=multipart
+                        )
+                
+                    if export_response.status_code == 200:
+                        # Store the document in session state for download
+                        st.session_state['word_doc'] = export_response.content
+                        st.session_state['doc_filename'] = f"Metal_Loss_Assessment_{feature_ID}_{datetime.now().strftime('%Y%m%d')}.docx"
+                        st.success("✅ Word report generated successfully!")
+                        st.rerun()  # Rerun to show download button
+                    else:
+                        st.error(f"❌ Error generating report: {export_response.text}")
+            
+                except Exception as e:
+                    st.error(f"❌ Error exporting to Word: {str(e)}")
+                    if "kaleido" in str(e).lower():
+                        st.info("💡 For better image export, install kaleido: `pip install kaleido`")
+                    else:
+                        st.info("💡 Please try again or contact support if the issue persists.")
     
-    **Assessment Process**:
-    1. Apply ILI tool tolerances to defect measurements
-    2. Project defect growth using corrosion rates
-    3. Calculate failure pressure at each time step
-    4. Convert to Safe Operating Pressure (SOP = Pf / 1.25)
-    5. Identify when defect reaches 80% wall thickness
-    
-    ### Corrosion Growth Rates
-    
-    Three scenarios are evaluated:
-    - **Low (50th percentile)**: Conservative estimate
-    - **Average (90th percentile)**: Expected growth rate
-    - **High (99th percentile)**: Worst-case scenario
-    
-    Rates based on PRCI research and historical ILI correlation studies.
-    
-    ### Safety Factor
-    
-    - **Design Factor**: 1.25 (SOP = Failure Pressure / 1.25)
-    - This provides margin for uncertainties in:
-      - Material properties
-      - Defect dimensions
-      - Growth rate predictions
-      - Measurement accuracy
-    
-    ### Limitations
-    
-    - Applicable for depth ≤ 80% wall thickness
-    - Assumes uniform corrosion within defect
-    - Does not account for multiple interacting defects
-    - Longitudinal defects only (not circumferential)
-    
-    ### References
-    
-    - ASME B31G-2009: Manual for Determining the Remaining Strength of Corroded Pipelines
-    - PRCI Report: Generic External Corrosion Growth Rate Distributions for Buried Pipelines
-    - CSA Z662: Oil and Gas Pipeline Systems
-    """)
+        # Show download button if document is ready
+        if 'word_doc' in st.session_state:
+            st.download_button(
+                label="💾 Download Report (.docx)",
+                data=st.session_state['word_doc'],
+                file_name=st.session_state['doc_filename'],
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                width="stretch",
+                key="download_word"
+            )
+            st.caption("Click the button above to download your report")
 
-# Footer
-st.divider()
-st.caption("Metal Loss Assessment Tool v1.0 | Chen's Engineer Toolbox")
+    # Help section
+    with st.expander("ℹ️ Help & Methodology"):
+        st.markdown("""
+        ### About Metal Loss Assessment
+    
+        This tool performs pipeline metal loss assessment using the **Modified B31G** methodology, 
+        which is widely accepted in the pipeline integrity industry.
+    
+        ### Methodology
+    
+        **Modified B31G (ASME B31G-2009)**:
+        - Calculates failure pressure based on defect geometry
+        - Accounts for material properties and pipe dimensions
+        - Uses Folias bulging factor for stress intensification
+        - Default flow stress: SMYS + 69 MPa
+    
+        **Assessment Process**:
+        1. Apply ILI tool tolerances to defect measurements
+        2. Project defect growth using corrosion rates
+        3. Calculate failure pressure at each time step
+        4. Convert to Safe Operating Pressure (SOP = Pf / 1.25)
+        5. Identify when defect reaches 80% wall thickness
+    
+        ### Corrosion Growth Rates
+    
+        Three scenarios are evaluated:
+        - **Low (50th percentile)**: Conservative estimate
+        - **Average (90th percentile)**: Expected growth rate
+        - **High (99th percentile)**: Worst-case scenario
+    
+        Rates based on PRCI research and historical ILI correlation studies.
+    
+        ### Safety Factor
+    
+        - **Design Factor**: 1.25 (SOP = Failure Pressure / 1.25)
+        - This provides margin for uncertainties in:
+          - Material properties
+          - Defect dimensions
+          - Growth rate predictions
+          - Measurement accuracy
+    
+        ### Limitations
+    
+        - Applicable for depth ≤ 80% wall thickness
+        - Assumes uniform corrosion within defect
+        - Does not account for multiple interacting defects
+        - Longitudinal defects only (not circumferential)
+    
+        ### References
+    
+        - ASME B31G-2009: Manual for Determining the Remaining Strength of Corroded Pipelines
+        - PRCI Report: Generic External Corrosion Growth Rate Distributions for Buried Pipelines
+        - CSA Z662: Oil and Gas Pipeline Systems
+        """)
+
+    # Footer
+    st.divider()
+    st.caption("Metal Loss Assessment Tool v1.0 | Chen's Engineer Toolbox")
+
+with right_col:
+    render_chat_expander(right_col, chat_visible)
 

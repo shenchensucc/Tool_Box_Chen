@@ -132,6 +132,14 @@ def apply_custom_styling():
         * {
             transition: background-color 0.3s ease, border-color 0.3s ease;
         }
+
+        /* Chat panel: sticky/floating when scrolling */
+        [data-testid="stHorizontalBlock"] > div:last-child {
+            position: sticky !important;
+            top: 1rem !important;
+            align-self: start !important;
+        }
+
         </style>
         """,
         unsafe_allow_html=True,
@@ -222,6 +230,24 @@ def show_backend_unavailable_and_retry() -> None:
     if st.button("🔄 Retry connection", type="primary"):
         check_backend_health.clear()
         st.rerun()
+
+
+def get_layout_with_chat():
+    """
+    Return (left_col, right_col, chat_visible) for main content + Chat with Chen panel.
+    Chat can be hidden (collapsed tab on right) or shown with adjustable width.
+    """
+    if "chat_panel_visible" not in st.session_state:
+        st.session_state.chat_panel_visible = True  # Start visible; user can hide
+    if "chat_panel_width" not in st.session_state:
+        st.session_state.chat_panel_width = 2  # 1-4, default 2
+
+    visible = st.session_state.chat_panel_visible
+    w = st.session_state.chat_panel_width
+    # Total 10 parts: left gets (10-w), right gets w. Min right=1 when visible.
+    right = max(1, min(4, w)) if visible else 1
+    left = 10 - right
+    return st.columns([left, right]), visible
 
 
 def display_sidebar_navigation():

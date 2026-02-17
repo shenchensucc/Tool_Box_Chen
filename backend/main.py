@@ -1,11 +1,21 @@
 import asyncio
 import os
 import shutil
+from pathlib import Path
+
+# Load .env from project root (secrets stay out of git)
+try:
+    from dotenv import load_dotenv
+    _env_path = Path(__file__).resolve().parent.parent / ".env"
+    load_dotenv(_env_path)
+    if not _env_path.exists():
+        load_dotenv()  # Fallback: load from current working directory
+except ImportError:
+    pass
 import tempfile
 import zipfile
 import uuid
 from datetime import datetime
-from pathlib import Path
 from typing import Dict, List
 
 import numpy as np
@@ -19,6 +29,9 @@ from fastapi.responses import FileResponse, RedirectResponse
 from openpyxl import load_workbook
 
 from backend.models import (
+    ChatMessage,
+    ChatRequest,
+    ChatResponse,
     ColumnStats,
     HealthResponse,
     HistogramData,
@@ -51,6 +64,11 @@ from backend.pipeline.metal_loss import assess_metal_loss_feature, mass_assess_m
 from backend.pipeline.ili_reader import read_ili_data, identify_ili_columns
 from backend.pipeline.report_generator import generate_word_report
 from backend.pipeline.dig_package import generate_dig_packages
+from backend.docs_loader import get_relevant_context
+from backend.llm_config import get_chat_base_url, get_api_key, DEFAULT_MODEL
+from backend.tools.web_search import web_search
+from backend.tools.schemas import WEB_SEARCH_SCHEMA
+from openai import OpenAI
 
 app = FastAPI(title="Chen's Engineer Toolbox API", version="0.1.0")
 
@@ -140,6 +158,158 @@ def create_histogram(series: pd.Series, column_name: str, bins: int = 30) -> His
 async def root():
     """Redirect root to API docs"""
     return RedirectResponse(url="/docs", status_code=302)
+
+
+@app.get("/api/search")
+async def api_web_search(q: str, max_results: int = 6):
+    """
+    Web search endpoint using AI Builders Space MCP (Tavily).
+    Query parameter: q (search query)
+    """
+    from backend.tools.web_search import web_search
+    result = web_search(query=q, max_results=max_results)
+    return {"query": q, "result": result}
+
+
+@app.get("/api/chat/models")
+async def list_chat_models():
+    """List available LLM models for Chat with Chen."""
+    from backend.llm_config import LLM_OPTIONS
+    return {"models": LLM_OPTIONS, "default": DEFAULT_MODEL}
+
+
+MAX_AGENT_TURNS = 3
+
+
+def _to_dict(obj):
+    """Convert OpenAI response object to dict for API."""
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump()
+    if hasattr(obj, "dict"):
+        return obj.dict()
+    return dict(obj) if obj else {}
+
+
+@app.post("/api/chat", response_model=ChatResponse)
+async def chat_completion(request: ChatRequest):
+    """
+    Chat completion with full agentic loop: tool calls (web_search) executed
+    and fed back to the LLM, up to MAX_AGENT_TURNS times.
+    """
+    import json
+
+    log_params(logger, "chat", {"model": request.model, "msg_count": len(request.messages)})
+    logger.info("[Agent] Starting chat completion")
+
+    api_key = get_api_key()
+    if not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="AI_BUILDER_TOKEN not configured. Copy .env.example to .env and set your token.",
+        )
+
+    # Build messages
+    messages: List[dict] = [
+        {"role": m.role, "content": m.content}
+        for m in request.messages
+    ]
+
+    # Inject tool docs context for tool-related questions (last user message)
+    last_user = next((m for m in reversed(request.messages) if m.role == "user"), None)
+    if last_user and last_user.content:
+        ctx = get_relevant_context(last_user.content)
+        if ctx:
+            system_ctx = (
+                "You are 'Chen', a helpful assistant for Chen's Engineer Toolbox. "
+                "You have access to the following tool documentation. Use it to answer questions about the tools.\n\n"
+                f"{ctx}"
+            )
+            if messages and messages[0].get("role") == "system":
+                messages[0]["content"] = system_ctx + "\n\n" + messages[0]["content"]
+            else:
+                messages.insert(0, {"role": "system", "content": system_ctx})
+
+    tools = request.tools or [WEB_SEARCH_SCHEMA]
+    tool_choice = request.tool_choice or "auto"
+
+    client = OpenAI(
+        base_url=get_chat_base_url(),
+        api_key=api_key,
+    )
+
+    msg = None
+    turn = 0
+    last_tool_calls: List = []
+
+    while turn < MAX_AGENT_TURNS:
+        turn += 1
+        logger.info(f"[Agent] Turn {turn}/{MAX_AGENT_TURNS}")
+
+        try:
+            response = client.chat.completions.create(
+                model=request.model,
+                messages=messages,
+                tools=tools,
+                tool_choice=tool_choice,
+                max_tokens=2048,
+            )
+        except Exception as e:
+            log_error(logger, "chat", e)
+            raise HTTPException(status_code=502, detail=str(e))
+
+        choice = response.choices[0] if response.choices else None
+        if not choice:
+            raise HTTPException(status_code=502, detail="No completion returned")
+
+        msg = choice.message
+        last_tool_calls = getattr(msg, "tool_calls", None) or []
+
+        if not last_tool_calls:
+            content = getattr(msg, "content", None) or (msg.get("content") if isinstance(msg, dict) else "") or ""
+            logger.info(f"[Agent] Final Answer: '{content[:200]}{'...' if len(content) > 200 else ''}'")
+            break
+
+        # Execute tool calls
+        assistant_msg = _to_dict(msg)
+        messages.append(assistant_msg)
+
+        for tc in last_tool_calls:
+            fn = getattr(tc, "function", None) or (tc.get("function") if isinstance(tc, dict) else None)
+            if not fn:
+                continue
+            name = fn.name if hasattr(fn, "name") else fn.get("name")
+            args_str = fn.arguments if hasattr(fn, "arguments") else fn.get("arguments", "{}")
+            logger.info(f"[Agent] Decided to call tool: '{name}'")
+
+            result = ""
+            if name == "web_search":
+                try:
+                    args = json.loads(args_str) if isinstance(args_str, str) else args_str
+                    query = args.get("query", "")
+                    result = web_search(query)
+                except Exception as e:
+                    result = f"Error: {str(e)}"
+            else:
+                result = f"Unknown tool: {name}"
+
+            tc_id = tc.id if hasattr(tc, "id") else tc.get("id", "call_0")
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc_id,
+                "content": result,
+            })
+            preview = result[:150] + "..." if len(result) > 150 else result
+            logger.info(f"[System] Tool Output: '{preview}'")
+
+    content = getattr(msg, "content", None) or (msg.get("content") if isinstance(msg, dict) else "") or ""
+    if not content and turn >= MAX_AGENT_TURNS and last_tool_calls:
+        content = "(Max turns reached; could not complete tool chain.)"
+        logger.warning("[Agent] Max turns reached with pending tool calls")
+    return ChatResponse(
+        content=content or "(No response)",
+        model=request.model,
+        tool_calls=None,
+    )
 
 
 @app.get("/health", response_model=HealthResponse)

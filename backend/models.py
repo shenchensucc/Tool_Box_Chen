@@ -71,4 +71,28 @@ class TMLProcessResponse(BaseModel):
     combined_token: str = Field(..., description="Token to download combined Excel file")
     workflows_processed: int
     workflow_summary: Dict[int, int] = Field(..., description="Workflow ID -> records count mapping")
-    timestamp: str 
+    timestamp: str
+
+
+class ChatMessage(BaseModel):
+    """Chat message for /api/chat"""
+
+    role: str  # "user" | "assistant" | "system"
+    content: str
+
+
+class ChatRequest(BaseModel):
+    """Request body for /api/chat"""
+
+    messages: List[ChatMessage]
+    model: str = "grok-4-fast"
+    tools: Optional[List[Dict[str, Any]]] = None  # OpenAI tool definitions
+    tool_choice: Optional[str] = None  # "auto" | "none" | {"type": "function", "function": {"name": "..."}}
+
+
+class ChatResponse(BaseModel):
+    """Response from /api/chat"""
+
+    content: str
+    model: str
+    tool_calls: Optional[List[Dict[str, Any]]] = None
