@@ -16,7 +16,7 @@ import tempfile
 import zipfile
 import uuid
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 from backend.logging_config import get_logger, log_params, log_error
@@ -33,6 +33,7 @@ from backend.models import (
     ChatRequest,
     ChatResponse,
     ColumnStats,
+    FeatureMapResponse,
     HealthResponse,
     HistogramData,
     PreviewResponse,
@@ -61,14 +62,17 @@ from backend.tml.workflows._18_design_factor import process_design_factor
 from backend.tml.workflows._19_joint_factor import process_joint_factor
 from backend.tml.workflows._20_location_factor import process_location_factor
 from backend.pipeline.metal_loss import assess_metal_loss_feature, mass_assess_metal_loss
-from backend.pipeline.ili_reader import read_ili_data, identify_ili_columns
+from backend.pipeline.ili_reader import (
+    identify_ili_columns,
+    parse_pasted_ili_text,
+    read_ili_data,
+)
 from backend.pipeline.report_generator import generate_word_report
 from backend.pipeline.dig_package import generate_dig_packages
 from backend.docs_loader import get_relevant_context
 from backend.llm_config import get_chat_base_url, get_api_key, DEFAULT_MODEL
 from backend.tools.web_search import web_search
 from backend.tools.schemas import WEB_SEARCH_SCHEMA
-from openai import OpenAI
 
 app = FastAPI(title="Chen's Engineer Toolbox API", version="0.1.0")
 
@@ -232,6 +236,7 @@ async def chat_completion(request: ChatRequest):
     tools = request.tools or [WEB_SEARCH_SCHEMA]
     tool_choice = request.tool_choice or "auto"
 
+    from openai import OpenAI
     client = OpenAI(
         base_url=get_chat_base_url(),
         api_key=api_key,
@@ -507,6 +512,236 @@ async def process_ili_data(
         # Clean up temp file
         if temp_path.exists():
             os.unlink(temp_path)
+
+
+def _parse_orientation_to_degrees(val) -> Optional[float]:
+    """Parse orientation (clock '2:48' or degrees) to degrees from 12 o'clock."""
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return None
+    s = str(val).strip()
+    if not s:
+        return None
+    if ":" in s:
+        parts = s.split(":")
+        try:
+            h = float(parts[0])
+            m = float(parts[1]) if len(parts) > 1 else 0
+            clock_pos = h + m / 60.0
+            return (clock_pos / 12.0) * 360.0
+        except (ValueError, IndexError):
+            return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _format_orientation_hours(hours: float) -> str:
+    """Format hours (e.g. 8.37) as hh:mm for display."""
+    h = int(hours)
+    m = int((hours - h) * 60)
+    return f"{h:02d}:{m:02d}"
+
+
+def _parse_orientation_to_hours(val) -> Optional[float]:
+    """Parse orientation (clock '2:48' or '08:22') to hours 0-12 for Y-axis."""
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return None
+    s = str(val).strip()
+    if not s:
+        return None
+    if ":" in s:
+        parts = s.split(":")
+        try:
+            h = float(parts[0])
+            m = float(parts[1]) if len(parts) > 1 else 0
+            return h + m / 60.0
+        except (ValueError, IndexError):
+            return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+@app.post("/api/ili/parse-paste", response_model=FeatureMapResponse)
+async def parse_pasted_ili(pasted_text: str = Form(...)):
+    """
+    Parse pasted tabular ILI data (e.g. from Excel copy) and return features for
+    interactive visualization. Uses ili_reader to auto-detect columns.
+    Returns same structure as /api/ili/process (stats, histograms, scatter_data).
+    """
+    log_params(logger, "ili/parse-paste", {"text_length": len(pasted_text)})
+    pasted_text = (pasted_text or "").strip()
+    if not pasted_text:
+        return FeatureMapResponse(success=False, error="No pasted data provided")
+
+    try:
+        df = parse_pasted_ili_text(pasted_text)
+        if df.empty or len(df) == 0:
+            return FeatureMapResponse(success=False, error="Could not parse pasted data into a table")
+
+        ili_cols = identify_ili_columns(df)
+        dist_col = ili_cols.get("distance")
+        depth_col = ili_cols.get("depth") or ili_cols.get("metal_loss")
+        length_col = ili_cols.get("length")
+        width_col = ili_cols.get("width")
+        fid_col = ili_cols.get("feature_id")
+        ftype_col = ili_cols.get("feature_type")
+        fdesc_col = ili_cols.get("feature_desc")
+        orient_col = ili_cols.get("orientation")
+        joint_col = ili_cols.get("joint_number")
+        gwd_col = next((c for c in df.columns if "gwd" in str(c).lower() or ("u/s" in str(c).lower() and "ili" in str(c).lower() and "number" in str(c).lower())), joint_col)
+        seam_orient_col = next((c for c in df.columns if "seam" in str(c).lower() and "orientation" in str(c).lower()), None)
+
+        if not dist_col:
+            return FeatureMapResponse(
+                success=False,
+                error="No distance/chainage column detected. Ensure your data has a column like 'ILI Chainage (m)' or 'Distance'.",
+            )
+
+        for col in [c for c in [dist_col, depth_col, length_col, width_col] if c and c in df.columns]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        features = []
+        for idx, row in df.iterrows():
+            try:
+                x_val = pd.to_numeric(row.get(dist_col), errors="coerce")
+                if pd.isna(x_val):
+                    continue
+            except (TypeError, ValueError):
+                continue
+
+            depth_val = 0.0
+            if depth_col and depth_col in df.columns:
+                try:
+                    dv = float(pd.to_numeric(row.get(depth_col), errors="coerce"))
+                    if dv is not None and not (isinstance(dv, float) and pd.isna(dv)):
+                        depth_val = dv
+                except (TypeError, ValueError):
+                    pass
+
+            length_val = 0.0
+            if length_col and length_col in df.columns:
+                try:
+                    ln = float(pd.to_numeric(row.get(length_col), errors="coerce"))
+                    if ln and not (isinstance(ln, float) and pd.isna(ln)):
+                        length_val = ln
+                except (TypeError, ValueError):
+                    pass
+
+            width_val = 0.0
+            if width_col and width_col in df.columns:
+                try:
+                    wd = float(pd.to_numeric(row.get(width_col), errors="coerce"))
+                    if wd and not (isinstance(wd, float) and pd.isna(wd)):
+                        width_val = wd
+                except (TypeError, ValueError):
+                    pass
+
+            orient_val = row.get(orient_col) if orient_col and orient_col in df.columns else None
+            orientation_deg = _parse_orientation_to_degrees(orient_val)
+            orientation_hours = _parse_orientation_to_hours(orient_val)
+
+            feature_type = str(row.get(ftype_col, "")).strip() if ftype_col and ftype_col in df.columns else ""
+            gwd_number = None
+            if (gwd_col and gwd_col in df.columns) or (joint_col and joint_col in df.columns):
+                val = row.get(gwd_col or joint_col)
+                if pd.notna(val):
+                    try:
+                        gwd_number = int(float(val))
+                    except (ValueError, TypeError):
+                        gwd_number = str(val).strip()
+            seam_orient_val = row.get(seam_orient_col) if seam_orient_col and seam_orient_col in df.columns else None
+            seam_orient_hours = _parse_orientation_to_hours(seam_orient_val)
+
+            parts = []
+            if fid_col and fid_col in df.columns:
+                parts.append(f"<b>Feature ID:</b> {row.get(fid_col, '')}")
+            if ftype_col and ftype_col in df.columns:
+                parts.append(f"<b>Type:</b> {row.get(ftype_col, '')}")
+            if fdesc_col and fdesc_col in df.columns:
+                parts.append(f"<b>Description:</b> {row.get(fdesc_col, '')}")
+            if depth_col and depth_col in df.columns:
+                parts.append(f"<b>Depth:</b> {row.get(depth_col, '')}")
+            if length_col and length_col in df.columns:
+                parts.append(f"<b>Length (mm):</b> {row.get(length_col, '')}")
+            if width_col and width_col in df.columns:
+                parts.append(f"<b>Width (mm):</b> {row.get(width_col, '')}")
+            if orient_col and orient_col in df.columns:
+                parts.append(f"<b>Orientation:</b> {row.get(orient_col, '')}")
+            parts.append(f"<b>Chainage (m):</b> {x_val}")
+            hover_text = "<br>".join(parts)
+
+            feat = {
+                "x": float(x_val),
+                "y": float(depth_val),
+                "depth": float(depth_val),
+                "length": float(length_val),
+                "width": float(width_val),
+                "orientation_deg": orientation_deg,
+                "orientation_hours": float(orientation_hours) if orientation_hours is not None else 6.0,
+                "feature_type": feature_type,
+                "gwd_number": gwd_number,
+                "seam_orient_hours": float(seam_orient_hours) if seam_orient_hours is not None else None,
+                "hover_text": hover_text,
+                "feature_id": str(row.get(fid_col, idx)) if fid_col and fid_col in df.columns else str(idx),
+            }
+            features.append(feat)
+
+        scatter_data = None
+        girth_welds = []
+        seam_welds = []
+        if features and dist_col:
+            x_vals = [f["x"] for f in features]
+            orient_vals = [f.get("orientation_hours", 6.0) for f in features]
+            scatter_data = {
+                "x_column": dist_col,
+                "x_values": x_vals,
+                "y_data": {"depth": [f["y"] for f in features], "metal_loss": [f["y"] for f in features]},
+                "orientation_hours": orient_vals,
+            }
+            gwd_sorted = sorted(
+                [f for f in features if "girth" in (f.get("feature_type") or "").lower() or "gwd" in (f.get("feature_type") or "").lower()],
+                key=lambda x: x["x"],
+            )
+            for f in gwd_sorted:
+                lbl = f"GWD {f['gwd_number']}" if f.get("gwd_number") is not None else ""
+                girth_welds.append({"chainage": f["x"], "gwd_number": f.get("gwd_number"), "label": lbl})
+            idx_next = {gwd_sorted[i]["x"]: gwd_sorted[i + 1]["x"] for i in range(len(gwd_sorted) - 1)}
+            for f in gwd_sorted:
+                if f.get("seam_orient_hours") is not None:
+                    end = idx_next.get(f["x"])
+                    seam_welds.append({
+                        "chainage_start": f["x"],
+                        "chainage_end": end,
+                        "orientation_hours": f["seam_orient_hours"],
+                        "orientation_label": _format_orientation_hours(f["seam_orient_hours"]),
+                    })
+            for f in features:
+                ft = (f.get("feature_type") or "").lower()
+                if "seam" in ft and "girth" not in ft and "gwd" not in ft:
+                    seam_welds.append({
+                        "chainage_start": None,
+                        "chainage_end": None,
+                        "orientation_hours": f.get("orientation_hours", 6.0),
+                        "orientation_label": _format_orientation_hours(f.get("orientation_hours", 6.0)),
+                    })
+            if scatter_data:
+                scatter_data["girth_welds"] = girth_welds
+                scatter_data["seam_welds"] = seam_welds
+
+        logger.info(f"[ili/parse-paste] Parsed {len(features)} features")
+        return FeatureMapResponse(
+            success=True,
+            total_rows=len(features),
+            column_mapping={k: v for k, v in ili_cols.items() if v},
+            features=features,
+            scatter_data=scatter_data,
+        )
+    except Exception as e:
+        log_error(logger, "ili/parse-paste", e)
+        return FeatureMapResponse(success=False, error=str(e))
 
 
 @app.post("/api/tml/process", response_model=TMLProcessResponse)

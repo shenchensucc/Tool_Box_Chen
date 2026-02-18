@@ -32,7 +32,8 @@ app.add_middleware(CORSMiddleware, ...)
 # Endpoints
 @app.get("/health")                  # Health check
 @app.post("/api/ili/preview")        # Preview Excel file
-@app.post("/api/ili/process")        # Process ILI data
+@app.post("/api/ili/process")        # Process ILI data (visualization)
+@app.post("/api/ili/parse-paste")    # Parse pasted tabular data for visualization
 ```
 
 ### Request/Response Flow

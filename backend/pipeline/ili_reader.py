@@ -15,20 +15,22 @@ COLUMN_KEYWORDS = {
     "depth": [
         "depth", "defect depth", "Max. Depth", "dimp", "depth (%)", "depth (mm)",
         "Peak Depth", "Peak Depth (% WT)", "Feature Depth", "Max Depth",
-        "Max. Depth (%)", "Depth (%)", "As-Reported Anomaly Depth (%WT)"
+        "Max. Depth (%)", "Depth (%)", "As-Reported Anomaly Depth (%WT)",
+        "Feature Depth (%WT for Corrosion & Cracks, %OD for Dents)"
     ],
     "length": [
         "length", "Length", "defect length", "Limp", "length (mm)",
-        "Feature Length", "Length (in)", "Length (in.)"
+        "Feature Length", "Feature Length (mm)", "Length (in)", "Length (in.)"
     ],
     "width": [
         "width", "Width", "defect width", "Wimp", "width (mm)",
-        "Feature Width", "Width (in)", "Width (in.)"
+        "Feature Width", "Feature Width (mm)", "Width (in)", "Width (in.)"
     ],
     "distance": [
         "distance", "Distance", "Odometer", "Log Distance", "Chainage",
         "Wheel Count (ft)", "Wheel Count (ft.)", "Log Dist.", "ILI Chainage (m)",
-        "Odometer (m)", "ILI Chainage/Odometer (m)", "ILI Chainage", "ILI Distance (m)"
+        "Odometer (m)", "ILI Chainage/Odometer (m)", "ILI Chainage", "ILI Distance (m)",
+        "Distance from TGW (m)", "Distance from TGW"
     ],
     "feature_id": [
         "feature id", "feature", "id", "f_id", "Feature Number", "Anomaly ID",
@@ -39,7 +41,8 @@ COLUMN_KEYWORDS = {
     "orientation": [
         "Orientation", "Clock Orientation", "O'Clock", "Orientation (clock)",
         "Clock Orient.", "Orientation (hh:mm)", "Feature Orientation",
-        "Feature Orientation (Center of feature) (hh:mm)", "(Degree)", "o'clock"
+        "Feature Orientation (Center of feature) (hh:mm)", "Feature Orientation (deg. or clock)",
+        "(Degree)", "o'clock"
     ],
     "joint_number": [
         "Joint", "Joint Number", "Weld Number", "Joint No. or US GW No.",
@@ -84,6 +87,30 @@ def identify_ili_columns(df: pd.DataFrame, custom_keywords: Optional[Dict[str, L
     found = {k: v for k, v in results.items() if v is not None}
     logger.debug(f"identify_ili_columns: Found {len(found)} columns: {found}")
     return results
+
+def parse_pasted_ili_text(text: str) -> pd.DataFrame:
+    """
+    Parse pasted tabular text (e.g. from Excel copy) into a DataFrame.
+    Tries tab separator first (Excel default), then comma.
+    """
+    import io
+    text = text.strip()
+    if not text:
+        logger.warning("parse_pasted_ili_text: empty input")
+        return pd.DataFrame()
+
+    for sep, name in [("\t", "tab"), (",", "comma")]:
+        try:
+            df = pd.read_csv(io.StringIO(text), sep=sep, dtype=str)
+            if df.shape[1] > 1:
+                logger.info(f"parse_pasted_ili_text: parsed {df.shape} with {name} separator")
+                return df
+        except Exception as e:
+            logger.debug(f"parse_pasted_ili_text: {name} sep failed: {e}")
+            continue
+    logger.warning("parse_pasted_ili_text: could not parse input")
+    return pd.DataFrame()
+
 
 def read_ili_data(file_path_or_buffer, sheet_name: Optional[str] = None) -> pd.DataFrame:
     """

@@ -175,6 +175,22 @@ async def call_preview_api(file) -> Optional[Dict[str, Any]]:
         return None
 
 
+async def call_parse_paste_api(pasted_text: str) -> Optional[Dict[str, Any]]:
+    """Call the backend parse-paste API for pasted ILI data"""
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            data = {"pasted_text": pasted_text}
+            response = await client.post(f"{BACKEND_URL}/api/ili/parse-paste", data=data)
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPError as e:
+        st.error(f"Error calling parse API: {str(e)}")
+        return None
+    except Exception as e:
+        st.error(f"Unexpected error: {str(e)}")
+        return None
+
+
 async def call_process_api(
     file, sheet_name: str, distance_col: str = "", depth_col: str = "", metal_loss_col: str = ""
 ) -> Optional[Dict[str, Any]]:

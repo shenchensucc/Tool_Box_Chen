@@ -62,6 +62,23 @@ class ProcessResponse(BaseModel):
     scatter_data: Optional[Dict[str, Any]] = None  # x/y data for distance plots
 
 
+class FeatureMapResponse(BaseModel):
+    """Response for pasted ILI data → visualization only (no assessment)"""
+
+    success: bool = True
+    total_rows: int = 0
+    column_mapping: Dict[str, Optional[str]] = Field(
+        default_factory=dict,
+        description="Standard key -> actual column name (e.g. distance, depth, feature_id)",
+    )
+    features: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="One dict per row: x, y, depth, length, width, orientation_deg, hover_text",
+    )
+    scatter_data: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
+
 class TMLProcessResponse(BaseModel):
     """Response from processing TML data"""
 
