@@ -81,16 +81,36 @@ def render_chat_panel():
     model_ids = [m["id"] for m in model_options]
     model_names = [m["name"] for m in model_options]
 
+    # Header: collapse + size switch on top row; title below (stable, no shift on selection)
+    header_row1_col1, header_row1_col2 = st.columns([1, 4])
+    with header_row1_col1:
+        if st.button("◀", key="chat_hide", help="Collapse chat to right edge", type="secondary"):
+            st.session_state.chat_panel_visible = False
+            st.rerun()
+    with header_row1_col2:
+        size_choice = st.radio(
+            "Size",
+            options=["Small", "Large"],
+            index=0 if st.session_state.get("chat_panel_width", 20) == 20 else 1,
+            key="chat_size_toggle",
+            horizontal=True,
+            label_visibility="collapsed",
+        )
+        new_width = 20 if size_choice == "Small" else 40
+        if new_width != st.session_state.get("chat_panel_width", 20):
+            st.session_state.chat_panel_width = new_width
+            st.rerun()
     st.markdown("#### 💬 Chat with Chen")
+    st.markdown("---")
+
+    # LLM model selection - always visible
     selected_idx = st.selectbox(
-        "LLM Model",
+        "⚙️ LLM Model",
         range(len(model_ids)),
         format_func=lambda i: model_names[i],
         key="chat_model_select",
     )
     st.session_state.chat_model = model_ids[selected_idx]
-
-    st.markdown("---")
 
     # Scrollable message area (fixed height, ChatGPT-like)
     with st.container(height=360):
@@ -130,22 +150,10 @@ def render_chat_panel():
 
 def render_chat_panel_with_controls():
     """
-    Render Chat with Chen panel with hide button and width slider.
+    Render Chat with Chen panel (hide button is in header).
     Call this inside the right column when chat is visible.
     """
     render_chat_panel()
-
-    st.markdown("---")
-    col_a, col_b = st.columns(2)
-    with col_a:
-        if st.button("◀ Hide", key="chat_hide", help="Collapse chat to right edge"):
-            st.session_state.chat_panel_visible = False
-            st.rerun()
-    with col_b:
-        w = st.slider("Width", 1, 4, st.session_state.chat_panel_width, key="chat_width_slider", help="Adjust panel width (1=narrow, 4=wide)")
-        if w != st.session_state.chat_panel_width:
-            st.session_state.chat_panel_width = w
-            st.rerun()
 
 
 def render_chat_expander(right_col, visible: bool):

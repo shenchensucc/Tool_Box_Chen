@@ -17,8 +17,10 @@ apply_custom_styling()
 # Custom Sidebar Navigation with Expandable Sections
 display_sidebar_navigation()
 
-# Layout: main content (left) + Chat with Chen (right, hideable, sticky)
-(left_col, right_col), chat_visible = get_layout_with_chat()
+# Layout: main content (left) + resizer + Chat with Chen (right, hideable, sticky)
+cols, chat_visible = get_layout_with_chat()
+
+left_col, right_col = cols
 
 with left_col:
     # Main content

@@ -140,6 +140,24 @@ def apply_custom_styling():
             align-self: start !important;
         }
 
+        /* Chat header with integrated hide button */
+        .chat-header-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.5rem;
+            margin-bottom: 0.5rem;
+        }
+        .chat-header-row h4 {
+            margin: 0;
+            flex: 1;
+        }
+        .chat-hide-btn {
+            padding: 0.25rem 0.5rem !important;
+            min-width: auto !important;
+            font-size: 0.85rem !important;
+        }
+
         </style>
         """,
         unsafe_allow_html=True,
@@ -250,20 +268,26 @@ def show_backend_unavailable_and_retry() -> None:
 
 def get_layout_with_chat():
     """
-    Return (left_col, right_col, chat_visible) for main content + Chat with Chen panel.
-    Chat can be hidden (collapsed tab on right) or shown with adjustable width.
+    Return (cols, chat_visible) for main content + Chat with Chen panel.
+    Chat width: Small (20%) or Large (40%), toggled in chat panel header.
+    When visible: cols = (left_col, right_col) - 2 columns.
+    When hidden: cols = (left_col, right_col) - 2 columns.
     """
     if "chat_panel_visible" not in st.session_state:
-        st.session_state.chat_panel_visible = True  # Start visible; user can hide
+        st.session_state.chat_panel_visible = True
     if "chat_panel_width" not in st.session_state:
-        st.session_state.chat_panel_width = 2  # 1-4, default 2
+        st.session_state.chat_panel_width = 20  # Small=20%, Large=40%
 
     visible = st.session_state.chat_panel_visible
-    w = st.session_state.chat_panel_width
-    # Total 10 parts: left gets (10-w), right gets w. Min right=1 when visible.
-    right = max(1, min(4, w)) if visible else 1
-    left = 10 - right
-    return st.columns([left, right]), visible
+    w = 40 if st.session_state.chat_panel_width == 40 else 20  # Small=20% or Large=40%
+    st.session_state.chat_panel_width = w  # Normalize to 20 or 40
+
+    if visible:
+        left_ratio = 100 - w
+        right_ratio = w
+        return st.columns([left_ratio, right_ratio]), visible
+    else:
+        return st.columns([9, 1]), visible
 
 
 def display_sidebar_navigation():
@@ -271,12 +295,12 @@ def display_sidebar_navigation():
     with st.sidebar:
         st.page_link("Home.py", label="🏠 Home")
         st.page_link("pages/1_Dashboard.py", label="📊 Dashboard")
-        
+
         st.markdown("---")
-        
+
         with st.expander("🏭 Facility", expanded=False):
             st.page_link("pages/2_TML_Data_Loader.py", label="⚙️ TML Data Loader")
-        
+
         with st.expander("🛢️ Pipeline", expanded=False):
             st.page_link("pages/3_ILI_Visual_Tool.py", label="📊 ILI Visual Tool")
             st.page_link("pages/4_Metal_Loss_Assessment.py", label="🔬 Metal Loss Assessment")
