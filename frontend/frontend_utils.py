@@ -217,6 +217,64 @@ async def call_process_api(
         return None
 
 
+def _format_api_error(e: Exception, response: Optional[httpx.Response] = None) -> str:
+    """Format API error with status code and response body for debugging."""
+    parts = [str(e)]
+    if response is not None:
+        parts.append(f"Status: {response.status_code}")
+        try:
+            body = response.text
+            if body and len(body) < 500:
+                parts.append(f"Response: {body}")
+            elif body:
+                parts.append(f"Response (truncated): {body[:500]}...")
+        except Exception:
+            pass
+    return " | ".join(parts)
+
+
+async def call_process_feature_map_api(
+    file,
+    sheet_name: str,
+    gwd_start: Optional[int] = None,
+    gwd_end: Optional[int] = None,
+    gwd_center: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
+    """Call the backend process-feature-map API for Excel → unwrapped pipe visualization"""
+    url = f"{BACKEND_URL}/api/ili/process-feature-map"
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            files = {"file": (file.name, file.getvalue(), file.type)}
+            data = {"sheet_name": sheet_name}
+            if gwd_start is not None:
+                data["gwd_start"] = str(gwd_start)
+            if gwd_end is not None:
+                data["gwd_end"] = str(gwd_end)
+            if gwd_center is not None:
+                data["gwd_center"] = str(gwd_center)
+            response = await client.post(url, files=files, data=data)
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPStatusError as e:
+        msg = _format_api_error(e, e.response)
+        st.error(f"API error: {msg}")
+        if e.response.status_code == 404:
+            st.warning(
+                f"**404 Not Found** — `{url}` may not be available. "
+                "Please **restart the backend server** (e.g. `uvicorn backend.main:app --reload`) to load the latest code."
+            )
+        return None
+    except httpx.HTTPError as e:
+        st.error(f"Request failed: {_format_api_error(e)}")
+        return None
+    except Exception as e:
+        st.error(f"Unexpected error: {type(e).__name__}: {str(e)}")
+        import traceback
+        with st.expander("Error details"):
+            st.code(traceback.format_exc())
+        return None
+
+
 @st.cache_resource(ttl=10)  # Cache for 10 seconds (allows quick retry when backend starts)
 def check_backend_health() -> bool:
     """Check if backend is running (cached for 10 seconds)"""

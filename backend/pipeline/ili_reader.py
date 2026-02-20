@@ -47,6 +47,9 @@ COLUMN_KEYWORDS = {
     "joint_number": [
         "Joint", "Joint Number", "Weld Number", "Joint No. or US GW No.",
         "Joint No", "US GW No", "PNG Joint Number", "Client Jno."
+    ],
+    "source": [
+        "ILI source", "Source", "ILI Vendor", "Vendor", "ILI Source"
     ]
 }
 

@@ -73,9 +73,17 @@ class FeatureMapResponse(BaseModel):
     )
     features: List[Dict[str, Any]] = Field(
         default_factory=list,
-        description="One dict per row: x, y, depth, length, width, orientation_deg, hover_text",
+        description="One dict per row: x, y, depth, length, width, orientation_deg, hover_text, source",
     )
     scatter_data: Optional[Dict[str, Any]] = None
+    sources: List[str] = Field(
+        default_factory=list,
+        description="Unique ILI source/vendor values in the data (for filtering)",
+    )
+    gwd_numbers: List[int] = Field(
+        default_factory=list,
+        description="Sorted GWD numbers in the data (for zoom/filter selection)",
+    )
     error: Optional[str] = None
 
 

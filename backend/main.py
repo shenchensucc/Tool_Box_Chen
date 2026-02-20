@@ -85,6 +85,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def log_404_middleware(request, call_next):
+    """Log 404 responses with path and method for debugging."""
+    response = await call_next(request)
+    if response.status_code == 404:
+        logger.warning(f"[404] {request.method} {request.url.path} — Route not found. Restart backend if you added new endpoints.")
+    return response
+
 MAX_FILE_SIZE = 200 * 1024 * 1024  # 200 MB
 
 # Temporary file storage for TML processing (token -> file_path)
@@ -156,6 +165,13 @@ def create_histogram(series: pd.Series, column_name: str, bins: int = 30) -> His
         bin_edges=bin_edges.tolist(),
         counts=counts.tolist(),
     )
+
+
+@app.on_event("startup")
+async def startup_log_routes():
+    """Log ILI routes at startup to verify endpoints are registered."""
+    ili_routes = [r for r in app.routes if hasattr(r, "path") and "ili" in r.path]
+    logger.info(f"[startup] ILI routes: {[(r.path, getattr(r, 'methods', '')) for r in ili_routes]}")
 
 
 @app.get("/")
@@ -514,6 +530,239 @@ async def process_ili_data(
             os.unlink(temp_path)
 
 
+def _build_feature_map_from_df(
+    df: pd.DataFrame,
+    ili_cols: Dict[str, Optional[str]],
+) -> tuple:
+    """
+    Build features, scatter_data, and sources from a DataFrame with identified ILI columns.
+    Returns (features, scatter_data, sources).
+    """
+    dist_col = ili_cols.get("distance")
+    depth_col = ili_cols.get("depth") or ili_cols.get("metal_loss")
+    length_col = ili_cols.get("length")
+    width_col = ili_cols.get("width")
+    fid_col = ili_cols.get("feature_id")
+    ftype_col = ili_cols.get("feature_type")
+    fdesc_col = ili_cols.get("feature_desc")
+    orient_col = ili_cols.get("orientation")
+    joint_col = ili_cols.get("joint_number")
+    source_col = ili_cols.get("source")
+    gwd_col = next(
+        (c for c in df.columns if "gwd" in str(c).lower() or ("u/s" in str(c).lower() and "ili" in str(c).lower() and "number" in str(c).lower())),
+        joint_col,
+    )
+    seam_orient_col = next((c for c in df.columns if "seam" in str(c).lower() and "orientation" in str(c).lower()), None)
+
+    for col in [c for c in [dist_col, depth_col, length_col, width_col] if c and c in df.columns]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    features = []
+    for idx, row in df.iterrows():
+        try:
+            x_val = pd.to_numeric(row.get(dist_col), errors="coerce")
+            if pd.isna(x_val):
+                continue
+        except (TypeError, ValueError):
+            continue
+
+        depth_val = 0.0
+        if depth_col and depth_col in df.columns:
+            try:
+                dv = float(pd.to_numeric(row.get(depth_col), errors="coerce"))
+                if dv is not None and not (isinstance(dv, float) and pd.isna(dv)):
+                    depth_val = dv
+            except (TypeError, ValueError):
+                pass
+
+        length_val = 0.0
+        if length_col and length_col in df.columns:
+            try:
+                ln = float(pd.to_numeric(row.get(length_col), errors="coerce"))
+                if ln and not (isinstance(ln, float) and pd.isna(ln)):
+                    length_val = ln
+            except (TypeError, ValueError):
+                pass
+
+        width_val = 0.0
+        if width_col and width_col in df.columns:
+            try:
+                wd = float(pd.to_numeric(row.get(width_col), errors="coerce"))
+                if wd and not (isinstance(wd, float) and pd.isna(wd)):
+                    width_val = wd
+            except (TypeError, ValueError):
+                pass
+
+        orient_val = row.get(orient_col) if orient_col and orient_col in df.columns else None
+        orientation_deg = _parse_orientation_to_degrees(orient_val)
+        orientation_hours = _parse_orientation_to_hours(orient_val)
+
+        feature_type = str(row.get(ftype_col, "")).strip() if ftype_col and ftype_col in df.columns else ""
+        gwd_number = None
+        if (gwd_col and gwd_col in df.columns) or (joint_col and joint_col in df.columns):
+            val = row.get(gwd_col or joint_col)
+            if pd.notna(val):
+                try:
+                    gwd_number = int(float(val))
+                except (ValueError, TypeError):
+                    gwd_number = str(val).strip()
+        seam_orient_val = row.get(seam_orient_col) if seam_orient_col and seam_orient_col in df.columns else None
+        seam_orient_hours = _parse_orientation_to_hours(seam_orient_val)
+
+        source_val = str(row.get(source_col, "")).strip() if source_col and source_col in df.columns and pd.notna(row.get(source_col)) else ""
+
+        parts = []
+        if fid_col and fid_col in df.columns:
+            parts.append(f"<b>Feature ID:</b> {row.get(fid_col, '')}")
+        if ftype_col and ftype_col in df.columns:
+            parts.append(f"<b>Type:</b> {row.get(ftype_col, '')}")
+        if fdesc_col and fdesc_col in df.columns:
+            parts.append(f"<b>Description:</b> {row.get(fdesc_col, '')}")
+        if depth_col and depth_col in df.columns:
+            parts.append(f"<b>Depth:</b> {row.get(depth_col, '')}")
+        if length_col and length_col in df.columns:
+            parts.append(f"<b>Length (mm):</b> {row.get(length_col, '')}")
+        if width_col and width_col in df.columns:
+            parts.append(f"<b>Width (mm):</b> {row.get(width_col, '')}")
+        if orient_col and orient_col in df.columns:
+            parts.append(f"<b>Orientation:</b> {row.get(orient_col, '')}")
+        if source_val:
+            parts.append(f"<b>Source:</b> {source_val}")
+        parts.append(f"<b>Chainage (m):</b> {x_val}")
+        hover_text = "<br>".join(parts)
+
+        feat = {
+            "x": float(x_val),
+            "y": float(depth_val),
+            "depth": float(depth_val),
+            "length": float(length_val),
+            "width": float(width_val),
+            "orientation_deg": orientation_deg,
+            "orientation_hours": float(orientation_hours) if orientation_hours is not None else 6.0,
+            "feature_type": feature_type,
+            "gwd_number": gwd_number,
+            "seam_orient_hours": float(seam_orient_hours) if seam_orient_hours is not None else None,
+            "hover_text": hover_text,
+            "feature_id": str(row.get(fid_col, idx)) if fid_col and fid_col in df.columns else str(idx),
+            "source": source_val,
+        }
+        features.append(feat)
+
+    scatter_data = None
+    girth_welds = []
+    seam_welds = []
+    if features and dist_col:
+        x_vals = [f["x"] for f in features]
+        orient_vals = [f.get("orientation_hours", 6.0) for f in features]
+        scatter_data = {
+            "x_column": dist_col,
+            "x_values": x_vals,
+            "y_data": {"depth": [f["y"] for f in features], "metal_loss": [f["y"] for f in features]},
+            "orientation_hours": orient_vals,
+        }
+        gwd_sorted = sorted(
+            [f for f in features if "girth" in (f.get("feature_type") or "").lower() or "gwd" in (f.get("feature_type") or "").lower()],
+            key=lambda x: x["x"],
+        )
+        for f in gwd_sorted:
+            lbl = f"GWD {f['gwd_number']}" if f.get("gwd_number") is not None else ""
+            girth_welds.append({"chainage": f["x"], "gwd_number": f.get("gwd_number"), "label": lbl, "source": f.get("source", "")})
+        idx_next = {gwd_sorted[i]["x"]: gwd_sorted[i + 1]["x"] for i in range(len(gwd_sorted) - 1)}
+        for f in gwd_sorted:
+            if f.get("seam_orient_hours") is not None:
+                end = idx_next.get(f["x"])
+                seam_welds.append({
+                    "chainage_start": f["x"],
+                    "chainage_end": end,
+                    "orientation_hours": f["seam_orient_hours"],
+                    "orientation_label": _format_orientation_hours(f["seam_orient_hours"]),
+                    "source": f.get("source", ""),
+                })
+        for f in features:
+            ft = (f.get("feature_type") or "").lower()
+            if "seam" in ft and "girth" not in ft and "gwd" not in ft:
+                seam_welds.append({
+                    "chainage_start": None,
+                    "chainage_end": None,
+                    "orientation_hours": f.get("orientation_hours", 6.0),
+                    "orientation_label": _format_orientation_hours(f.get("orientation_hours", 6.0)),
+                    "source": f.get("source", ""),
+                })
+        if scatter_data:
+            scatter_data["girth_welds"] = girth_welds
+            scatter_data["seam_welds"] = seam_welds
+
+    sources = sorted({str(f.get("source", "")).strip() for f in features if f.get("source")})
+    return features, scatter_data, sources
+
+
+def _apply_gwd_filter(
+    features: List[Dict],
+    scatter_data: Optional[Dict],
+    gwd_start: Optional[int],
+    gwd_end: Optional[int],
+    gwd_center: Optional[int],
+) -> tuple:
+    """
+    Filter features by GWD range. Returns (filtered_features, filtered_scatter_data).
+    - gwd_start, gwd_end: chainage between start and end GWD
+    - gwd_center: ±3 adjacent GWDs (by sorted GWD list order)
+    """
+    if not scatter_data or not scatter_data.get("girth_welds"):
+        return features, scatter_data
+
+    def _gwd_match(a, b):
+        try:
+            return int(a) == int(b)
+        except (TypeError, ValueError):
+            return a == b
+
+    girth_welds = scatter_data["girth_welds"]
+    gwd_list = [(gw.get("gwd_number"), gw.get("chainage")) for gw in girth_welds if gw.get("gwd_number") is not None and gw.get("chainage") is not None]
+    gwd_list.sort(key=lambda x: (x[1], str(x[0])))  # by chainage, then gwd_number
+
+    chainage_min, chainage_max = None, None
+
+    if gwd_center is not None:
+        idx = next((i for i, (gn, _) in enumerate(gwd_list) if _gwd_match(gn, gwd_center)), None)
+        if idx is not None:
+            lo = max(0, idx - 3)
+            hi = min(len(gwd_list) - 1, idx + 3)
+            chainage_min = gwd_list[lo][1]
+            chainage_max = gwd_list[hi][1]
+    elif gwd_start is not None or gwd_end is not None:
+        start_chainage = next((ch for gn, ch in gwd_list if _gwd_match(gn, gwd_start)), None) if gwd_start is not None else None
+        end_chainage = next((ch for gn, ch in gwd_list if _gwd_match(gn, gwd_end)), None) if gwd_end is not None else None
+        if start_chainage is not None:
+            chainage_min = start_chainage
+        if end_chainage is not None:
+            chainage_max = end_chainage
+        if chainage_min is None and chainage_max is not None:
+            chainage_min = min(ch for _, ch in gwd_list)
+        if chainage_max is None and chainage_min is not None:
+            chainage_max = max(ch for _, ch in gwd_list)
+
+    if chainage_min is None and chainage_max is None:
+        return features, scatter_data
+
+    filtered = [f for f in features if (chainage_min is None or f["x"] >= chainage_min) and (chainage_max is None or f["x"] <= chainage_max)]
+    new_scatter = {
+        "x_column": scatter_data["x_column"],
+        "x_values": [f["x"] for f in filtered],
+        "y_data": {"depth": [f["y"] for f in filtered], "metal_loss": [f["y"] for f in filtered]},
+        "orientation_hours": [f.get("orientation_hours", 6.0) for f in filtered],
+    }
+    new_girth = [gw for gw in scatter_data.get("girth_welds", []) if (chainage_min is None or gw.get("chainage", 0) >= chainage_min) and (chainage_max is None or gw.get("chainage", float("inf")) <= chainage_max)]
+    new_seam = [
+        sw for sw in scatter_data.get("seam_welds", [])
+        if sw.get("chainage_start") is None
+        or ((chainage_min is None or sw.get("chainage_start", 0) >= chainage_min) and (chainage_max is None or sw.get("chainage_end", float("inf")) <= chainage_max))
+    ]
+    new_scatter["girth_welds"] = new_girth
+    new_scatter["seam_welds"] = new_seam
+    return filtered, new_scatter
+
+
 def _parse_orientation_to_degrees(val) -> Optional[float]:
     """Parse orientation (clock '2:48' or degrees) to degrees from 12 o'clock."""
     if val is None or (isinstance(val, float) and pd.isna(val)):
@@ -583,154 +832,15 @@ async def parse_pasted_ili(pasted_text: str = Form(...)):
 
         ili_cols = identify_ili_columns(df)
         dist_col = ili_cols.get("distance")
-        depth_col = ili_cols.get("depth") or ili_cols.get("metal_loss")
-        length_col = ili_cols.get("length")
-        width_col = ili_cols.get("width")
-        fid_col = ili_cols.get("feature_id")
-        ftype_col = ili_cols.get("feature_type")
-        fdesc_col = ili_cols.get("feature_desc")
-        orient_col = ili_cols.get("orientation")
-        joint_col = ili_cols.get("joint_number")
-        gwd_col = next((c for c in df.columns if "gwd" in str(c).lower() or ("u/s" in str(c).lower() and "ili" in str(c).lower() and "number" in str(c).lower())), joint_col)
-        seam_orient_col = next((c for c in df.columns if "seam" in str(c).lower() and "orientation" in str(c).lower()), None)
-
         if not dist_col:
             return FeatureMapResponse(
                 success=False,
                 error="No distance/chainage column detected. Ensure your data has a column like 'ILI Chainage (m)' or 'Distance'.",
             )
 
-        for col in [c for c in [dist_col, depth_col, length_col, width_col] if c and c in df.columns]:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+        features, scatter_data, sources = _build_feature_map_from_df(df, ili_cols)
 
-        features = []
-        for idx, row in df.iterrows():
-            try:
-                x_val = pd.to_numeric(row.get(dist_col), errors="coerce")
-                if pd.isna(x_val):
-                    continue
-            except (TypeError, ValueError):
-                continue
-
-            depth_val = 0.0
-            if depth_col and depth_col in df.columns:
-                try:
-                    dv = float(pd.to_numeric(row.get(depth_col), errors="coerce"))
-                    if dv is not None and not (isinstance(dv, float) and pd.isna(dv)):
-                        depth_val = dv
-                except (TypeError, ValueError):
-                    pass
-
-            length_val = 0.0
-            if length_col and length_col in df.columns:
-                try:
-                    ln = float(pd.to_numeric(row.get(length_col), errors="coerce"))
-                    if ln and not (isinstance(ln, float) and pd.isna(ln)):
-                        length_val = ln
-                except (TypeError, ValueError):
-                    pass
-
-            width_val = 0.0
-            if width_col and width_col in df.columns:
-                try:
-                    wd = float(pd.to_numeric(row.get(width_col), errors="coerce"))
-                    if wd and not (isinstance(wd, float) and pd.isna(wd)):
-                        width_val = wd
-                except (TypeError, ValueError):
-                    pass
-
-            orient_val = row.get(orient_col) if orient_col and orient_col in df.columns else None
-            orientation_deg = _parse_orientation_to_degrees(orient_val)
-            orientation_hours = _parse_orientation_to_hours(orient_val)
-
-            feature_type = str(row.get(ftype_col, "")).strip() if ftype_col and ftype_col in df.columns else ""
-            gwd_number = None
-            if (gwd_col and gwd_col in df.columns) or (joint_col and joint_col in df.columns):
-                val = row.get(gwd_col or joint_col)
-                if pd.notna(val):
-                    try:
-                        gwd_number = int(float(val))
-                    except (ValueError, TypeError):
-                        gwd_number = str(val).strip()
-            seam_orient_val = row.get(seam_orient_col) if seam_orient_col and seam_orient_col in df.columns else None
-            seam_orient_hours = _parse_orientation_to_hours(seam_orient_val)
-
-            parts = []
-            if fid_col and fid_col in df.columns:
-                parts.append(f"<b>Feature ID:</b> {row.get(fid_col, '')}")
-            if ftype_col and ftype_col in df.columns:
-                parts.append(f"<b>Type:</b> {row.get(ftype_col, '')}")
-            if fdesc_col and fdesc_col in df.columns:
-                parts.append(f"<b>Description:</b> {row.get(fdesc_col, '')}")
-            if depth_col and depth_col in df.columns:
-                parts.append(f"<b>Depth:</b> {row.get(depth_col, '')}")
-            if length_col and length_col in df.columns:
-                parts.append(f"<b>Length (mm):</b> {row.get(length_col, '')}")
-            if width_col and width_col in df.columns:
-                parts.append(f"<b>Width (mm):</b> {row.get(width_col, '')}")
-            if orient_col and orient_col in df.columns:
-                parts.append(f"<b>Orientation:</b> {row.get(orient_col, '')}")
-            parts.append(f"<b>Chainage (m):</b> {x_val}")
-            hover_text = "<br>".join(parts)
-
-            feat = {
-                "x": float(x_val),
-                "y": float(depth_val),
-                "depth": float(depth_val),
-                "length": float(length_val),
-                "width": float(width_val),
-                "orientation_deg": orientation_deg,
-                "orientation_hours": float(orientation_hours) if orientation_hours is not None else 6.0,
-                "feature_type": feature_type,
-                "gwd_number": gwd_number,
-                "seam_orient_hours": float(seam_orient_hours) if seam_orient_hours is not None else None,
-                "hover_text": hover_text,
-                "feature_id": str(row.get(fid_col, idx)) if fid_col and fid_col in df.columns else str(idx),
-            }
-            features.append(feat)
-
-        scatter_data = None
-        girth_welds = []
-        seam_welds = []
-        if features and dist_col:
-            x_vals = [f["x"] for f in features]
-            orient_vals = [f.get("orientation_hours", 6.0) for f in features]
-            scatter_data = {
-                "x_column": dist_col,
-                "x_values": x_vals,
-                "y_data": {"depth": [f["y"] for f in features], "metal_loss": [f["y"] for f in features]},
-                "orientation_hours": orient_vals,
-            }
-            gwd_sorted = sorted(
-                [f for f in features if "girth" in (f.get("feature_type") or "").lower() or "gwd" in (f.get("feature_type") or "").lower()],
-                key=lambda x: x["x"],
-            )
-            for f in gwd_sorted:
-                lbl = f"GWD {f['gwd_number']}" if f.get("gwd_number") is not None else ""
-                girth_welds.append({"chainage": f["x"], "gwd_number": f.get("gwd_number"), "label": lbl})
-            idx_next = {gwd_sorted[i]["x"]: gwd_sorted[i + 1]["x"] for i in range(len(gwd_sorted) - 1)}
-            for f in gwd_sorted:
-                if f.get("seam_orient_hours") is not None:
-                    end = idx_next.get(f["x"])
-                    seam_welds.append({
-                        "chainage_start": f["x"],
-                        "chainage_end": end,
-                        "orientation_hours": f["seam_orient_hours"],
-                        "orientation_label": _format_orientation_hours(f["seam_orient_hours"]),
-                    })
-            for f in features:
-                ft = (f.get("feature_type") or "").lower()
-                if "seam" in ft and "girth" not in ft and "gwd" not in ft:
-                    seam_welds.append({
-                        "chainage_start": None,
-                        "chainage_end": None,
-                        "orientation_hours": f.get("orientation_hours", 6.0),
-                        "orientation_label": _format_orientation_hours(f.get("orientation_hours", 6.0)),
-                    })
-            if scatter_data:
-                scatter_data["girth_welds"] = girth_welds
-                scatter_data["seam_welds"] = seam_welds
-
+        gwd_numbers = sorted({int(f["gwd_number"]) for f in features if isinstance(f.get("gwd_number"), (int, float))})
         logger.info(f"[ili/parse-paste] Parsed {len(features)} features")
         return FeatureMapResponse(
             success=True,
@@ -738,10 +848,77 @@ async def parse_pasted_ili(pasted_text: str = Form(...)):
             column_mapping={k: v for k, v in ili_cols.items() if v},
             features=features,
             scatter_data=scatter_data,
+            sources=sources,
+            gwd_numbers=gwd_numbers,
         )
     except Exception as e:
         log_error(logger, "ili/parse-paste", e)
         return FeatureMapResponse(success=False, error=str(e))
+
+
+@app.post("/api/ili/process-feature-map", response_model=FeatureMapResponse)
+async def process_ili_feature_map(
+    file: UploadFile = File(...),
+    sheet_name: str = Form(...),
+    gwd_start: Optional[int] = Form(None),
+    gwd_end: Optional[int] = Form(None),
+    gwd_center: Optional[int] = Form(None),
+):
+    """
+    Process ILI Excel file and return features for unwrapped pipe visualization.
+    Uses auto-identified columns (no manual column selection).
+    Optional GWD filter: gwd_start+gwd_end for range, or gwd_center for ±3 adjacent GWDs.
+    """
+    log_params(logger, "ili/process-feature-map", {
+        "filename": file.filename,
+        "sheet_name": sheet_name,
+        "gwd_start": gwd_start,
+        "gwd_end": gwd_end,
+        "gwd_center": gwd_center,
+    })
+    validate_excel_file(file)
+    temp_path = save_temp_file(file)
+
+    try:
+        df = pd.read_excel(temp_path, sheet_name=sheet_name)
+        if df.empty:
+            return FeatureMapResponse(success=False, error="Sheet is empty")
+
+        ili_cols = identify_ili_columns(df)
+        dist_col = ili_cols.get("distance")
+        if not dist_col:
+            return FeatureMapResponse(
+                success=False,
+                error="No distance/chainage column detected. Ensure your data has a column like 'ILI Chainage (m)' or 'Distance'.",
+            )
+
+        features, scatter_data, sources = _build_feature_map_from_df(df, ili_cols)
+        gwd_numbers = sorted({int(f["gwd_number"]) for f in features if isinstance(f.get("gwd_number"), (int, float))})
+
+        # Apply GWD filter if requested
+        if gwd_start is not None or gwd_end is not None or gwd_center is not None:
+            features, scatter_data = _apply_gwd_filter(
+                features, scatter_data, gwd_start, gwd_end, gwd_center
+            )
+
+        logger.info(f"[ili/process-feature-map] Processed {len(features)} features from sheet '{sheet_name}'")
+        return FeatureMapResponse(
+            success=True,
+            total_rows=len(features),
+            column_mapping={k: v for k, v in ili_cols.items() if v},
+            features=features,
+            scatter_data=scatter_data,
+            sources=sources,
+            gwd_numbers=gwd_numbers,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        log_error(logger, "ili/process-feature-map", e)
+        return FeatureMapResponse(success=False, error=f"{type(e).__name__}: {str(e)}")
+    finally:
+        if temp_path.exists():
+            os.unlink(temp_path)
 
 
 @app.post("/api/tml/process", response_model=TMLProcessResponse)
