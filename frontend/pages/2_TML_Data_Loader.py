@@ -26,6 +26,9 @@ apply_custom_styling()
 # Custom Sidebar Navigation
 display_sidebar_navigation()
 
+cols, chat_visible = get_layout_with_chat()
+left_col, right_col = cols
+
 # Cached function for template fetching (module level)
 @st.cache_data(ttl=300)  # Cache for 5 minutes
 def fetch_template(template_type: str):
@@ -41,8 +44,6 @@ def fetch_template(template_type: str):
             return {"success": False, "content": None}
     except Exception as e:
         return {"success": False, "content": None, "error": str(e)}
-
-(left_col, right_col), chat_visible = get_layout_with_chat()
 
 with left_col:
     # Header

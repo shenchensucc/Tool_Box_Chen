@@ -16,7 +16,11 @@ apply_custom_styling()
 # Custom Sidebar Navigation
 display_sidebar_navigation()
 
-(left_col, right_col), chat_visible = get_layout_with_chat()
+cols, chat_visible = get_layout_with_chat()
+if chat_visible:
+    left_col, right_col = cols
+else:
+    left_col, right_col = cols
 
 with left_col:
     # Header
