@@ -9,6 +9,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # Add new entries when tools expand.
 DOC_REGISTRY = [
     {"id": "tml_data_loader", "path": "docs/functions/TML_DATA_LOADER.md", "title": "TML Data Loader"},
+    {"id": "deactive_cml", "path": "docs/functions/DEACTIVE_CML.md", "title": "De-active CML"},
     {"id": "ili_visual_tool", "path": "docs/functions/ILI_VISUAL_TOOL.md", "title": "ILI Visual Tool"},
     {"id": "metal_loss_assessment", "path": "docs/functions/METAL_LOSS_MASS_ASSESSMENT.md", "title": "Metal Loss Mass Assessment"},
     {"id": "backend_api", "path": "docs/functions/BACKEND_API.md", "title": "Backend API"},

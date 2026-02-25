@@ -99,6 +99,32 @@ class TMLProcessResponse(BaseModel):
     timestamp: str
 
 
+class DeactivateCMLResponse(BaseModel):
+    """Response from De-active CML tool"""
+
+    success: bool
+    message: str
+    download_token: str = Field(..., description="Token to download output file")
+    records_count: int = Field(..., description="Number of CMLs deactivated")
+    output_filename: str = Field(..., description="Output file name (e.g. source_deactive.xlsx)")
+    sheet_used: Optional[str] = Field(None, description="Excel sheet name that was read (for debugging)")
+
+
+class InspectionReportResponse(BaseModel):
+    """Response from Inspection Report Loader tool"""
+
+    success: bool
+    message: str
+    download_token: Optional[str] = Field(None, description="Token to download dataloader Excel")
+    output_filename: str = Field(default="Inspection_Report_Dataloader.xlsx")
+    records_count: int = Field(default=0, description="Number of measurement records in dataloader")
+    summary: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Summary table: Circuit, CML, Min Reading, Date, Equipment ID, Status",
+    )
+    error: Optional[str] = None
+
+
 class ChatMessage(BaseModel):
     """Chat message for /api/chat"""
 

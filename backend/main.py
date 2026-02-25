@@ -33,13 +33,16 @@ from backend.models import (
     ChatRequest,
     ChatResponse,
     ColumnStats,
+    DeactivateCMLResponse,
     FeatureMapResponse,
     HealthResponse,
     HistogramData,
+    InspectionReportResponse,
     PreviewResponse,
     ProcessResponse,
     TMLProcessResponse,
 )
+from backend.tml.deactivate_cml import process_deactivate_cml
 from backend.tml.file_handler import FileHandler
 from backend.tml.workflows._01_status import process_status_indicator
 from backend.tml.workflows._02_follow_up_cml import process_follow_up_cml
@@ -111,6 +114,13 @@ def validate_excel_file(file: UploadFile) -> None:
     validate_file_size(file)
 
 
+def validate_pdf_file(file: UploadFile) -> None:
+    """Validate PDF file type and size"""
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="File must be a PDF (.pdf)")
+    validate_file_size(file)
+
+
 def validate_file_size(file: UploadFile) -> None:
     """Validate uploaded file size"""
     file.file.seek(0, 2)  # Seek to end
@@ -169,9 +179,11 @@ def create_histogram(series: pd.Series, column_name: str, bins: int = 30) -> His
 
 @app.on_event("startup")
 async def startup_log_routes():
-    """Log ILI routes at startup to verify endpoints are registered."""
+    """Log key routes at startup to verify endpoints are registered."""
     ili_routes = [r for r in app.routes if hasattr(r, "path") and "ili" in r.path]
+    insp_routes = [r for r in app.routes if hasattr(r, "path") and "inspection-report" in r.path]
     logger.info(f"[startup] ILI routes: {[(r.path, getattr(r, 'methods', '')) for r in ili_routes]}")
+    logger.info(f"[startup] Inspection report routes: {[(r.path, getattr(r, 'methods', '')) for r in insp_routes]}")
 
 
 @app.get("/")
@@ -1124,6 +1136,274 @@ async def process_tml_data(
         raise HTTPException(status_code=500, detail=f"Error processing TML data: {str(e)}")
 
 
+@app.post("/api/tml/deactivate-cml", response_model=DeactivateCMLResponse)
+async def deactivate_cml(
+    source_file: UploadFile = File(...),
+    template_file: Optional[UploadFile] = File(default=None),
+):
+    """
+    De-active CML: Generate a dataloader that deactivates all CMLs in the uploaded source sheet.
+    
+    - Source file: Required. Must have sheet "Source_Data" with Equipment ID, CML Group ID, sub-CML ID.
+    - Template file: Optional. If not provided, uses default TM_Loader_Template.xlsx from system.
+    
+    Output: {source_filename}_deactive.xlsx with Status Indicator = "Inactive" for all CMLs.
+    """
+    tpl_name = (template_file.filename if template_file and template_file.filename else "default")
+    logger.info(f"[tml/deactivate-cml] Request received: source={source_file.filename}, template={tpl_name}")
+    log_params(logger, "tml/deactivate-cml", {"source_filename": source_file.filename})
+    validate_excel_file(source_file)
+    
+    temp_dir = tempfile.mkdtemp()
+    temp_source = None
+    temp_template = None
+    
+    try:
+        temp_source = save_temp_file(source_file)
+        
+        # Use uploaded template or default
+        template_dir = Path(__file__).parent / "static" / "templates" / "tml"
+        default_template = template_dir / "TM_Loader_Template.xlsx"
+        
+        if template_file is not None and template_file.filename:
+            validate_excel_file(template_file)
+            temp_template = save_temp_file(template_file)
+        elif default_template.exists():
+            temp_template = default_template
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="No template file provided and default TM_Loader_Template.xlsx not found in backend/static/templates/tml/"
+            )
+        
+        # Output: {upload_filename}_deactive.xlsx
+        source_stem = Path(source_file.filename).stem
+        output_filename = f"{source_stem}_deactive.xlsx"
+        output_path = Path(temp_dir) / output_filename
+        
+        records_count, result_path, sheet_used = process_deactivate_cml(
+            source_path=str(temp_source),
+            template_path=str(temp_template),
+            output_path=str(output_path),
+        )
+        
+        if records_count == 0 or result_path is None:
+            raise HTTPException(
+                status_code=400,
+                detail="No records to process. Ensure source file has a sheet with Equipment ID, CML Group ID, sub-CML ID columns (or their aliases)."
+            )
+        
+        # Store for download
+        download_token = str(uuid.uuid4())
+        TML_FILE_STORAGE[download_token] = str(result_path)
+        
+        logger.info(
+            f"[tml/deactivate-cml] Deactivated {records_count} CMLs, sheet='{sheet_used}', output={output_filename}"
+        )
+        
+        return DeactivateCMLResponse(
+            success=True,
+            message=f"Successfully deactivated {records_count} CML(s)",
+            download_token=download_token,
+            records_count=records_count,
+            output_filename=output_filename,
+            sheet_used=sheet_used,
+        )
+    except HTTPException:
+        raise
+    except ValueError as e:
+        logger.warning(f"[tml/deactivate-cml] ValueError: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except FileNotFoundError as e:
+        logger.warning(f"[tml/deactivate-cml] FileNotFoundError: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        log_error(logger, "tml/deactivate-cml", e)
+        import traceback
+        tb = traceback.format_exc()
+        logger.error(f"[tml/deactivate-cml] Traceback: {tb}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error: {type(e).__name__}: {str(e)}. Check server logs for full traceback."
+        )
+    finally:
+        if temp_source and os.path.exists(temp_source):
+            try:
+                os.unlink(temp_source)
+            except OSError:
+                pass
+
+
+@app.post("/api/tml/inspection-report/read", response_model=InspectionReportResponse)
+async def read_inspection_reports(
+    pdf_files: List[UploadFile] = File(..., description="UT inspection report PDFs"),
+):
+    """
+    Read and summarize UT inspection report PDFs. No source Excel or dataloader.
+    Returns extracted Circuit, CML, Min Reading, Date for user verification.
+    """
+    logger.info(f"[inspection-report/read] Request received, pdf_count={len(pdf_files)}")
+    log_params(logger, "tml/inspection-report/read", {"pdf_count": len(pdf_files)})
+    for pf in pdf_files:
+        validate_pdf_file(pf)
+
+    temp_pdfs: List[Path] = []
+    try:
+        for pf in pdf_files:
+            temp_pdfs.append(save_temp_file(pf))
+
+        from backend.tml.inspection_report_parser import parse_inspection_report_pdfs
+        from backend.tml.inspection_dataloader import generate_measurements_dataloader
+
+        readings = parse_inspection_report_pdfs(temp_pdfs, [f.filename for f in pdf_files])
+        if not readings:
+            return InspectionReportResponse(
+                success=False,
+                message="No data extracted from PDFs. Check report format or try OCR.",
+                error="No Circuit, CML, or readings found in uploaded PDFs.",
+            )
+
+        # Summary only - no file output, use placeholder for Equipment ID in summary
+        records_count, summary = generate_measurements_dataloader(
+            readings,
+            circuit_to_equipment={},
+            output_path="",
+            use_placeholder_when_missing=True,
+        )
+
+        logger.info(f"[tml/inspection-report/read] Read {len(pdf_files)} PDFs, {len(summary)} CML(s)")
+
+        return InspectionReportResponse(
+            success=True,
+            message=f"Read {len(pdf_files)} PDF(s), extracted **{len(summary)}** CML(s). Use Generate Dataloader to create Excel.",
+            records_count=records_count,
+            summary=summary,
+        )
+    except Exception as e:
+        log_error(logger, "tml/inspection-report/read", e)
+        import traceback
+        tb = traceback.format_exc()
+        logger.error(f"[inspection-report/read] Traceback: {tb}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"{type(e).__name__}: {str(e)}. Check backend logs for full traceback.",
+        )
+    finally:
+        for p in temp_pdfs:
+            if p.exists():
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+
+
+@app.post("/api/tml/inspection-report", response_model=InspectionReportResponse)
+async def process_inspection_reports(
+    pdf_files: List[UploadFile] = File(..., description="UT inspection report PDFs"),
+    source_file: Optional[UploadFile] = File(default=None, description="Optional: Excel with Circuit ID and Equipment ID"),
+    template_file: Optional[UploadFile] = File(default=None),
+):
+    """
+    Parse PDFs and generate APM Measurements dataloader. Source Excel optional;
+    when missing, Equipment ID = "Need Add Equipment ID" (incomplete dataloader).
+    """
+    log_params(logger, "tml/inspection-report", {
+        "source_filename": source_file.filename if source_file else None,
+        "pdf_count": len(pdf_files),
+    })
+    for pf in pdf_files:
+        validate_pdf_file(pf)
+    if source_file:
+        validate_excel_file(source_file)
+
+    temp_dir = tempfile.mkdtemp()
+    temp_source = None
+    temp_pdfs: List[Path] = []
+    template_path = None
+
+    try:
+        if source_file:
+            temp_source = save_temp_file(source_file)
+        for pf in pdf_files:
+            temp_pdfs.append(save_temp_file(pf))
+        if template_file and template_file.filename:
+            validate_excel_file(template_file)
+            template_path = str(save_temp_file(template_file))
+
+        from backend.tml.inspection_report_parser import parse_inspection_report_pdfs
+        from backend.tml.inspection_dataloader import build_circuit_to_equipment_map, generate_measurements_dataloader
+
+        readings = parse_inspection_report_pdfs(temp_pdfs, [f.filename for f in pdf_files])
+        if not readings:
+            return InspectionReportResponse(
+                success=False,
+                message="No data extracted from PDFs. Check report format or try OCR.",
+                error="No Circuit, CML, or readings found in uploaded PDFs.",
+            )
+
+        circuit_to_equipment = {}
+        if temp_source:
+            circuit_to_equipment = build_circuit_to_equipment_map(str(temp_source))
+
+        output_path = Path(temp_dir) / "Inspection_Report_Dataloader.xlsx"
+        records_count, summary = generate_measurements_dataloader(
+            readings,
+            circuit_to_equipment,
+            str(output_path),
+            template_path=template_path,
+            use_placeholder_when_missing=True,
+        )
+
+        if records_count == 0:
+            return InspectionReportResponse(
+                success=True,
+                message="No records to write.",
+                summary=summary,
+                records_count=0,
+            )
+
+        download_token = str(uuid.uuid4())
+        TML_FILE_STORAGE[download_token] = str(output_path)
+
+        has_placeholder = any(s.get("Equipment ID") == "Need Add Equipment ID" for s in summary)
+        msg = f"Processed {len(pdf_files)} PDF(s), {records_count} record(s)."
+        if has_placeholder:
+            msg += " Some Equipment IDs are placeholders—edit in Excel before upload to APM."
+
+        logger.info(f"[tml/inspection-report] Processed {len(pdf_files)} PDFs, {records_count} records")
+
+        return InspectionReportResponse(
+            success=True,
+            message=msg,
+            download_token=download_token,
+            output_filename="Inspection_Report_Dataloader.xlsx",
+            records_count=records_count,
+            summary=summary,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        log_error(logger, "tml/inspection-report", e)
+        import traceback
+        logger.error(f"[inspection-report] Traceback: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"{type(e).__name__}: {str(e)}. Check backend logs for full traceback.",
+        )
+    finally:
+        if temp_source and os.path.exists(temp_source):
+            try:
+                os.unlink(temp_source)
+            except OSError:
+                pass
+        for p in temp_pdfs:
+            if p.exists():
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+
+
 @app.get("/api/tml/download/{file_token}")
 async def download_tml_file(file_token: str):
     """
@@ -1136,9 +1416,10 @@ async def download_tml_file(file_token: str):
         ZIP or Excel file based on the token
     """
     if file_token not in TML_FILE_STORAGE:
+        logger.warning(f"[tml/download] Token not found: {file_token[:8]}... (storage has {len(TML_FILE_STORAGE)} entries)")
         raise HTTPException(
             status_code=404,
-            detail="File not found. The file may have expired or the token is invalid."
+            detail=f"File not found. Token invalid or expired. (Debug: token prefix={file_token[:8]}..., storage size={len(TML_FILE_STORAGE)})"
         )
     
     file_path = TML_FILE_STORAGE[file_token]

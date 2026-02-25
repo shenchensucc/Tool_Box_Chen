@@ -2,8 +2,9 @@
 
 ## 📍 Function Location
 
-- **Frontend**: `frontend/pages/Facility/` (sidebar section)
-  - TML Data Loader: `frontend/pages/Facility/TML_Data_Loader.py`
+- **Frontend**: `frontend/pages/` (sidebar section Facility)
+  - TML Data Loader: `frontend/pages/2_TML_Data_Loader.py`
+  - De-active CML: `frontend/pages/7_Deactive_CML.py`
 - **Backend**: `backend/tml/` (TML processing modules)
 
 ---
@@ -27,16 +28,24 @@ The **Facility Tools** will provide:
 
 Facility is now an expandable sidebar section containing specialized tools:
 
-**TML Data Loader** (`Facility/TML_Data_Loader.py`)
+**TML Data Loader** (`pages/2_TML_Data_Loader.py`)
 - Processes Thickness Monitoring Location (TML) data
 - Supports 20 different workflows
 - Batch processing with multiple parameters
 - ZIP file output with all results
 
+**De-active CML** (`pages/7_Deactive_CML.py`)
+- Single-upload tool to deactivate all CMLs in a sheet
+- Optional template (uses default TM_Loader_Template.xlsx if not provided)
+- Flexible column naming and auto-detect sheet (tries Source_Data, then any sheet with required columns)
+- Detailed error display for debugging (status code, endpoint, full detail)
+- Output: `{filename}_deactive.xlsx` with Status Indicator = "Inactive"
+
 ### Status
 
 - ✅ Facility section exists as expandable sidebar
 - ✅ TML Data Loader fully implemented
+- ✅ De-active CML fully implemented
 - ✅ Backend integration complete
 - ❌ Additional facility tools planned
 
