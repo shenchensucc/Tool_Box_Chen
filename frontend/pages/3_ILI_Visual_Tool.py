@@ -55,60 +55,43 @@ def _depth_color(d):
     return "red"
 
 
-def render_feature_map(fm: dict, total_before_filter: int = None):
+def _get_x_axis_title(x_column: str) -> str:
+    """Return appropriate x-axis label. Uses Distance from TGW when chainage not available."""
+    xc = (x_column or "").lower()
+    if "distance" in xc and "tgw" in xc:
+        return "Distance from TGW (m)"
+    if "chainage" in xc or "odometer" in xc or "distance" in xc:
+        return "ILI Chainage (m)"
+    return f"{x_column} (m)" if x_column else "Distance (m)"
+
+
+def _build_feature_map_figure(
+    features: list,
+    scatter_data: dict,
+    pipe_circ_mm: float,
+    source_filter: set,
+    filter_by_source: bool,
+    x_column: str,
+    title: str,
+    height: int = 450,
+) -> tuple:
     """
-    Render the unwrapped pipe feature map from FeatureMapResponse data.
-    Used by both paste and upload modes.
+    Build a Plotly figure for the feature map. Returns (fig, filtered_count).
     """
-    features = fm.get("features", [])
-    mapping = fm.get("column_mapping", {})
-    scatter_data = fm.get("scatter_data") or {}
-    all_sources = fm.get("sources", [])
+    def _source_ok(f):
+        src = f.get("source", "") or ""
+        if not filter_by_source:
+            return True
+        return not source_filter or src in source_filter
 
-    st.markdown("### 🗺️ Feature Map")
-    st.caption("Unwrapped pipe view: X = chainage (m), Y = orientation (o'clock). Feature boxes proportional to length (mm) × width (mm). Depth: green 0-20% WT, yellow 20-40%, orange 40-60%, red >60%.")
-
-    # NPS selector
-    nps_options = sorted(NPS_TO_OD_MM.keys())
-    nps_default = 10 if 10 in nps_options else nps_options[0]
-    nps = st.selectbox(
-        "**Pipe NPS (Nominal Pipe Size)**",
-        options=nps_options,
-        index=nps_options.index(nps_default),
-        format_func=lambda x: f"NPS {x}",
-        help="Select pipe size for width scaling. OD is used to convert feature width (mm) to circumferential position.",
-    )
-    pipe_od_mm = NPS_TO_OD_MM.get(nps, 273.0)
-    pipe_circ_mm = 3.14159 * pipe_od_mm
-
-    # Source filter (only when data has source column values)
-    selected_sources = set()
-    if all_sources:
-        selected_sources = set(
-            st.multiselect(
-                "**Filter by ILI Source**",
-                options=all_sources,
-                default=all_sources,
-                help="Show only features from selected sources. Deselect all to show all.",
-            )
-        )
-    filter_by_source = bool(all_sources)
+    filtered_features = [f for f in features if _source_ok(f)]
+    filtered_girth = [gw for gw in scatter_data.get("girth_welds", []) if not filter_by_source or not source_filter or gw.get("source", "") in source_filter]
+    filtered_seam = [sw for sw in scatter_data.get("seam_welds", []) if not filter_by_source or not source_filter or sw.get("source", "") in source_filter]
 
     x_values = scatter_data.get("x_values", [f["x"] for f in features])
     orient_hours = scatter_data.get("orientation_hours")
     use_orientation = orient_hours and len(orient_hours) == len(features)
     y_values = orient_hours if use_orientation else [f["y"] for f in features]
-    x_column = scatter_data.get("x_column", "ILI Chainage (m)")
-
-    def _source_ok(f):
-        src = f.get("source", "") or ""
-        if not filter_by_source:
-            return True
-        return not selected_sources or src in selected_sources
-
-    filtered_features = [f for f in features if _source_ok(f)]
-    filtered_girth = [gw for gw in scatter_data.get("girth_welds", []) if not filter_by_source or not selected_sources or gw.get("source", "") in selected_sources]
-    filtered_seam = [sw for sw in scatter_data.get("seam_welds", []) if not filter_by_source or not selected_sources or sw.get("source", "") in selected_sources]
 
     plot_features = [f for f in filtered_features if "girth" not in (f.get("feature_type") or "").lower() and "seam" not in (f.get("feature_type") or "").lower() and "gwd" not in (f.get("feature_type") or "").lower()]
 
@@ -159,12 +142,12 @@ def render_feature_map(fm: dict, total_before_filter: int = None):
             mid_x = ((ch_s or 0) + (ch_e or 0)) / 2 if (ch_s is not None or ch_e is not None) else (x_min_plot + x_max_plot) / 2
             annotations.append(dict(x=mid_x, y=sw.get("orientation_hours", 6) + 0.3, text=lbl, showarrow=False, font=dict(size=8, color="blue"), xanchor="center", yanchor="bottom"))
 
-    x_axis_title = "ILI Chainage (m)" if "chainage" in (x_column or "").lower() or "distance" in (x_column or "").lower() else f"{x_column} (m)"
+    x_axis_title = _get_x_axis_title(x_column)
     fig.update_layout(
-        title="ILI Feature Map (Unwrapped Pipe View)",
+        title=title,
         xaxis_title=x_axis_title,
         yaxis_title="Feature Orientation (hh:mm)",
-        height=450,
+        height=height,
         hovermode="closest",
         template="plotly_white",
         plot_bgcolor="white",
@@ -172,14 +155,89 @@ def render_feature_map(fm: dict, total_before_filter: int = None):
         yaxis=dict(showgrid=True, gridcolor="rgba(0,0,0,0.2)", showline=True, linewidth=2, linecolor="black", mirror=True, tickvals=list(range(0, 13)), ticktext=[f"{h:02d}:00" for h in range(0, 13)], range=[0, 12]),
         annotations=annotations,
     )
+    return fig, len(filtered_features)
+
+
+@st.fragment
+def render_feature_map_fragment(fm: dict, total_before_filter: int = None):
+    """
+    Fragment wrapper: when source checkboxes change, only this reruns (not the full app).
+    Avoids slow re-execution of file upload, preview, backend calls, etc.
+    """
+    render_feature_map(fm, total_before_filter)
+
+
+def render_feature_map(fm: dict, total_before_filter: int = None):
+    """
+    Render the unwrapped pipe feature map from FeatureMapResponse data.
+    Used by both paste and upload modes.
+    """
+    features = fm.get("features", [])
+    mapping = fm.get("column_mapping", {})
+    scatter_data = fm.get("scatter_data") or {}
+    all_sources = fm.get("sources", [])
+
+    st.markdown("### 🗺️ Feature Map")
+    st.caption("Unwrapped pipe view: X = chainage (m) or Distance from TGW (m) when chainage unavailable; Y = orientation (o'clock). Feature boxes proportional to length (mm) × width (mm). Depth: green 0-20% WT, yellow 20-40%, orange 40-60%, red >60%.")
+
+    # NPS selector
+    nps_options = sorted(NPS_TO_OD_MM.keys())
+    nps_default = 10 if 10 in nps_options else nps_options[0]
+    nps = st.selectbox(
+        "**Pipe NPS (Nominal Pipe Size)**",
+        options=nps_options,
+        index=nps_options.index(nps_default),
+        format_func=lambda x: f"NPS {x}",
+        help="Select pipe size for width scaling. OD is used to convert feature width (mm) to circumferential position.",
+    )
+    pipe_od_mm = NPS_TO_OD_MM.get(nps, 273.0)
+    pipe_circ_mm = 3.14159 * pipe_od_mm
+
+    # Source filter: checkboxes for quick compare (only when data has source column values)
+    selected_sources = set()
+    if all_sources:
+        st.markdown("**Filter by ILI Source** — check/uncheck to compare:")
+        cols = st.columns(min(len(all_sources), 6))
+        for i, src in enumerate(all_sources):
+            with cols[i % len(cols)]:
+                if st.checkbox(src, value=True, key=f"ili_source_{src}"):
+                    selected_sources.add(src)
+    filter_by_source = bool(all_sources)
+
+    x_column = scatter_data.get("x_column", "ILI Chainage (m)")
+
+    # Main chart: combined selected sources
+    main_title = "ILI Feature Map (Unwrapped Pipe View)"
+    if all_sources and selected_sources:
+        main_title += f" — {' + '.join(sorted(selected_sources))}"
+    fig, filtered_count = _build_feature_map_figure(
+        features, scatter_data, pipe_circ_mm,
+        selected_sources, filter_by_source, x_column,
+        main_title, height=450,
+    )
     st.plotly_chart(fig, use_container_width=True)
 
     filter_msg = ""
-    if total_before_filter is not None and len(filtered_features) != total_before_filter:
+    if total_before_filter is not None and filtered_count != total_before_filter:
         filter_msg = f" (filtered from {total_before_filter})"
-    elif len(filtered_features) != len(features):
+    elif filtered_count != len(features):
         filter_msg = f" (filtered from {len(features)})"
-    st.info(f"**{len(filtered_features)} features** visualized" + filter_msg)
+    st.info(f"**{filtered_count} features** visualized" + filter_msg)
+
+    # Breakdown visuals: one per source when multiple ILI sources exist
+    if len(all_sources) >= 2:
+        st.markdown("---")
+        st.markdown("#### 📊 Breakdown by ILI Source")
+        st.caption("Individual feature maps for each ILI source.")
+        for src in all_sources:
+            fig_breakdown, count = _build_feature_map_figure(
+                features, scatter_data, pipe_circ_mm,
+                {src}, True, x_column,
+                f"Source: {src}",
+                height=380,
+            )
+            fig_breakdown.update_layout(title=f"Source: {src} ({count} features)")
+            st.plotly_chart(fig_breakdown, use_container_width=True)
 
     with st.expander("📊 Column mapping used"):
         st.json(mapping)
@@ -278,7 +336,7 @@ with left_col:
 
         if st.session_state.feature_map_data and st.session_state.feature_map_data.get("success"):
             st.markdown("---")
-            render_feature_map(st.session_state.feature_map_data)
+            render_feature_map_fragment(st.session_state.feature_map_data)
 
         else:
             st.info(
@@ -383,7 +441,7 @@ with left_col:
                     st.markdown("---")
                     fm = st.session_state.upload_feature_map_data
                     total_before = fm.get("total_rows")
-                    render_feature_map(fm, total_before_filter=total_before)
+                    render_feature_map_fragment(fm, total_before_filter=total_before)
 
         else:
             # No file uploaded
