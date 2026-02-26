@@ -2,9 +2,9 @@
 
 ## Training / Testing Data
 
-- **inspection_report_52-021K.pdf** – Acuren UT report for Circuit 52-021K, CML 1.01 & 1.05
+### 1. inspection_report_52-021K.pdf
 
-### Expected extraction (ground truth)
+Acuren UT report for Circuit 52-021K, CML 1.01 & 1.05 (Format A: 8"/6").
 
 | Circuit  | CML   | Reading |
 |----------|-------|---------|
@@ -15,12 +15,29 @@
 | 52-021K  | 1.05-3| 0.393   |
 | 52-021K  | 1.05-4| 0.405   |
 
-Table structure (page 4): 8" section → CML 1.01, 6" section → CML 1.05. Row number = sub-CML suffix. Column A = reading.
+### 2. inspection_report_52-010B_1.29_1.37.pdf
 
-### Parser logic (Acuren)
+Circuit 52-010B, CML 1.29 & 1.37. Expected: 6 rows (1.29-1..3, 1.37-1..3). **May require OCR** if results table is image-based.
 
-- Circuit base: "52-021K" from "52-021K 1-2"
-- CML bases from header "CML 1.01 & 1.05"
-- Table extraction: pdfplumber with `vertical_strategy='text', horizontal_strategy='text'`
-- Row number: cell before diameter (8" or 6") in SECTION column
-- 8" → CML 1.01, 6" → CML 1.05; sub-CML = base + "-" + row_num
+### 3. inspection_report_57-008U_1.52_1.29_4.09.pdf
+
+Multi-section Format B: Circuit 57-008U, CML 1.52, 1.29, 4.09. 16"/30"/8"/6" zones. 9 rows. Multiple readings per zone → min.
+
+| Circuit  | CML   | Reading |
+|----------|-------|---------|
+| 57-008U  | 1.52-1| 0.357   |
+| 57-008U  | 1.52-2| 0.358   |
+| 57-008U  | 1.29-1| 0.342   |
+| 57-008U  | 1.29-2| 0.287   |
+| 57-008U  | 1.29-3| 0.372   |
+| 57-008U  | 1.29-4| 0.382   |
+| 57-008U  | 4.09-1| 0.296   |
+| 57-008U  | 4.09-2| 0.326   |
+| 57-008U  | 4.09-3| 0.318   |
+
+### Parser logic
+
+- Circuit: NN-NNNXX (e.g. 52-021K); "1-2", "2-3" are breakdown drawing numbers
+- CML from header or filename
+- Format A: 8"/6" → CML; row num → zone
+- Format B: 16"/30"/8"/6" → CML; multiple readings per zone → min

@@ -5,7 +5,7 @@
 - **Frontend**: `frontend/pages/8_Inspection_Report_Loader.py`
 - **Backend**: `backend/tml/inspection_report_parser.py`, `backend/tml/inspection_dataloader.py`
 - **API**: `POST /api/tml/inspection-report/read`, `POST /api/tml/inspection-report`
-- **Test fixture**: `tests/fixtures/inspection_report_52-021K.pdf`
+- **Test fixtures**: `tests/fixtures/inspection_report_52-021K.pdf`, `inspection_report_52-010B_1.29_1.37.pdf`, `inspection_report_57-008U_1.52_1.29_4.09.pdf`
 
 ## Purpose
 
@@ -41,27 +41,36 @@ For Acuren-style reports with SECTION/DIAM table on the results page:
 
 ### Parser Logic
 
-1. **Circuit base**: Extract "52-021K" from "52-021K 1-2" (strip line/section suffix)
-2. **CML bases**: From header "CML 1.01 & 1.05" → [1.01, 1.05]
+1. **Circuit base**: Extract "52-021K" from "52-021K 1-2" (strip breakdown drawing "1-2", "2-3", "1,3-3")
+2. **CML bases**: From header "CML 1.01 & 1.05" or filename "1.29, 1.37" / "CML 1.52,1.29&4.09"
 3. **Table**: pdfplumber with `vertical_strategy='text', horizontal_strategy='text'` (required for fragmented Acuren layout)
 4. **Diameter → CML**: 8" section → CML 1.01, 6" section → CML 1.05
 5. **Row number**: Cell immediately before diameter (8" or 6") in SECTION column = sub-CML suffix
 6. **Sub-CML ID**: `{cml_base}-{row_num}` (e.g. 1.01-1, 1.05-3)
 7. **Reading**: First thickness value (column A) per row; handles fragmented "0 . 2 8 5" → 0.285
 
+### Format B: Generic Zone Table (3+ CMLs)
+
+For multi-section reports (e.g. 57-008U with CML 1.52, 1.29, 4.09):
+
+- CIRCUIT CML ZONE DIAM. columns; CML section headers (e.g. "CML 1.52")
+- Diameter → CML: 16"→1.52, 30"→1.29, 8"/6"→4.09 (heuristic)
+- Multiple readings per zone (NORTH SOUTH etc) → use **minimum**
+- Zone 1–4 = sub-CML suffix (e.g. 1.52-1, 1.29-4)
+
 ### Fallback
 
-If Acuren table parsing returns no rows, falls back to aggregate logic (min reading per CML).
+If table parsing returns no rows, falls back to aggregate logic (min reading per CML). OCR used when pdfplumber extracts little or suspicious values.
 
 ---
 
 ## General Extraction
 
 - **Primary**: pdfplumber for text and table extraction
-- **Fallback**: pytesseract OCR when pdfplumber extracts little
-- Date from header (e.g. "DATE: February 23, 2026")
-- Circuit from "Circuit: 52-021K 1-2"
-- CML IDs from "CML 1.01 & 1.05" or "CML:1.37, 1.29"
+- **Fallback**: pytesseract OCR when pdfplumber extracts little or suspicious (e.g. 0.79 from phone 780.790)
+- Date from header (e.g. "DATE: February 23, 2026") or filename `_02.23.2026.pdf`
+- Circuit from "Circuit: 52-010B 2-3" → base "52-010B"
+- CML IDs from header, ITEM(S) EXAMINED, or filename
 
 ---
 
@@ -90,7 +99,13 @@ Python (pdfplumber + pytesseract) is used for deterministic, fast, offline extra
 
 ## Test Data & Verification
 
-- **Fixture**: `tests/fixtures/inspection_report_52-021K.pdf`
+### Fixtures
+
+| Fixture | Circuit | CMLs | Notes |
+|---------|---------|------|-------|
+| inspection_report_52-021K.pdf | 52-021K | 1.01, 1.05 | Format A (8"/6") |
+| inspection_report_52-010B_1.29_1.37.pdf | 52-010B | 1.29, 1.37 | May need OCR if table is image |
+| inspection_report_57-008U_1.52_1.29_4.09.pdf | 57-008U | 1.52, 1.29, 4.09 | Format B (16"/30"/8"/6") |
 
 Run verification:
 
@@ -98,11 +113,11 @@ Run verification:
 python -c "
 from pathlib import Path
 from backend.tml.inspection_report_parser import parse_inspection_report_pdf
-p = Path('tests/fixtures/inspection_report_52-021K.pdf')
-r = parse_inspection_report_pdf(p, 'inspection_report_52-021K.pdf')
-for x in r:
-    print(f'{x.circuit_id}, {x.cml_id}, {x.min_reading}')
+for fn in ['inspection_report_52-021K.pdf', 'inspection_report_57-008U_1.52_1.29_4.09.pdf']:
+    r = parse_inspection_report_pdf(Path('tests/fixtures')/fn, fn)
+    print(fn, len(r), 'rows')
+    for x in r[:3]: print(f'  {x.circuit_id} {x.cml_id} {x.min_reading}')
 "
 ```
 
-Expected: 6 rows with Circuit 52-021K, CML 1.01-1 through 1.05-4, readings as in table above.
+Expected: 52-021K → 6 rows; 57-008U → 9 rows with readings 0.296–0.382.

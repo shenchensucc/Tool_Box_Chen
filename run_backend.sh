@@ -10,8 +10,11 @@ echo ""
 # Change to script directory
 cd "$(dirname "$0")"
 
-# Run backend using python -m (more reliable)
-python -m uvicorn backend.main:app --reload
+# Force polling mode for file watcher (fixes reload on WSL/Docker/Windows)
+export WATCHFILES_FORCE_POLLING=True
+
+# Explicitly watch backend dir and subdirs for reliable hot reload
+python -m uvicorn backend.main:app --reload --reload-dir backend
 
 # Check if command failed
 if [ $? -ne 0 ]; then

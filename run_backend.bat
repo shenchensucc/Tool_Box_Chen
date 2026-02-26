@@ -8,7 +8,12 @@ echo API docs will be at http://localhost:8000/docs
 echo.
 
 cd /d "%~dp0"
-python -m uvicorn backend.main:app --reload
+
+REM Force polling mode for file watcher (fixes reload not detecting changes on Windows)
+set WATCHFILES_FORCE_POLLING=True
+
+REM Explicitly watch backend dir and subdirs for reliable hot reload
+python -m uvicorn backend.main:app --reload --reload-dir backend
 
 if %ERRORLEVEL% NEQ 0 (
     echo.

@@ -36,6 +36,9 @@ cd frontend; python -m streamlit run Home.py
 1. `run_backend.bat` (Terminal 1)
 2. `run_frontend.bat` (Terminal 2)
 
+**To force-stop all app processes** (e.g. after closing terminal but app still running):
+- Double-click `kill_app.bat`
+
 ---
 
 ## 🍎 Mac/Linux Users - Using Shell Scripts
@@ -44,6 +47,11 @@ cd frontend; python -m streamlit run Home.py
 ```bash
 ./run_backend.sh    # Terminal 1
 ./run_frontend.sh   # Terminal 2
+```
+
+**To force-stop all app processes:**
+```bash
+./kill_app.sh
 ```
 
 ---
@@ -71,6 +79,19 @@ pip install streamlit
 ### Port already in use
 - Close other apps using ports 8000 or 8501
 - Or change backend port: `python -m uvicorn backend.main:app --reload --port 8001`
+
+### App still running after closing terminal (ghost processes)
+If the app seems to still be running after you killed the process or closed the terminal:
+- **Windows**: Double-click `kill_app.bat` to force-kill all processes on ports 8000 and 8501
+- **Mac/Linux**: Run `./kill_app.sh` in the project root
+- Then restart with `run_backend.bat` / `run_frontend.bat` (or `.sh` on Mac/Linux)
+
+### Backend code changes not taking effect
+If you changed backend code but the app still behaves like before:
+1. **Hard restart**: Run `kill_app.bat` (or `kill_app.sh`), then start backend again
+2. **Clear Python cache**: Delete `backend/__pycache__` and `backend/**/__pycache__` folders, then restart
+3. **Browser cache**: Do a hard refresh (Ctrl+Shift+R or Cmd+Shift+R) in the browser
+4. **Streamlit cache**: If frontend calls backend, Streamlit may cache responses — click "Rerun" in the Streamlit UI or refresh the page
 
 ---
 

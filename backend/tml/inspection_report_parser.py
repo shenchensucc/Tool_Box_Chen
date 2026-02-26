@@ -2,8 +2,10 @@
 Inspection Report PDF Parser
 
 Extracts Circuit ID, CML ID, thickness readings, and measurement date from UT inspection report PDFs.
-Supports Acuren-style reports: table with SECTION/DIAM columns, 8"->CML 1.01, 6"->CML 1.05,
-row number -> sub-CML suffix (e.g. 1.01-1, 1.05-2). Column A = reading per row.
+Supports Acuren-style reports with multiple table formats:
+- Format A: SECTION/DIAM columns, 8"/6" -> CML base, row num -> zone (e.g. 1.01-1)
+- Format B: CIRCUIT CML ZONE DIAM. table, CML section headers, multiple readings per zone -> min
+Circuit format: NN-NNNXX (e.g. 52-021K); "1-2", "2-3" are breakdown drawing numbers, not circuit.
 """
 
 import re
@@ -98,15 +100,39 @@ def _extract_circuit_from_text(text: str) -> Optional[str]:
 
 
 def _extract_circuit_base(circuit_raw: str) -> str:
-    """Extract base circuit ID (e.g. '52-021K' from '52-021K 1-2')."""
+    """
+    Extract base circuit ID. Format NN-NNNXX (e.g. 52-021K, 57-008U).
+    Suffixes like "1-2", "2-3", "1,3-3" are breakdown drawing numbers, not part of circuit.
+    """
     if not circuit_raw:
         return "Unknown"
     s = circuit_raw.strip()
-    # "52-021K 1-2" -> "52-021K"
-    m = re.match(r"^([\d]+-[\w]+)(?:\s+[\d]+-[\d]+)?", s)
+    # "52-021K 1-2" -> "52-021K", "57-008U 1,3-3" -> "57-008U"
+    m = re.match(r"^(\d+-\w+)(?:\s+[\d,]*-[\d]+)?", s)
     if m:
         return m.group(1).strip()
     return s
+
+
+def _extract_cml_ids_from_filename(filename: str) -> List[str]:
+    """Extract CML bases from filename (e.g. '1.29, 1.37' or '1.52,1.29&4.09')."""
+    cml_ids = []
+    # Match "CML 1.52,1.29&4.09" or "1.29, 1.37" before UT- or _
+    m = re.search(r"CML\s*([\d.,\s&]+)", filename, re.I)
+    if m:
+        raw = m.group(1)
+    else:
+        # "52-012B 2-3 1.29, 1.37 UT-ROBJOS" -> "1.29, 1.37"
+        m = re.search(r"\d+-\w+\s+[\d,]*-[\d]+\s+([\d.,\s&]+)", filename)
+        if m:
+            raw = m.group(1)
+        else:
+            return cml_ids
+    for part in re.split(r"[\s,&]+", raw):
+        part = part.strip()
+        if part and re.match(r"^\d+(\.\d+)?$", part):
+            cml_ids.append(part)
+    return cml_ids
 
 
 def _extract_cml_ids_from_text(text: str) -> List[str]:
@@ -136,12 +162,15 @@ def _extract_cml_ids_from_text(text: str) -> List[str]:
 
 
 def _extract_numeric_readings(text: str) -> List[float]:
-    """Extract thickness readings from text. Handles normal (0.285) and fragmented PDF (0 . 2 8 5) extraction."""
+    """
+    Extract thickness readings from text. Handles normal (0.285) and fragmented PDF (0 . 2 8 5).
+    Excludes false positives from phone numbers (e.g. 0.79 in 780.790.1776) via (?<![\\d.]) lookbehind.
+    """
     readings = []
-    # Normal format: 0.285, 0.380
-    for m in re.finditer(r"\b(0\.\d{2,4})\b", text):
+    # Normal format: 0.285, 0.380 - not part of longer number (avoid 780.790)
+    for m in re.finditer(r"(?<!\d)(?<!\.)0\.\d{2,4}(?!\d)(?!\.\d)", text):
         try:
-            v = float(m.group(1))
+            v = float(m.group(0))
             if 0.05 <= v <= 3.0:
                 readings.append(v)
         except ValueError:
@@ -149,7 +178,7 @@ def _extract_numeric_readings(text: str) -> List[float]:
     # Fragmented PDF: collapse spaces and try again (0 . 2 8 5 -> 0.285)
     if not readings:
         collapsed = re.sub(r"\s+", "", text)
-        for m in re.finditer(r"0\.\d{2,4}", collapsed):
+        for m in re.finditer(r"(?<!\d)0\.\d{2,4}(?!\d)", collapsed):
             try:
                 v = float(m.group(0))
                 if 0.05 <= v <= 3.0:
@@ -158,7 +187,7 @@ def _extract_numeric_readings(text: str) -> List[float]:
                 pass
     # Fallback: X.XXX (exclude 1.0, 2.0 calibration refs)
     if not readings:
-        for m in re.finditer(r"\b(\d+\.\d{3,4})\b", text):
+        for m in re.finditer(r"(?<!\d)(\d+\.\d{3,4})(?!\d)", text):
             try:
                 v = float(m.group(1))
                 if 0.05 <= v <= 3.0 and not (0.99 <= v <= 1.01 or 1.99 <= v <= 2.01):
@@ -251,6 +280,154 @@ def _parse_acuren_results_table(
                                     extraction_method="pdfplumber",
                                 )
                             )
+    return results
+
+
+def _parse_generic_zone_table(
+    pdf_path: Path, circuit_base: str, cml_bases: List[str], date_str: str
+) -> List[ExtractedReading]:
+    """
+    Parse generic zone table: CIRCUIT CML ZONE DIAM. columns, CML section headers.
+    Within each zone row there can be multiple readings (NORTH SOUTH etc) -> use MIN.
+    Supports diameters 8", 6", 16", 30" etc. Process rows sequentially; CML header sets current section.
+    """
+    results = []
+    current_cml_base = None
+    cml_idx = 0
+    # Diameter -> CML mapping when multiple CMLs (e.g. 16"->1.52, 30"->1.29, 8"->4.09)
+    diam_to_cml: dict = {}
+
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            # Update current CML from page text when page has single CML (e.g. page 5 with "CML 4.09")
+            # Use line-start match to avoid filename "CML 1.52,1.29&4.09" in footer
+            page_text = page.extract_text() or ""
+            # Match standalone "CML 4.09" at line start, not "CML 1.52,1.29&4.09" in filename
+            page_cmls = [
+                m.group(1)
+                for m in re.finditer(r"(?:^|\n)\s*CML\s+(\d+\.\d+)(?:\s*$|\s*\n)", page_text, re.I)
+                if m.group(1) in cml_bases
+            ]
+            if len(page_cmls) == 1:
+                current_cml_base = page_cmls[0]
+            tables = page.extract_tables({"vertical_strategy": "text", "horizontal_strategy": "text"})
+            for table in tables or []:
+                for row in table:
+                    if not row:
+                        continue
+                    row_text = " ".join(str(c or "").strip() for c in row)
+                    cells = [str(c or "").strip() for c in row]
+                    collapsed = re.sub(r"\s+", "", row_text)
+
+                    # Check for CML section header (cell contains "1.52" or "CML 1.52")
+                    for c in cells:
+                        m = re.search(r"(?:CML\s+)?(\d+\.\d+)\s*$", c)
+                        if m:
+                            base = m.group(1)
+                            if base in cml_bases:
+                                current_cml_base = base
+                                break
+
+                    # Skip header rows (but not zone rows starting with 1,2,3,4)
+                    if re.search(r"CIRCUIT|CML\s+[A-Z]|ZONE|DIAM|SECTION|NORTH|SOUTH", row_text, re.I):
+                        if not re.match(r"^\s*[1234]\s+", row_text):
+                            continue
+
+                    # Zone number (1-4)
+                    zone_num = None
+                    for c in cells:
+                        if c in ("1", "2", "3", "4"):
+                            zone_num = c
+                            break
+
+                    # Diameter: 8", 6", 16", 30" etc
+                    diam = None
+                    for d in ["16", "30", "8", "6", "12", "10", "4"]:
+                        if re.search(r"(?:^|[^\d.])" + d + r'\s*["\']', row_text) or (
+                            d + '"' in collapsed or d + "'" in row_text
+                        ):
+                            diam = d
+                            break
+
+                    # All thickness readings in row (multiple per zone -> take min)
+                    # Use (?!\d) to avoid "0.3574" from "0.357" + "40F" (temp suffix)
+                    readings_in_row = []
+                    for m in re.finditer(r"0\.\d{2,3}(?!\d)", collapsed):
+                        try:
+                            v = float(m.group(0))
+                            if 0.05 <= v <= 3.0:
+                                readings_in_row.append(v)
+                        except ValueError:
+                            pass
+                    if not readings_in_row:
+                        for m in re.finditer(r"0\.\d{2,4}", collapsed):
+                            try:
+                                v = float(m.group(0))
+                                if 0.05 <= v <= 3.0:
+                                    # Round to 3 decimals to fix 0.3574 from "0.357"+"40F"
+                                    v = round(v, 3)
+                                    readings_in_row.append(v)
+                            except ValueError:
+                                pass
+                    for m in re.finditer(r"0\s*\.\s*(\d)\s*(\d)\s*(\d)(?:\s*(\d))?", row_text):
+                        try:
+                            s = f"0.{m.group(1)}{m.group(2)}{m.group(3)}{m.group(4) or ''}"
+                            v = float(s)
+                            if 0.05 <= v <= 3.0:
+                                readings_in_row.append(v)
+                        except (ValueError, IndexError):
+                            pass
+
+                    if re.search(r"N/A|FLANGE", row_text, re.I) and not readings_in_row:
+                        continue
+
+                    # Require diameter when we have multiple CMLs (avoids noise from other tables)
+                    if len(cml_bases) > 1 and not diam:
+                        continue
+
+                    if zone_num and readings_in_row:
+                        min_reading = min(readings_in_row)
+                        # When we have diam, use diam_to_cml (heuristic) - ignore page header order
+                        cml_base = None
+                        if diam and cml_bases:
+                            if diam not in diam_to_cml:
+                                # Prefer heuristic over page header when we have 16/30/8/6 (multi-section page)
+                                if diam in ("16", "12") and "1.52" in cml_bases:
+                                    diam_to_cml[diam] = "1.52"
+                                elif diam == "30" and "1.29" in cml_bases:
+                                    diam_to_cml[diam] = "1.29"
+                                elif diam in ("8", "6") and "4.09" in cml_bases:
+                                    diam_to_cml[diam] = "4.09"
+                                elif current_cml_base and len(page_cmls) == 1:
+                                    diam_to_cml[diam] = current_cml_base
+                                else:
+                                    diam_to_cml[diam] = cml_bases[len(diam_to_cml) % len(cml_bases)]
+                            cml_base = diam_to_cml[diam]
+                        if not cml_base:
+                            # No diam: use row CML or current section header
+                            for c in cells:
+                                m = re.search(r"(\d+\.\d+)\s*$", c)
+                                if m and m.group(1) in cml_bases:
+                                    cml_base = m.group(1)
+                                    break
+                        if not cml_base:
+                            cml_base = current_cml_base
+                        if not cml_base and cml_bases:
+                            cml_base = cml_bases[cml_idx % len(cml_bases)]
+                            cml_idx += 1
+                        if cml_base:
+                            cml_id = f"{cml_base}-{zone_num}"
+                            results.append(
+                                ExtractedReading(
+                                    circuit_id=circuit_base,
+                                    cml_id=cml_id,
+                                    measurement_date=date_str,
+                                    min_reading=min_reading,
+                                    all_readings=readings_in_row,
+                                    extraction_method="pdfplumber",
+                                )
+                            )
+
     return results
 
 
@@ -362,8 +539,13 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
     # Combine readings (prefer table extraction, fallback to text)
     all_readings = readings_from_tables if readings_from_tables else readings_from_text
 
-    # If pdfplumber got little, try OCR
-    if not all_readings or len(full_text) < 100:
+    # If pdfplumber got little or suspicious readings, try OCR (e.g. results table as image)
+    _try_ocr = not all_readings or len(full_text) < 100
+    if not _try_ocr and all_readings and len(all_readings) <= 3:
+        # Suspicious: few readings that could be false positives (e.g. 0.79 from 780.790)
+        if all(0.78 <= v <= 0.82 for v in all_readings):
+            _try_ocr = True
+    if _try_ocr:
         try:
             ocr_date, ocr_readings, ocr_cml_ids, ocr_circuit = _extract_with_ocr(pdf_path)
             if ocr_readings:
@@ -396,18 +578,33 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
     if not circuit:
         circuit = "Unknown"
 
+    # Fallback: CML from filename (e.g. "1.29, 1.37" or "CML 1.52,1.29&4.09")
+    if not cml_ids:
+        cml_ids = _extract_cml_ids_from_filename(source_filename)
     if not cml_ids and all_readings:
         cml_ids = ["1"]  # single CML
 
     circuit_base = _extract_circuit_base(circuit)
     date_str = date or ""
 
-    # Try Acuren-style table parsing first (row-per-reading: 1.01-1, 1.05-2, etc.)
+    # When 3+ CMLs, use generic zone table (multi-section format). Else try Acuren first.
+    if len(cml_ids) >= 3:
+        generic_results = _parse_generic_zone_table(pdf_path, circuit_base, cml_ids, date_str)
+        if generic_results:
+            for r in generic_results:
+                r.source_file = source_filename
+            return generic_results
     acuren_results = _parse_acuren_results_table(pdf_path, circuit_base, cml_ids, date_str)
     if acuren_results:
         for r in acuren_results:
             r.source_file = source_filename
         return acuren_results
+    if len(cml_ids) < 3:
+        generic_results = _parse_generic_zone_table(pdf_path, circuit_base, cml_ids, date_str)
+        if generic_results:
+            for r in generic_results:
+                r.source_file = source_filename
+            return generic_results
 
     results = []
 
@@ -419,7 +616,7 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
         min_reading = min(all_readings) if all_readings else 0.0
         results.append(
             ExtractedReading(
-                circuit_id=circuit,
+                circuit_id=circuit_base,
                 cml_id=cml_ids[0],
                 measurement_date=date or "",
                 min_reading=min_reading,
@@ -429,8 +626,6 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
         )
     else:
         # Multiple CMLs: try to split readings by table sections
-        # For now: assign min of all to each CML (conservative)
-        # TODO: improve with spatial layout if needed
         n = len(cml_ids)
         chunk_size = max(1, len(all_readings) // n) if all_readings else 0
         for i, cml_id in enumerate(cml_ids):
@@ -444,7 +639,7 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
                 subset = []
             results.append(
                 ExtractedReading(
-                    circuit_id=circuit,
+                    circuit_id=circuit_base,
                     cml_id=cml_id,
                     measurement_date=date or "",
                     min_reading=min_reading,

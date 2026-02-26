@@ -161,11 +161,13 @@ You need to run both the backend and frontend in separate terminals:
 **Terminal 1 - Backend API:**
 ```bash
 # Using uv:
-uv run uvicorn backend.main:app --reload
+uv run uvicorn backend.main:app --reload --reload-dir backend
 
 # Using pip (with venv activated):
-uvicorn backend.main:app --reload
+uvicorn backend.main:app --reload --reload-dir backend
 ```
+
+> **Windows**: If hot reload doesn't detect changes, set `WATCHFILES_FORCE_POLLING=True` before running. The `run_backend.bat` script does this automatically.
 
 The backend will start at `http://127.0.0.1:8000`
 

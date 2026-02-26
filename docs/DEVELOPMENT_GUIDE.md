@@ -502,12 +502,23 @@ st.plotly_chart(fig, use_container_width=True)
 
 ## 🐛 Debugging
 
+### Process Management & Hard Kill
+
+If the app keeps running after closing the terminal (ghost processes), or you need to free ports 8000/8501:
+
+- **Windows**: Run `kill_app.bat` (double-click or `.\kill_app.bat` in terminal)
+- **Mac/Linux**: Run `./kill_app.sh`
+
+This force-kills all processes on ports 8000 (backend) and 8501 (frontend).
+
 ### Backend Debugging
 
 **Using uvicorn reload**:
 ```bash
-uv run uvicorn backend.main:app --reload --log-level debug
+uv run uvicorn backend.main:app --reload --reload-dir backend --log-level debug
 ```
+
+If reload doesn't detect file changes (common on Windows), set `WATCHFILES_FORCE_POLLING=True` before running.
 
 **Print debugging**:
 ```python
