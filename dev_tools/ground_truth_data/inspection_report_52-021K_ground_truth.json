@@ -1,0 +1,16 @@
+{
+  "source_file": "inspection_report_52-021K.pdf",
+  "source_path": "tests/fixtures/inspection_report_52-021K.pdf",
+  "extracted_at": "2026-03-03T00:00:00.000000",
+  "readings": [
+    {"circuit_id": "52-021K", "cml_id": "1.01-1", "min_reading": 0.285, "is_correct": true},
+    {"circuit_id": "52-021K", "cml_id": "1.01-2", "min_reading": 0.299, "is_correct": true},
+    {"circuit_id": "52-021K", "cml_id": "1.05-1", "min_reading": 0.456, "is_correct": true},
+    {"circuit_id": "52-021K", "cml_id": "1.05-2", "min_reading": 0.450, "is_correct": true},
+    {"circuit_id": "52-021K", "cml_id": "1.05-3", "min_reading": 0.393, "is_correct": true},
+    {"circuit_id": "52-021K", "cml_id": "1.05-4", "min_reading": 0.405, "is_correct": true}
+  ],
+  "additions": [],
+  "schema_version": "1.0",
+  "_note": "Consolidated from backend/tml/inspection_fixtures.py FIXTURE_EXPECTED"
+}

@@ -1,0 +1,82 @@
+{
+  "source_file": "52-001G 1-1 2.32 UT-ROBJOS-26-063_02.28.2026.pdf",
+  "source_path": "(uploaded) 52-001G 1-1 2.32 UT-ROBJOS-26-063_02.28.2026.pdf",
+  "extracted_at": "2026-03-03T01:14:54.731574",
+  "readings": [
+    {
+      "circuit_id": "52-001G",
+      "cml_id": "2.32-1",
+      "min_reading": 0.299,
+      "measurement_date": "2026-02-28",
+      "source_file": "52-001G 1-1 2.32 UT-ROBJOS-26-063_02.28.2026.pdf",
+      "extraction_method": "pdfplumber",
+      "is_correct": false,
+      "corrected_reading": null,
+      "notes": ""
+    },
+    {
+      "circuit_id": "52-001G",
+      "cml_id": "2.32-5",
+      "min_reading": 0.336,
+      "measurement_date": "2026-02-28",
+      "source_file": "52-001G 1-1 2.32 UT-ROBJOS-26-063_02.28.2026.pdf",
+      "extraction_method": "pdfplumber",
+      "is_correct": true,
+      "corrected_reading": null,
+      "notes": ""
+    },
+    {
+      "circuit_id": "52-001G",
+      "cml_id": "2.32-6",
+      "min_reading": 0.332,
+      "measurement_date": "2026-02-28",
+      "source_file": "52-001G 1-1 2.32 UT-ROBJOS-26-063_02.28.2026.pdf",
+      "extraction_method": "pdfplumber",
+      "is_correct": true,
+      "corrected_reading": null,
+      "notes": ""
+    },
+    {
+      "circuit_id": "52-001G",
+      "cml_id": "2.32-7",
+      "min_reading": 0.298,
+      "measurement_date": "2026-02-28",
+      "source_file": "52-001G 1-1 2.32 UT-ROBJOS-26-063_02.28.2026.pdf",
+      "extraction_method": "pdfplumber",
+      "is_correct": true,
+      "corrected_reading": null,
+      "notes": ""
+    }
+  ],
+  "additions": [
+    {
+      "circuit_id": "52-001G",
+      "cml_id": "2.32-1",
+      "min_reading": 0.514,
+      "measurement_date": "2026-02-28",
+      "notes": "Added manually"
+    },
+    {
+      "circuit_id": "52-001G",
+      "cml_id": "2.32-2",
+      "min_reading": 0.507,
+      "measurement_date": "2026-02-28",
+      "notes": "Added manually"
+    },
+    {
+      "circuit_id": "52-001G",
+      "cml_id": "2.32-3",
+      "min_reading": 0.299,
+      "measurement_date": "2026-02-28",
+      "notes": "Added manually"
+    },
+    {
+      "circuit_id": "52-001G",
+      "cml_id": "2.32-4",
+      "min_reading": 0.503,
+      "measurement_date": "2026-02-28",
+      "notes": "Added manually"
+    }
+  ],
+  "schema_version": "1.0"
+}

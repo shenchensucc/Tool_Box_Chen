@@ -1,0 +1,16 @@
+{
+  "source_file": "inspection_report_52-010B_1.29_1.37.pdf",
+  "source_path": "tests/fixtures/inspection_report_52-010B_1.29_1.37.pdf",
+  "extracted_at": "2026-03-03T00:00:00.000000",
+  "readings": [
+    {"circuit_id": "52-010B", "cml_id": "1.29-1", "min_reading": 0.368, "is_correct": true},
+    {"circuit_id": "52-010B", "cml_id": "1.29-2", "min_reading": 0.373, "is_correct": true},
+    {"circuit_id": "52-010B", "cml_id": "1.29-3", "min_reading": 0.353, "is_correct": true},
+    {"circuit_id": "52-010B", "cml_id": "1.37-1", "min_reading": 0.344, "is_correct": true},
+    {"circuit_id": "52-010B", "cml_id": "1.37-2", "min_reading": 0.391, "is_correct": true},
+    {"circuit_id": "52-010B", "cml_id": "1.37-3", "min_reading": 0.355, "is_correct": true}
+  ],
+  "additions": [],
+  "schema_version": "1.0",
+  "_note": "OCR-extracted (Tesseract 300 DPI + EasyOCR fallback). 2-CML table layout: 1.37 col first."
+}

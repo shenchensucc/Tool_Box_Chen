@@ -1,0 +1,137 @@
+{
+  "source_file": "57-034C 4-7 2.37UT-ROBJOS-26-061_02.27.2026.pdf",
+  "source_path": "(uploaded) 57-034C 4-7 2.37UT-ROBJOS-26-061_02.27.2026.pdf",
+  "extracted_at": "2026-03-03T00:40:54.377399",
+  "readings": [
+    {
+      "circuit_id": "57-034C",
+      "cml_id": "2.37-1",
+      "min_reading": 0.24,
+      "measurement_date": "2026-02-27",
+      "source_file": "57-034C 4-7 2.37UT-ROBJOS-26-061_02.27.2026.pdf",
+      "extraction_method": "pdfplumber",
+      "is_correct": false,
+      "corrected_reading": null,
+      "notes": ""
+    },
+    {
+      "circuit_id": "57-034C",
+      "cml_id": "2.37-2",
+      "min_reading": 0.195,
+      "measurement_date": "2026-02-27",
+      "source_file": "57-034C 4-7 2.37UT-ROBJOS-26-061_02.27.2026.pdf",
+      "extraction_method": "pdfplumber",
+      "is_correct": false,
+      "corrected_reading": null,
+      "notes": ""
+    },
+    {
+      "circuit_id": "57-034C",
+      "cml_id": "2.37-3",
+      "min_reading": 0.187,
+      "measurement_date": "2026-02-27",
+      "source_file": "57-034C 4-7 2.37UT-ROBJOS-26-061_02.27.2026.pdf",
+      "extraction_method": "pdfplumber",
+      "is_correct": false,
+      "corrected_reading": null,
+      "notes": ""
+    },
+    {
+      "circuit_id": "57-034C",
+      "cml_id": "2.37-4",
+      "min_reading": 0.184,
+      "measurement_date": "2026-02-27",
+      "source_file": "57-034C 4-7 2.37UT-ROBJOS-26-061_02.27.2026.pdf",
+      "extraction_method": "pdfplumber",
+      "is_correct": false,
+      "corrected_reading": null,
+      "notes": ""
+    },
+    {
+      "circuit_id": "57-034C",
+      "cml_id": "2.37-5",
+      "min_reading": 0.247,
+      "measurement_date": "2026-02-27",
+      "source_file": "57-034C 4-7 2.37UT-ROBJOS-26-061_02.27.2026.pdf",
+      "extraction_method": "pdfplumber",
+      "is_correct": false,
+      "corrected_reading": null,
+      "notes": ""
+    },
+    {
+      "circuit_id": "57-034C",
+      "cml_id": "2.37-6",
+      "min_reading": 0.259,
+      "measurement_date": "2026-02-27",
+      "source_file": "57-034C 4-7 2.37UT-ROBJOS-26-061_02.27.2026.pdf",
+      "extraction_method": "pdfplumber",
+      "is_correct": false,
+      "corrected_reading": null,
+      "notes": ""
+    },
+    {
+      "circuit_id": "57-034C",
+      "cml_id": "2.37-7",
+      "min_reading": 0.172,
+      "measurement_date": "2026-02-27",
+      "source_file": "57-034C 4-7 2.37UT-ROBJOS-26-061_02.27.2026.pdf",
+      "extraction_method": "pdfplumber",
+      "is_correct": true,
+      "corrected_reading": null,
+      "notes": ""
+    },
+    {
+      "circuit_id": "57-034C",
+      "cml_id": "2.37-8",
+      "min_reading": 0.306,
+      "measurement_date": "2026-02-27",
+      "source_file": "57-034C 4-7 2.37UT-ROBJOS-26-061_02.27.2026.pdf",
+      "extraction_method": "pdfplumber",
+      "is_correct": false,
+      "corrected_reading": null,
+      "notes": ""
+    },
+    {
+      "circuit_id": "57-034C",
+      "cml_id": "2.37-9",
+      "min_reading": 0.292,
+      "measurement_date": "2026-02-27",
+      "source_file": "57-034C 4-7 2.37UT-ROBJOS-26-061_02.27.2026.pdf",
+      "extraction_method": "pdfplumber",
+      "is_correct": false,
+      "corrected_reading": null,
+      "notes": ""
+    }
+  ],
+  "additions": [
+    {
+      "circuit_id": "57-034C",
+      "cml_id": "2.37-1",
+      "min_reading": 0.297,
+      "measurement_date": "2026-02-27",
+      "notes": "Added manually"
+    },
+    {
+      "circuit_id": "57-034C",
+      "cml_id": "2.37-2",
+      "min_reading": 0.288,
+      "measurement_date": "2026-02-27",
+      "notes": "Added manually"
+    },
+    {
+      "circuit_id": "57-034C",
+      "cml_id": "2.37-3",
+      "min_reading": 0.233,
+      "measurement_date": "2026-02-27",
+      "notes": "Added manually"
+    },
+    {
+      "circuit_id": "57-034C",
+      "cml_id": "2.37-4",
+      "min_reading": 0.247,
+      "measurement_date": "2026-02-27",
+      "notes": "Added manually"
+    }
+  ],
+  "schema_version": "1.0"
+}

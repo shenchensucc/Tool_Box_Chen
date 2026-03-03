@@ -23,6 +23,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+ocr = [
+    "easyocr>=1.7.0",
+]
 dev = [
     "ruff>=0.7.0",
     "black>=24.10.0",

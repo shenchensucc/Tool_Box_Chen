@@ -1,0 +1,53 @@
+{
+  "source_file": "52-001C 1-2 CML 1.33 UT-BALJIN-2026-18-02.28.2026.pdf",
+  "source_path": "(uploaded) 52-001C 1-2 CML 1.33 UT-BALJIN-2026-18-02.28.2026.pdf",
+  "extracted_at": "2026-03-01T16:42:08.991365",
+  "readings": [
+    {
+      "circuit_id": "52-001C",
+      "cml_id": "1.33-1",
+      "min_reading": 0.388,
+      "measurement_date": "2026-02-28",
+      "source_file": "52-001C 1-2 CML 1.33 UT-BALJIN-2026-18-02.28.2026.pdf",
+      "extraction_method": "pdfplumber",
+      "is_correct": true,
+      "corrected_reading": null,
+      "notes": ""
+    },
+    {
+      "circuit_id": "52-001C",
+      "cml_id": "1.33-2",
+      "min_reading": 0.408,
+      "measurement_date": "2026-02-28",
+      "source_file": "52-001C 1-2 CML 1.33 UT-BALJIN-2026-18-02.28.2026.pdf",
+      "extraction_method": "pdfplumber",
+      "is_correct": true,
+      "corrected_reading": null,
+      "notes": ""
+    },
+    {
+      "circuit_id": "52-001C",
+      "cml_id": "1.33-3",
+      "min_reading": 0.426,
+      "measurement_date": "2026-02-28",
+      "source_file": "52-001C 1-2 CML 1.33 UT-BALJIN-2026-18-02.28.2026.pdf",
+      "extraction_method": "pdfplumber",
+      "is_correct": true,
+      "corrected_reading": null,
+      "notes": ""
+    },
+    {
+      "circuit_id": "52-001C",
+      "cml_id": "1.33-4",
+      "min_reading": 0.421,
+      "measurement_date": "2026-02-28",
+      "source_file": "52-001C 1-2 CML 1.33 UT-BALJIN-2026-18-02.28.2026.pdf",
+      "extraction_method": "pdfplumber",
+      "is_correct": true,
+      "corrected_reading": null,
+      "notes": ""
+    }
+  ],
+  "additions": [],
+  "schema_version": "1.0"
+}

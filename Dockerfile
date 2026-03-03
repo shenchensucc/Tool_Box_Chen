@@ -6,6 +6,10 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# Install Tesseract OCR for inspection report parser (image-based PDFs)
+RUN apt-get update && apt-get install -y --no-install-recommends tesseract-ocr \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install dependencies (pywin32 is Windows-only, skipped on Linux)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

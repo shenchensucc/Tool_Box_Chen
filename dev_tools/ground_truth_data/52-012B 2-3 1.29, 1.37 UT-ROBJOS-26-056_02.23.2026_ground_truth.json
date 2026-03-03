@@ -1,0 +1,74 @@
+{
+  "source_file": "52-012B 2-3 1.29, 1.37 UT-ROBJOS-26-056_02.23.2026.pdf",
+  "source_path": "(uploaded) 52-012B 2-3 1.29, 1.37 UT-ROBJOS-26-056_02.23.2026.pdf",
+  "extracted_at": "2026-03-03T01:40:27.593724",
+  "readings": [
+    {
+      "circuit_id": "52-010B",
+      "cml_id": "1.37",
+      "min_reading": 0.0,
+      "measurement_date": "2026-02-23",
+      "source_file": "52-012B 2-3 1.29, 1.37 UT-ROBJOS-26-056_02.23.2026.pdf",
+      "extraction_method": "pdfplumber",
+      "is_correct": false,
+      "corrected_reading": null,
+      "notes": ""
+    },
+    {
+      "circuit_id": "52-010B",
+      "cml_id": "1.29",
+      "min_reading": 0.0,
+      "measurement_date": "2026-02-23",
+      "source_file": "52-012B 2-3 1.29, 1.37 UT-ROBJOS-26-056_02.23.2026.pdf",
+      "extraction_method": "pdfplumber",
+      "is_correct": false,
+      "corrected_reading": null,
+      "notes": ""
+    }
+  ],
+  "additions": [
+    {
+      "circuit_id": "52-010B",
+      "cml_id": "1.29-1",
+      "min_reading": 0.368,
+      "measurement_date": "2026-02-23",
+      "notes": "Added manually"
+    },
+    {
+      "circuit_id": "52-010B",
+      "cml_id": "1.29-2",
+      "min_reading": 0.373,
+      "measurement_date": "2026-02-23",
+      "notes": "Added manually"
+    },
+    {
+      "circuit_id": "52-010B",
+      "cml_id": "1.29-3",
+      "min_reading": 0.353,
+      "measurement_date": "2026-02-23",
+      "notes": "Added manually"
+    },
+    {
+      "circuit_id": "52-010B",
+      "cml_id": "1.37-1",
+      "min_reading": 0.344,
+      "measurement_date": "2026-02-23",
+      "notes": "Added manually"
+    },
+    {
+      "circuit_id": "52-010B",
+      "cml_id": "1.37-2",
+      "min_reading": 0.391,
+      "measurement_date": "2026-02-23",
+      "notes": "Added manually"
+    },
+    {
+      "circuit_id": "52-010B",
+      "cml_id": "1.37-3",
+      "min_reading": 0.355,
+      "measurement_date": "2026-02-23",
+      "notes": "Added manually"
+    }
+  ],
+  "schema_version": "1.0"
+}

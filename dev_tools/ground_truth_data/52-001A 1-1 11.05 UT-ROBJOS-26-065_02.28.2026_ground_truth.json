@@ -1,0 +1,28 @@
+{
+  "source_file": "52-001A 1-1 11.05 UT-ROBJOS-26-065_02.28.2026.pdf",
+  "source_path": "(uploaded) 52-001A 1-1 11.05 UT-ROBJOS-26-065_02.28.2026.pdf",
+  "extracted_at": "2026-03-01T16:45:57.960506",
+  "readings": [
+    {
+      "circuit_id": "52-001A",
+      "cml_id": "11.05",
+      "min_reading": 0.469,
+      "measurement_date": "2026-02-28",
+      "source_file": "52-001A 1-1 11.05 UT-ROBJOS-26-065_02.28.2026.pdf",
+      "extraction_method": "pdfplumber",
+      "is_correct": false,
+      "corrected_reading": null,
+      "notes": ""
+    }
+  ],
+  "additions": [
+    {
+      "circuit_id": "52-001A",
+      "cml_id": "11.05-1",
+      "min_reading": 0.469,
+      "measurement_date": "2026-02-28",
+      "notes": "Added manually - parser missed"
+    }
+  ],
+  "schema_version": "1.0"
+}

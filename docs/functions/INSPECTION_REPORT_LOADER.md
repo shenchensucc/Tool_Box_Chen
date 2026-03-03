@@ -5,7 +5,7 @@
 - **Frontend**: `frontend/pages/8_Inspection_Report_Loader.py`
 - **Backend**: `backend/tml/inspection_report_parser.py`, `backend/tml/inspection_dataloader.py`
 - **API**: `POST /api/tml/inspection-report/read`, `POST /api/tml/inspection-report`
-- **Test fixtures**: `tests/fixtures/inspection_report_52-021K.pdf`, `inspection_report_52-010B_1.29_1.37.pdf`, `inspection_report_57-008U_1.52_1.29_4.09.pdf`
+- **Test fixtures**: `tests/fixtures/inspection_report_52-021K.pdf`, `inspection_report_57-008U_1.52_1.29_4.09.pdf`
 
 ## Purpose
 
@@ -42,12 +42,15 @@ For Acuren-style reports with SECTION/DIAM table on the results page:
 ### Parser Logic
 
 1. **Circuit base**: Extract "52-021K" from "52-021K 1-2" (strip breakdown drawing "1-2", "2-3", "1,3-3")
-2. **CML bases**: From header "CML 1.01 & 1.05" or filename "1.29, 1.37" / "CML 1.52,1.29&4.09"
+2. **CML bases**: From header "CML 1.01 & 1.05" or filename "1.29, 1.37" / "CML 1.52,1.29&4.09" / "52-001G 1-1 2.32 UT-..." / "57-034C 4-7 2.37UT-..." (no space before UT)
 3. **Table**: pdfplumber with `vertical_strategy='text', horizontal_strategy='text'` (required for fragmented Acuren layout)
-4. **Diameter → CML**: 8" section → CML 1.01, 6" section → CML 1.05
-5. **Row number**: Cell immediately before diameter (8" or 6") in SECTION column = sub-CML suffix
-6. **Sub-CML ID**: `{cml_base}-{row_num}` (e.g. 1.01-1, 1.05-3)
+4. **Diameter → CML**: 8" section → CML 1.01, 6" section → CML 1.05; single CML accepts any diameter
+5. **Row number**: Cell immediately before diameter (8" or 6") in SECTION column = sub-CML suffix (zones 1–9)
+6. **Sub-CML ID**: `{cml_base}-{row_num}` (e.g. 1.01-1, 1.05-3, 2.32-7). Zone "4" can appear as "4"" (combined with 4" diameter).
 7. **Reading**: First thickness value (column A) per row; handles fragmented "0 . 2 8 5" → 0.285
+8. **Dedupe**: Same CML twice (e.g. from overlapping table regions) → keep min reading. No value filter.
+9. **Single-zone CML**: Aggregate fallback outputs "11.05-1" (not "11.05"). Single-CML tables may lack diameter column; zone+reading sufficient.
+10. **Permissive fallback**: For single CML with few results, try zone+reading extraction (handles "Zone 1", "Loc 1" etc).
 
 ### Format B: Generic Zone Table (3+ CMLs)
 
@@ -56,7 +59,11 @@ For multi-section reports (e.g. 57-008U with CML 1.52, 1.29, 4.09):
 - CIRCUIT CML ZONE DIAM. columns; CML section headers (e.g. "CML 1.52")
 - Diameter → CML: 16"→1.52, 30"→1.29, 8"/6"→4.09 (heuristic)
 - Multiple readings per zone (NORTH SOUTH etc) → use **minimum**
-- Zone 1–4 = sub-CML suffix (e.g. 1.52-1, 1.29-4)
+- Zone 1–9 = sub-CML suffix (e.g. 1.52-1, 1.29-4, 2.32-7)
+
+### Page Filter (UT REPORT vs UT Grid)
+
+Reports with both summary and detailed UT Grid readings: parser prefers pages with **"UT REPORT - TEE"** or **"UT REPORT - ELBOW"** (or PIPE, REDUCER, CAP, WELD, STRAIGHT). Skips pages with **"UT Grid"** or **"GRID Reading"** (detailed readings). If no summary page found, processes all pages (backward compatible).
 
 ### Fallback
 
@@ -93,7 +100,23 @@ If table parsing returns no rows, falls back to aggregate logic (min reading per
 
 Python (pdfplumber + pytesseract) is used for deterministic, fast, offline extraction. LLM APIs could interpret ambiguous layouts but add cost and variability. For standardized reports, Python is recommended.
 
-**Note:** For OCR fallback to work, Tesseract must be installed on the system (pytesseract is a wrapper). On Windows: download from https://github.com/UB-Mannheim/tesseract/wiki.
+### Image-based results tables
+
+Some reports (e.g. 52-010B) have "Readings, Grids & Photos on attached pages" — the results table is embedded as an image. The parser:
+
+1. **Triggers OCR** when pdfplumber returns no readings, little text, or suspicious 0.0-only readings
+2. **Builds zone-level output** from OCR-extracted numbers (e.g. 6 readings + 2 CMLs → 1.29-1..3, 1.37-1..3)
+
+**OCR options:**
+
+| Engine | Install | Notes |
+|--------|---------|------|
+| **Tesseract** (primary) | `winget install UB-Mannheim.TesseractOCR` or https://github.com/UB-Mannheim/tesseract/wiki | 300 DPI, PSM 6/11 for tables |
+| **EasyOCR** (fallback) | `pip install easyocr` or `pip install .[ocr]` | Used when Tesseract returns &lt;4 readings |
+
+Tesseract uses 300 DPI and PSM 6 (single block) for tables; retries with PSM 11 (sparse text) if few readings. EasyOCR runs only when Tesseract underperforms.
+
+**Deployment:** The Dockerfile installs `tesseract-ocr` via apt. On Linux, Tesseract is in PATH (`/usr/bin/tesseract`). On Windows dev, the parser uses `C:/Program Files/Tesseract-OCR/tesseract.exe` when present.
 
 ---
 
@@ -101,23 +124,26 @@ Python (pdfplumber + pytesseract) is used for deterministic, fast, offline extra
 
 ### Fixtures
 
-| Fixture | Circuit | CMLs | Notes |
-|---------|---------|------|-------|
-| inspection_report_52-021K.pdf | 52-021K | 1.01, 1.05 | Format A (8"/6") |
-| inspection_report_52-010B_1.29_1.37.pdf | 52-010B | 1.29, 1.37 | May need OCR if table is image |
-| inspection_report_57-008U_1.52_1.29_4.09.pdf | 57-008U | 1.52, 1.29, 4.09 | Format B (16"/30"/8"/6") |
+| Fixture | Circuit | CMLs |
+|---------|---------|------|
+| inspection_report_52-021K.pdf | 52-021K | 1.01, 1.05 |
+| inspection_report_57-008U_1.52_1.29_4.09.pdf | 57-008U | 1.52, 1.29, 4.09 |
 
-Run verification:
+Verify: `python dev_tools/validate_ground_truth.py`
 
-```bash
-python -c "
-from pathlib import Path
-from backend.tml.inspection_report_parser import parse_inspection_report_pdf
-for fn in ['inspection_report_52-021K.pdf', 'inspection_report_57-008U_1.52_1.29_4.09.pdf']:
-    r = parse_inspection_report_pdf(Path('tests/fixtures')/fn, fn)
-    print(fn, len(r), 'rows')
-    for x in r[:3]: print(f'  {x.circuit_id} {x.cml_id} {x.min_reading}')
-"
-```
+---
 
-Expected: 52-021K → 6 rows; 57-008U → 9 rows with readings 0.296–0.382.
+## Dev Tool: Ground Truth
+
+A local development tool (`dev_tools/inspection_report_ground_truth.py`) uses the same parser logic for developer iteration:
+
+- Mark wrong readings and enter corrections
+- Add missing readings in an editable table (frontend-only until Save)
+- Export to JSON for training/ground-truth datasets
+- Parse results cached; only Save writes to disk
+
+Run: `streamlit run dev_tools/inspection_report_ground_truth.py --server.runOnSave true`
+
+### Validation
+
+`python dev_tools/validate_ground_truth.py` — fixtures + ground truth (PDFs in `ground_truth_data/` or `tests/fixtures/`).

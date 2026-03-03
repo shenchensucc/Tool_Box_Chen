@@ -1,0 +1,19 @@
+{
+  "source_file": "inspection_report_57-008U_1.52_1.29_4.09.pdf",
+  "source_path": "tests/fixtures/inspection_report_57-008U_1.52_1.29_4.09.pdf",
+  "extracted_at": "2026-03-03T00:00:00.000000",
+  "readings": [
+    {"circuit_id": "57-008U", "cml_id": "1.52-1", "min_reading": 0.357, "is_correct": true},
+    {"circuit_id": "57-008U", "cml_id": "1.52-2", "min_reading": 0.358, "is_correct": true},
+    {"circuit_id": "57-008U", "cml_id": "1.29-1", "min_reading": 0.342, "is_correct": true},
+    {"circuit_id": "57-008U", "cml_id": "1.29-2", "min_reading": 0.287, "is_correct": true},
+    {"circuit_id": "57-008U", "cml_id": "1.29-3", "min_reading": 0.372, "is_correct": true},
+    {"circuit_id": "57-008U", "cml_id": "1.29-4", "min_reading": 0.382, "is_correct": true},
+    {"circuit_id": "57-008U", "cml_id": "4.09-1", "min_reading": 0.296, "is_correct": true},
+    {"circuit_id": "57-008U", "cml_id": "4.09-2", "min_reading": 0.326, "is_correct": true},
+    {"circuit_id": "57-008U", "cml_id": "4.09-3", "min_reading": 0.318, "is_correct": true}
+  ],
+  "additions": [],
+  "schema_version": "1.0",
+  "_note": "Consolidated from backend/tml/inspection_fixtures.py FIXTURE_EXPECTED"
+}
