@@ -353,6 +353,7 @@ def display_sidebar_navigation():
     with st.sidebar:
         st.page_link("Home.py", label="🏠 Home")
         st.page_link("pages/1_Dashboard.py", label="📊 Dashboard")
+        st.page_link("pages/9_Skills_Overview.py", label="🧠 Skills Overview")
 
         st.markdown("---")
 
