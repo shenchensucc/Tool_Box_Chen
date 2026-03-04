@@ -293,6 +293,35 @@ async def call_process_feature_map_api(
         return None
 
 
+async def call_process_dig_package_api(file) -> Optional[Dict[str, Any]]:
+    """Call the backend process-dig-package API for dig package Excel → unwrapped pipe visualization"""
+    url = f"{BACKEND_URL}/api/ili/process-dig-package"
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            files = {"file": (file.name, file.getvalue(), file.type)}
+            response = await client.post(url, files=files)
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPStatusError as e:
+        msg = _format_api_error(e, e.response)
+        st.error(f"API error: {msg}")
+        if e.response.status_code == 404:
+            st.warning(
+                f"**404 Not Found** — `{url}` may not be available. "
+                "Please **restart the backend server** (e.g. `uvicorn backend.main:app --reload`) to load the latest code."
+            )
+        return None
+    except httpx.HTTPError as e:
+        st.error(f"Request failed: {_format_api_error(e)}")
+        return None
+    except Exception as e:
+        st.error(f"Unexpected error: {type(e).__name__}: {str(e)}")
+        import traceback
+        with st.expander("Error details"):
+            st.code(traceback.format_exc())
+        return None
+
+
 @st.cache_resource(ttl=10)  # Cache for 10 seconds (allows quick retry when backend starts)
 def check_backend_health() -> bool:
     """Check if backend is running (cached for 10 seconds)"""

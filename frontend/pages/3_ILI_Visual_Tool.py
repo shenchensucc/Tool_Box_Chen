@@ -31,6 +31,7 @@ from frontend_utils import (
     apply_custom_styling,
     call_parse_paste_api,
     call_preview_api,
+    call_process_dig_package_api,
     call_process_feature_map_api,
     check_backend_health,
     display_header,
@@ -42,17 +43,30 @@ from frontend_utils import (
 from chat_panel import render_chat_expander
 
 
-def _depth_color(d):
-    """Map depth % to color for feature boxes."""
+# RGB values for depth colors (for rgba with alpha)
+_DEPTH_RGB = {
+    "lightgrey": (211, 211, 211),
+    "green": (34, 139, 34),
+    "yellow": (255, 255, 0),
+    "orange": (255, 165, 0),
+    "red": (220, 20, 60),
+}
+
+
+def _depth_color(d, alpha: float = 1.0):
+    """Map depth % to color for feature boxes. alpha=1.0 full, 0.2 for 20% visible."""
     if d is None or (isinstance(d, float) and pd.isna(d)):
-        return "lightgrey"
-    if d < 20:
-        return "green"
-    if d < 40:
-        return "yellow"
-    if d < 60:
-        return "orange"
-    return "red"
+        name = "lightgrey"
+    elif d < 20:
+        name = "green"
+    elif d < 40:
+        name = "yellow"
+    elif d < 60:
+        name = "orange"
+    else:
+        name = "red"
+    r, g, b = _DEPTH_RGB.get(name, _DEPTH_RGB["lightgrey"])
+    return f"rgba({r},{g},{b},{alpha})"
 
 
 def _get_x_axis_title(x_column: str) -> str:
@@ -74,52 +88,79 @@ def _build_feature_map_figure(
     x_column: str,
     title: str,
     height: int = 450,
+    use_opacity_overlay: bool = False,
 ) -> tuple:
     """
     Build a Plotly figure for the feature map. Returns (fig, filtered_count).
+    When use_opacity_overlay=True, deselected sources are shown at 20% opacity instead of hidden.
     """
-    def _source_ok(f):
-        src = f.get("source", "") or ""
+    def _is_selected(f_or_gw):
+        src = f_or_gw.get("source", "") or ""
         if not filter_by_source:
             return True
-        return not source_filter or src in source_filter
+        if not source_filter:
+            return True
+        if src in source_filter:
+            return True
+        # Seam welds use Joint Summary source (e.g. "2022 Rosen"); features use full source (e.g. "2022 Rosen MFL-A")
+        # Match when one contains the other (Rosen MFL-A selected -> show 2022 Rosen seam line)
+        for s in source_filter:
+            if src in s or s in src:
+                return True
+        return False
 
-    filtered_features = [f for f in features if _source_ok(f)]
-    filtered_girth = [gw for gw in scatter_data.get("girth_welds", []) if not filter_by_source or not source_filter or gw.get("source", "") in source_filter]
-    filtered_seam = [sw for sw in scatter_data.get("seam_welds", []) if not filter_by_source or not source_filter or sw.get("source", "") in source_filter]
+    def _alpha(f_or_gw):
+        return 0.2 if use_opacity_overlay and not _is_selected(f_or_gw) else 1.0
+
+    # Overlay mode: show all; filter mode: show only selected
+    if use_opacity_overlay:
+        plot_features = [f for f in features if "girth" not in (f.get("feature_type") or "").lower() and "seam" not in (f.get("feature_type") or "").lower() and "gwd" not in (f.get("feature_type") or "").lower()]
+        girth_list = scatter_data.get("girth_welds", [])
+        seam_list = scatter_data.get("seam_welds", [])
+        selected_count = sum(1 for f in features if _is_selected(f))
+    else:
+        filtered_features = [f for f in features if _is_selected(f)]
+        plot_features = [f for f in filtered_features if "girth" not in (f.get("feature_type") or "").lower() and "seam" not in (f.get("feature_type") or "").lower() and "gwd" not in (f.get("feature_type") or "").lower()]
+        girth_list = [gw for gw in scatter_data.get("girth_welds", []) if _is_selected(gw)]
+        seam_list = [sw for sw in scatter_data.get("seam_welds", []) if _is_selected(sw)]
+        selected_count = len(filtered_features)
 
     x_values = scatter_data.get("x_values", [f["x"] for f in features])
     orient_hours = scatter_data.get("orientation_hours")
     use_orientation = orient_hours and len(orient_hours) == len(features)
     y_values = orient_hours if use_orientation else [f["y"] for f in features]
 
-    plot_features = [f for f in filtered_features if "girth" not in (f.get("feature_type") or "").lower() and "seam" not in (f.get("feature_type") or "").lower() and "gwd" not in (f.get("feature_type") or "").lower()]
-
     fig = go.Figure()
-    for f in plot_features:
-        cx = f["x"]
-        cy = f.get("orientation_hours", 6.0) if use_orientation else f["y"]
-        ln_mm = max(f.get("length", 0) or 0.001, 0.001)
-        wd_mm = max(f.get("width", 0) or 0.001, 0.001)
-        ln_m = ln_mm / 1000
-        wd_hr = (wd_mm / pipe_circ_mm) * 12
-        x0, x1 = cx - ln_m / 2, cx + ln_m / 2
-        y0, y1 = cy - wd_hr / 2, cy + wd_hr / 2
-        color = _depth_color(f.get("depth"))
-        fig.add_shape(type="rect", x0=x0, x1=x1, y0=y0, y1=y1, line=dict(color="black", width=2.5), fillcolor=color)
+    # Draw deselected first (lower layer), then selected (on top) for clearer overlap
+    for layer_alpha, layer_features in [(0.2, [f for f in plot_features if not _is_selected(f)]), (1.0, [f for f in plot_features if _is_selected(f)])]:
+        for f in layer_features:
+            cx = f["x"]
+            cy = f.get("orientation_hours", 6.0) if use_orientation else f["y"]
+            ln_mm = max(f.get("length", 0) or 0.001, 0.001)
+            wd_mm = max(f.get("width", 0) or 0.001, 0.001)
+            ln_m = ln_mm / 1000
+            wd_hr = (wd_mm / pipe_circ_mm) * 12
+            x0, x1 = cx - ln_m / 2, cx + ln_m / 2
+            y0, y1 = cy - wd_hr / 2, cy + wd_hr / 2
+            alpha = layer_alpha if use_opacity_overlay else 1.0
+            color = _depth_color(f.get("depth"), alpha=alpha)
+            line_alpha = alpha
+            fig.add_shape(type="rect", x0=x0, x1=x1, y0=y0, y1=y1, line=dict(color=f"rgba(0,0,0,{line_alpha})", width=2.5), fillcolor=color)
 
-    for gw in filtered_girth:
-        fig.add_vline(x=gw.get("chainage"), line_color="red", line_width=2.5)
+    for gw in girth_list:
+        a = _alpha(gw)
+        fig.add_vline(x=gw.get("chainage"), line_color=f"rgba(220,20,60,{a})", line_width=2.5)
 
     x_min_plot = min(x_values) if x_values else 0
     x_max_plot = max(x_values) if x_values else 1
     y_min_plot = min(y_values) if y_values else 0
     y_max_plot = max(y_values) if y_values else 12
-    for sw in filtered_seam:
+    for sw in seam_list:
         oh = sw.get("orientation_hours", 6.0)
         ch_start = sw.get("chainage_start") if sw.get("chainage_start") is not None else x_min_plot
         ch_end = sw.get("chainage_end") if sw.get("chainage_end") is not None else x_max_plot
-        fig.add_trace(go.Scatter(x=[ch_start, ch_end], y=[oh, oh], mode="lines", line=dict(color="blue", width=2.5), showlegend=False, hoverinfo="skip"))
+        a = _alpha(sw)
+        fig.add_trace(go.Scatter(x=[ch_start, ch_end], y=[oh, oh], mode="lines", line=dict(color=f"rgba(0,0,255,{a})", width=2.5), showlegend=False, hoverinfo="skip"))
 
     hover_texts = [f.get("hover_text", "") for f in plot_features]
     plot_x = [f["x"] for f in plot_features]
@@ -130,12 +171,12 @@ def _build_feature_map_figure(
         dict(x=1.02, y=0.98, xref="paper", yref="paper", text="Depth: 0-20% green, 20-40% yellow, 40-60% orange, >60% red", showarrow=False, font=dict(size=9), xanchor="left"),
         dict(x=1.02, y=0.88, xref="paper", yref="paper", text="Box size: length (mm) × width (mm)", showarrow=False, font=dict(size=8), xanchor="left"),
     ]
-    for gw in filtered_girth:
+    for gw in girth_list:
         lbl = gw.get("label", "")
         if lbl:
             y_pos = y_min_plot + 0.7 * (y_max_plot - y_min_plot) if y_values else 6
             annotations.append(dict(x=gw["chainage"], y=y_pos, text=lbl, showarrow=False, font=dict(size=9, color="darkred"), textangle=-90, xanchor="right", yanchor="middle"))
-    for sw in filtered_seam:
+    for sw in seam_list:
         lbl = sw.get("orientation_label", "")
         if lbl:
             ch_s, ch_e = sw.get("chainage_start"), sw.get("chainage_end")
@@ -149,13 +190,15 @@ def _build_feature_map_figure(
         yaxis_title="Feature Orientation (hh:mm)",
         height=height,
         hovermode="closest",
+        dragmode="pan",
         template="plotly_white",
         plot_bgcolor="white",
-        xaxis=dict(showgrid=True, gridcolor="rgba(0,0,0,0.2)", showline=True, linewidth=2, linecolor="black", mirror=True, tickformat=".0f", ticksuffix=" m"),
+        xaxis=dict(showgrid=True, gridcolor="rgba(0,0,0,0.2)", showline=True, linewidth=2, linecolor="black", mirror=True, tickformat=".3f", ticksuffix=" m"),
         yaxis=dict(showgrid=True, gridcolor="rgba(0,0,0,0.2)", showline=True, linewidth=2, linecolor="black", mirror=True, tickvals=list(range(0, 13)), ticktext=[f"{h:02d}:00" for h in range(0, 13)], range=[0, 12]),
         annotations=annotations,
     )
-    return fig, len(filtered_features)
+    count = len(features) if use_opacity_overlay else selected_count
+    return fig, count
 
 
 @st.fragment
@@ -176,9 +219,17 @@ def render_feature_map(fm: dict, total_before_filter: int = None):
     mapping = fm.get("column_mapping", {})
     scatter_data = fm.get("scatter_data") or {}
     all_sources = fm.get("sources", [])
+    feature_summary_raw = fm.get("feature_summary_raw")
 
     st.markdown("### 🗺️ Feature Map")
-    st.caption("Unwrapped pipe view: X = chainage (m) or Distance from TGW (m) when chainage unavailable; Y = orientation (o'clock). Feature boxes proportional to length (mm) × width (mm). Depth: green 0-20% WT, yellow 20-40%, orange 40-60%, red >60%.")
+    caption_parts = [
+        "Unwrapped pipe view: X = chainage (m) or Distance from TGW (m); Y = orientation (o'clock). "
+        "Feature boxes proportional to length (mm) × width (mm). Depth: green 0-20% WT, yellow 20-40%, orange 40-60%, red >60%. "
+        "Red vertical lines = girth welds. Blue horizontal lines = longseam per span (changes at each GWD)."
+    ]
+    if all_sources:
+        caption_parts.append("Deselected sources shown at 20% opacity for overlap comparison.")
+    st.caption(" ".join(caption_parts))
 
     # NPS selector
     nps_options = sorted(NPS_TO_OD_MM.keys())
@@ -214,6 +265,7 @@ def render_feature_map(fm: dict, total_before_filter: int = None):
         features, scatter_data, pipe_circ_mm,
         selected_sources, filter_by_source, x_column,
         main_title, height=450,
+        use_opacity_overlay=filter_by_source,
     )
     st.plotly_chart(fig, use_container_width=True)
 
@@ -238,6 +290,65 @@ def render_feature_map(fm: dict, total_before_filter: int = None):
             )
             fig_breakdown.update_layout(title=f"Source: {src} ({count} features)")
             st.plotly_chart(fig_breakdown, use_container_width=True)
+
+    # Feature list (table view)
+    st.markdown("---")
+    st.markdown("#### 📋 Feature List")
+    st.caption("Tabular view of all features. Use the source filter above to narrow the list.")
+    # Build DataFrame from features (respect source filter)
+    def _source_ok(f):
+        src = f.get("source", "") or ""
+        if not filter_by_source:
+            return True
+        return not selected_sources or src in selected_sources
+
+    filtered = [f for f in features if _source_ok(f)]
+    if filtered:
+        def _fmt(v, decimals=2):
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                return "-"
+            if isinstance(v, (int, float)):
+                return str(round(v, decimals)) if v == v else "-"
+            return str(v)
+
+        list_df = pd.DataFrame([
+            {
+                "Feature ID": str(f.get("feature_id", "") or ""),
+                "Type": str(f.get("feature_type", "") or ""),
+                "GWD": str(f.get("gwd_number")) if f.get("gwd_number") is not None else "-",
+                "Depth (%)": _fmt(f.get("depth")),
+                "Length (mm)": _fmt(f.get("length")),
+                "Width (mm)": _fmt(f.get("width")),
+                "Orientation": f"{f.get('orientation_hours', 6):.2f}" if f.get("orientation_hours") is not None else "-",
+                "X (m)": _fmt(f.get("x"), 3),
+                "Source": str(f.get("source", "") or ""),
+            }
+            for f in filtered
+        ])
+        st.dataframe(list_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("No features to display (try adjusting the source filter).")
+
+    if feature_summary_raw:
+        st.markdown("---")
+        st.markdown("#### 📍 Feature Summary (Data Source)")
+        cap_parts = [
+            f"**Sheet:** {feature_summary_raw.get('sheet', '?')} | "
+            f"**Header row:** {feature_summary_raw.get('header_row', '?')} | "
+            f"**Columns:** {', '.join(feature_summary_raw.get('columns', []))}"
+        ]
+        tgwd = feature_summary_raw.get("target_gwd")
+        tlabel = feature_summary_raw.get("target_longseam_label")
+        if tgwd is not None and tlabel:
+            cap_parts.append(f" | **Target GWD {tgwd} longseam:** {tlabel} (blue lines per span)")
+        st.caption("".join(cap_parts))
+        st.caption("Column mapping: " + str(feature_summary_raw.get("column_mapping_used", {})))
+        sample = feature_summary_raw.get("sample_rows", [])
+        if sample:
+            sample_df = pd.DataFrame(sample).fillna("-")
+            # Ensure Arrow-compatible types (avoid mixed int/str causing serialization errors)
+            sample_df = sample_df.astype(str)
+            st.dataframe(sample_df, use_container_width=True, hide_index=True)
 
     with st.expander("📊 Column mapping used"):
         st.json(mapping)
@@ -264,12 +375,12 @@ with left_col:
         show_backend_unavailable_and_retry()
         st.stop()
 
-    # Input mode: Upload vs Paste
+    # Input mode: Dig Package (default), Upload Excel, or Paste
     input_mode = st.radio(
-        "**Input mode**",
-        options=["Upload Excel File", "Paste from Clipboard"],
+        "**Input format**",
+        options=["Dig Package", "Upload Excel File", "Paste from Clipboard"],
         horizontal=True,
-        help="Upload an Excel file or paste tabular data (e.g. from Excel)",
+        help="Dig Package: sectioned Excel with Feature summary & Joint Summary. Upload: raw ILI Excel. Paste: tabular data from clipboard.",
     )
 
     # Initialize session state
@@ -284,7 +395,54 @@ with left_col:
     if "upload_feature_map_data" not in st.session_state:
         st.session_state.upload_feature_map_data = None
 
-    if input_mode == "Paste from Clipboard":
+    if input_mode == "Dig Package":
+        # ========== DIG PACKAGE MODE: Sectioned Excel with Feature summary & Joint Summary ==========
+        st.markdown("### 📦 Dig Package")
+        st.caption(
+            "Upload a dig package Excel file with section headers. The tool extracts ILI features from "
+            "**Feature summary** (bottom section), longseam orientation from **Joint Summary**. "
+            "Uses **Distance from TGW (m)** as default x-axis. Supports multiple ILI sources."
+        )
+
+        dig_file = st.file_uploader(
+            "Choose a dig package Excel file (.xlsx)",
+            type=["xlsx"],
+            key="dig_package_upload",
+            help="Sectioned Excel with 'Feature summary' and optionally 'Joint Summary'",
+        )
+
+        if dig_file is not None:
+            if st.session_state.uploaded_file != dig_file.name:
+                st.session_state.uploaded_file = dig_file.name
+                st.session_state.upload_feature_map_data = None
+
+            st.success(f"✅ File uploaded: **{dig_file.name}**")
+
+            if st.button("🚀 Process Dig Package", type="primary"):
+                with st.spinner("Parsing dig package (Feature summary, Joint Summary)..."):
+                    result = asyncio.run(call_process_dig_package_api(dig_file))
+                    if result and result.get("success"):
+                        st.session_state.upload_feature_map_data = result
+                        st.success(f"✅ Parsed {result.get('total_rows', 0)} features!")
+                    elif result and not result.get("success"):
+                        st.error(result.get("error", "Process failed"))
+
+            if st.session_state.upload_feature_map_data and st.session_state.upload_feature_map_data.get("success"):
+                st.markdown("---")
+                fm = st.session_state.upload_feature_map_data
+                total_before = fm.get("total_rows")
+                render_feature_map_fragment(fm, total_before_filter=total_before)
+        else:
+            st.info(
+                """
+                👆 **Upload a dig package Excel file**
+
+                Dig packages are sectioned Excel files with headers like "Feature summary" and "Joint Summary".
+                The tool auto-extracts ILI features and longseam orientation for visualization.
+                """
+            )
+
+    elif input_mode == "Paste from Clipboard":
         # ========== PASTE MODE: Excel-like table, paste directly ==========
         st.markdown("### 📋 Paste ILI Data")
         st.caption(
@@ -349,7 +507,7 @@ with left_col:
             )
 
     else:
-        # ========== UPLOAD MODE: Existing Excel flow ==========
+        # ========== UPLOAD EXCEL MODE: Raw ILI Excel with sheet selection ==========
         st.markdown("### 📁 Step 1: Upload Excel File")
         uploaded_file = st.file_uploader(
             "Choose an Excel file (.xlsx or .xls)",

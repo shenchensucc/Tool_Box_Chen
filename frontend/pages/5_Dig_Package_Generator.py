@@ -166,7 +166,6 @@ with left_col:
         "🚀 Generate Dig Packages",
         type="primary",
         disabled=not all_files_uploaded,
-        width="stretch",
     ):
         with st.spinner("⏳ Generating dig packages... This may take a few minutes."):
             try:

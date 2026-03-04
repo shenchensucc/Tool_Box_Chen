@@ -84,6 +84,14 @@ class FeatureMapResponse(BaseModel):
         default_factory=list,
         description="Sorted GWD numbers in the data (for zoom/filter selection)",
     )
+    joint_summary_parsed: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="Parsed Joint Summary rows (for dig package verification)",
+    )
+    feature_summary_raw: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Raw Feature summary: columns, sheet, header_row, sample rows (for data tracing)",
+    )
     error: Optional[str] = None
 
 

@@ -66,3 +66,59 @@ python dev_tools/validate_ground_truth.py --fixtures-only   # Skip ground truth 
 
 - Runs fixture tests (52-021K, 57-008U)
 - Validates ground truth JSON when the matching PDF exists (saved alongside JSON in `ground_truth_data/`, or in `tests/fixtures/`)
+
+---
+
+## Dig Package Dev Tool
+
+Tool for iterating on the dig package generator with error capture and training cases.
+
+### Purpose
+
+- Use the **exact same parser logic** as the app backend
+- **Step-by-step parsing** (MDL → ILI → feature matching) with full feedback
+- **Capture errors** in frontend with full traceback
+- **Column mapping** and dig ID extraction visibility
+- Save training cases and validate against ground truth
+
+### Run
+
+```bash
+streamlit run dev_tools/dig_package_tool.py --server.runOnSave true
+```
+
+### Usage
+
+1. **Load files**: Upload MDL, ILI, and template, or enter fixture path like `dev_tools/ground_truth_data/dig_package/case1/`
+2. **Parse MDL**: See column mapping and extracted dig IDs
+3. **Parse ILI**: See column mapping per ILI file
+4. **Feature matching**: Preview target feature counts per dig ID
+5. **Generate** (optional): Check "Run full generate" in sidebar to produce ZIP
+6. **Save training case**: Enter case name, optionally copy files, click Save
+
+**Synergy with ILI Visual Tool**: Generated dig package Excel files can be visualized in the **ILI Visual Tool** (Dig Package input format). The same `dig_package_reader` module parses the Feature summary and Joint Summary sections for the pipeline visual.
+
+### Ground Truth Format
+
+Saved to `dev_tools/ground_truth_data/dig_package/`:
+
+```json
+{
+  "case_name": "case1",
+  "case_folder": "case1",
+  "source_files": {"mdl": "mdl.xlsx", "ili": ["ili.xlsx"], "template": "template.xlsx"},
+  "ili_formats": ["Rosen-MFLA"],
+  "expected": {"dig_ids": ["GW1", "GW2"], "dig_count": 2},
+  "schema_version": "1.0"
+}
+```
+
+When "Copy source files" is checked, files are saved to `dig_package/case1/` for validation.
+
+### Validation Script
+
+```bash
+python dev_tools/validate_dig_package.py
+```
+
+Compares parsed dig IDs against expected dig IDs in ground truth JSON. MDL file must exist in `case_folder/` or `ground_truth_data/dig_package/`.
