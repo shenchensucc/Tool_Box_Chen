@@ -1,0 +1,62 @@
+{
+  "source_file": "57-001G 1-2 CML 1.04, 1.13 UT-BALJIN-2026-28-03.06.2026.pdf",
+  "source_path": "(uploaded) 57-001G 1-2 CML 1.04, 1.13 UT-BALJIN-2026-28-03.06.2026.pdf",
+  "extracted_at": "2026-03-07T21:05:31.279305",
+  "readings": [
+    {
+      "circuit_id": "57-001G",
+      "cml_id": "1.13-1",
+      "min_reading": 0.368,
+      "measurement_date": "2026-03-06",
+      "source_file": "57-001G 1-2 CML 1.04, 1.13 UT-BALJIN-2026-28-03.06.2026.pdf",
+      "extraction_method": "pdfplumber",
+      "is_correct": true,
+      "corrected_reading": null,
+      "notes": "",
+      "pdf_text_context": "[page_2] ...1 1 2 2 \" \" 0.376 0.394 0 0 . . 4 4 5 0 7 9 240\u00b0F\n7\n5 4 12\" 0.377 0.412\nG 1 12\" 0.368 0.401\n1 0 0 - 2 - 1 1.13 2 3 1 1 2 2 \" \" 0.385 0.356 0 0 . . 4 4 5 1 1 5 262\u00b0F\n..."
+    },
+    {
+      "circuit_id": "57-001G",
+      "cml_id": "1.13-2",
+      "min_reading": 0.356,
+      "measurement_date": "2026-03-06",
+      "source_file": "57-001G 1-2 CML 1.04, 1.13 UT-BALJIN-2026-28-03.06.2026.pdf",
+      "extraction_method": "pdfplumber",
+      "is_correct": true,
+      "corrected_reading": null,
+      "notes": "",
+      "pdf_text_context": "[page_2] ... 4 12\" 0.377 0.412\nG 1 12\" 0.368 0.401\n1 0 0 - 2 - 1 1.13 2 3 1 1 2 2 \" \" 0.385 0.356 0 0 . . 4 4 5 1 1 5 262\u00b0F\n7\n5 4 12\" 0.390 0.403\n57-001D 1-1 CML 1.11, 4.33 UT-B..."
+    },
+    {
+      "circuit_id": "57-001G",
+      "cml_id": "1.13-3",
+      "min_reading": 0.376,
+      "measurement_date": "2026-03-06",
+      "source_file": "57-001G 1-2 CML 1.04, 1.13 UT-BALJIN-2026-28-03.06.2026.pdf",
+      "extraction_method": "pdfplumber",
+      "is_correct": true,
+      "corrected_reading": null,
+      "notes": "",
+      "pdf_text_context": "[page_2] ...T TOP BOTTOM CENTER HIGH\nG 1 12\" 0.385 0.433\n1 0 0 - 2 - 1 1.04 2 3 1 1 2 2 \" \" 0.376 0.394 0 0 . . 4 4 5 0 7 9 240\u00b0F\n7\n5 4 12\" 0.377 0.412\nG 1 12\" 0.368 0.401\n1 0 0..."
+    },
+    {
+      "circuit_id": "57-001G",
+      "cml_id": "1.13-5",
+      "min_reading": 0.377,
+      "measurement_date": "2026-03-06",
+      "source_file": "57-001G 1-2 CML 1.04, 1.13 UT-BALJIN-2026-28-03.06.2026.pdf",
+      "extraction_method": "pdfplumber",
+      "is_correct": true,
+      "corrected_reading": null,
+      "notes": "",
+      "pdf_text_context": "[page_2] ... 0 - 2 - 1 1.04 2 3 1 1 2 2 \" \" 0.376 0.394 0 0 . . 4 4 5 0 7 9 240\u00b0F\n7\n5 4 12\" 0.377 0.412\nG 1 12\" 0.368 0.401\n1 0 0 - 2 - 1 1.13 2 3 1 1 2 2 \" \" 0.385 0.356 0 0 . ..."
+    }
+  ],
+  "additions": [],
+  "schema_version": "1.0",
+  "pdf_text": {
+    "page_0": "2 - 240 Taiganova Crescent Phone: 780.790.1776\nFort McMurray, AB, Canada T9K 0T4 Fax: 780.790.9061\nwww.acuren.com\nNONDESTRUCTIVE EXAMINATION\nCLIENT: Suncor Energy Inc. PAGE: 1 of 3\nSuncor Oil Sands DATE: March 6, 2026\nFort Mcmurray, AB\nACUREN JOB #: 272-J280794\nREPORT #: UT-BALJIN-2026-28\nCONTRACT/PO: SUENTQ00169932 WO: 300655876\nATTENTION: Condition Monitoring Group WORK LOCATION: Plant 57\nPROJECT: Corrosion 2026\nITEM(S) EXAMINED: CML 1.04, 1.13\nPART #: See results MATERIAL: Carbon Steel THICKNESS: Various\nSCOPE: Perform UT thickness scans as per request\nTYPE OF INSPECTION: Ultrasonic\nTEST DETAILS:\nACCEPTANCE STANDARD: Client's Information REVISION: N/A\nPROCEDURE/TECHNIQUE: CAN-UT-14T001 REVISION: 12\nTYPE: Thickness METHOD: Contact\nINSTRUMENT: Olympus MODEL: 38 DL Plus S/N: 173091112 CAL DUE: July 24, 2026\nCAL. BLOCK: Step Block S/N: 17-1028 CS CABLE-TYPE: Coaxial LENGTH: 5ft\nCAL. BLOCK: Step Block S/N: 18-1453 SS COUPLANT: Sonotech - Sono 600\nProbe & Technique Details:\nTEST REFERENCE\nANGLE PROBE CRYSTAL FREQ. SERIAL DAMPING TEST REFERENCE TRANSFER SCAN\n(\u00b0) TYPE SIZE (MHZ) NUMBER \u03a9 FROM REFLECTOR VALUE dB % FSH dB RANGE\n1 0 D799 3/8\u201d 5 1566949 N/A OD Backwall 0 65 80 N/A 5.00\u201d\n2 0 D799 3/8\u201d 5 1566964 N/A OD Backwall 0 65 80 N/A 5.00\u201d\n3 0 E58D1 3/8\u201d 5 09027 N/A OD Backwall 0 65 80 N/A 2.00\n4 0 E58D1 3/8\u201d 5 08476 N/A OD Backwall 0 65 80 N/A 2.00\u201d\nTEST SURFACE CONDITION: Bare TEST SURFACE TEMPERATURE: 240\u00b0F & 262\u00b0F\nRESULTS:\nCircuit:\n57-001G 1-2\nCML\n1.04, 1.13\nClient acknowledges receipt and custody of the report or other work (\"Deliverable\"). Client agrees that it is responsible for assuring that acceptance standards, specifications and criteria in the Deliverable\nand Statement of Work (\"SOW\") are correct. Client acknowledges that Acuren is providing the Deliverable according to the SOW, and not any other standards. Client acknowledges that it is responsible for\nthe failure of any items inspected to meet standards, and for remediation. Client has 15 business days following the date Acuren provides the Deliverable to inspect it, identify deficiencies in writing, and\nprovide written rejection, or else the Deliverable will be deemed accepted. The Deliverable and other services provided by Acuren are governed by a Master Services Agreement (\"MSA\"). If the parties have\nnot entered into an MSA, then the Deliverable and services are governed by the SOW and the \"Acuren Standard Service Terms\" (www.acuren.com/serviceterms) in effect when the services were ordered.\nCLIENT: DTR NO.: N/A\nCLIENT PRINTED NAME CLIENT SIGNATURE\nACCEPTED & ACKNOWLEDGED BY\nACUREN\nTECHNICIAN: Jineil Ballesteros\n1st Technician 2nd Technician\nCGSB 29240 CGSB\nREVIEWER: Narciso Jr Auteda\n(Generated Using: CAN-QUA-02F007 R11 - 01/07/2026)\nCGSB 30991\n57-001D 1-1 CML 1.11, 4.33 UT-BALJIN-2026-25-03.05.2026",
+    "page_1": "ACUREN JOB # 272-J280794\nREPORT # UT-BALJIN-2026-28\nPage 2 of 3\n57-001D 1-1 CML 1.11, 4.33 UT-BALJIN-2026-25-03.05.2026",
+    "page_2": "ACUREN JOB # 272-J280794\nREPORT # UT-BALJIN-2026-28\nPage 3 of 3\nCML 1.13\nCML 1.04\nFLOW\nUT REPORT - ELBOW\nDATE\n(MM/DD/YYYY): 03/06/2026 METHOD: Corrosion Erosion\nCOMPANY: ACUREN MATERIAL: Carbon Steel Stainless Steel\nTECHNICIAN: JINEIL BALLESTEROS ADDITIONAL INFORMATION: SURFACE TEMP 240\u00b0F & 262\u00b0F\nASSISTANT:\nPORT HOLES - CORROSION FULL SCAN - EROSION\nCIRCUIT CML SECTION DIAM. A B C D E NORTH SOUTH EAST WEST TOP BOTTOM CENTER HIGH\nG 1 12\" 0.385 0.433\n1 0 0 - 2 - 1 1.04 2 3 1 1 2 2 \" \" 0.376 0.394 0 0 . . 4 4 5 0 7 9 240\u00b0F\n7\n5 4 12\" 0.377 0.412\nG 1 12\" 0.368 0.401\n1 0 0 - 2 - 1 1.13 2 3 1 1 2 2 \" \" 0.385 0.356 0 0 . . 4 4 5 1 1 5 262\u00b0F\n7\n5 4 12\" 0.390 0.403\n57-001D 1-1 CML 1.11, 4.33 UT-BALJIN-2026-25-03.05.2026"
+  }
+}

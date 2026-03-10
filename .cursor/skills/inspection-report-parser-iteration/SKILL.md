@@ -52,6 +52,17 @@ python dev_tools/validate_ground_truth.py
 python dev_tools/validate_ground_truth.py --fixtures-only
 ```
 
+## OCR vs LLM Vision Comparison
+
+```bash
+python dev_tools/test_ocr_vs_llm_vision.py                    # Full: OCR + kimi-k2.5 + gemini-3-flash
+python dev_tools/test_ocr_vs_llm_vision.py --tesseract-only  # Faster: Tesseract only (skip EasyOCR)
+python dev_tools/test_ocr_vs_llm_vision.py --llm-only        # LLM only (requires AI_BUILDER_TOKEN)
+python dev_tools/test_ocr_vs_llm_vision.py --high-dpi        # 400 DPI for OCR (may improve accuracy)
+```
+
+Set `AI_BUILDER_TOKEN` for LLM tests. Vision models: `kimi-k2.5`, `gemini-3-flash-preview`, `gemini-2.5-pro`.
+
 ## Checklist
 
 - [ ] Run validation before and after changes

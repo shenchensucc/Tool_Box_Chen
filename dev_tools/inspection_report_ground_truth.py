@@ -14,7 +14,10 @@ Or: python -m streamlit run dev_tools/inspection_report_ground_truth.py
 
 import json
 import math
+import os
 import sys
+import tempfile
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -25,6 +28,13 @@ import streamlit as st
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+# Load .env for AI_BUILDER_TOKEN (LLM Vision) and INSPECTION_REPORT_LLM_VISION
+try:
+    from dotenv import load_dotenv
+    load_dotenv(ROOT / ".env")
+except ImportError:
+    pass
+
 from backend.tml.inspection_report_parser import parse_inspection_report_pdf, ExtractedReading
 
 # Ground truth data directory (relative to project root)
@@ -32,9 +42,60 @@ GROUND_TRUTH_DIR = ROOT / "dev_tools" / "ground_truth_data"
 GROUND_TRUTH_DIR.mkdir(parents=True, exist_ok=True)
 
 
+@contextmanager
+def _temporary_env(overrides: dict[str, str | None]):
+    """Temporarily set or clear environment variables."""
+    old_values = {key: os.environ.get(key) for key in overrides}
+    try:
+        for key, value in overrides.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        yield
+    finally:
+        for key, old_value in old_values.items():
+            if old_value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old_value
+
+
+def _parse_pdf_variant(tmp_path: Path, source_filename: str, mode: str) -> list[ExtractedReading]:
+    """Run parser in a specific mode for comparison in the dev tool."""
+    if mode == "local":
+        overrides = {
+            "INSPECTION_REPORT_LLM_VISION": None,
+            "INSPECTION_REPORT_LLM_ONLY": None,
+            "INSPECTION_REPORT_OCR_ENGINE": "tesseract",
+            "INSPECTION_REPORT_VISION_MODEL": None,
+        }
+    elif mode == "llm":
+        overrides = {
+            "INSPECTION_REPORT_LLM_VISION": "1",
+            "INSPECTION_REPORT_LLM_ONLY": "1",
+            "INSPECTION_REPORT_OCR_ENGINE": "tesseract",
+            "INSPECTION_REPORT_VISION_MODEL": "gpt-5",
+        }
+    else:
+        overrides = {}
+
+    with _temporary_env(overrides):
+        return parse_inspection_report_pdf(tmp_path, source_filename)
+
+
+def _results_to_dataframe(results: list[ExtractedReading]) -> pd.DataFrame:
+    """Display helper for parser outputs."""
+    rows = [reading_to_row(r, i) for i, r in enumerate(results)]
+    if not rows:
+        return pd.DataFrame(columns=["circuit_id", "cml_id", "min_reading", "measurement_date", "extraction_method"])
+    df = pd.DataFrame(rows)
+    cols = ["circuit_id", "cml_id", "min_reading", "measurement_date", "extraction_method"]
+    return df[cols]
+
+
 def _extract_pdf_text(pdf_bytes: bytes) -> dict:
     """Extract text from each PDF page for export context."""
-    import tempfile
     import pdfplumber
 
     pages_text = {}
@@ -234,22 +295,57 @@ def main():
 
     # --- Parse (cache by filename) ---
     key_prefix = f"gt_{hash(source_filename) % 10**8}"
-    cache_key = f"{key_prefix}_parsed_results"
-    if cache_key not in st.session_state:
-        with st.spinner("Parsing..."):
-            import tempfile
-
+    local_cache_key = f"{key_prefix}_parsed_results_local"
+    llm_cache_key = f"{key_prefix}_parsed_results_llm"
+    pdf_text_cache_key = f"{key_prefix}_pdf_text"
+    if local_cache_key not in st.session_state or llm_cache_key not in st.session_state:
+        with st.spinner("Parsing local and LLM variants..."):
             with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
                 tmp.write(pdf_bytes)
                 tmp_path = Path(tmp.name)
             try:
-                results = parse_inspection_report_pdf(tmp_path, source_filename)
+                local_results = _parse_pdf_variant(tmp_path, source_filename, "local")
+                llm_results = _parse_pdf_variant(tmp_path, source_filename, "llm") if os.getenv("AI_BUILDER_TOKEN") else []
             finally:
                 tmp_path.unlink(missing_ok=True)
-            st.session_state[cache_key] = results
-    results = st.session_state[cache_key]
+            st.session_state[local_cache_key] = local_results
+            st.session_state[llm_cache_key] = llm_results
+        with st.spinner("Extracting PDF text..."):
+            st.session_state[pdf_text_cache_key] = _extract_pdf_text(pdf_bytes)
+    local_results = st.session_state[local_cache_key]
+    llm_results = st.session_state[llm_cache_key]
+    results = local_results
+    pdf_text = st.session_state[pdf_text_cache_key]
 
-    st.subheader("2. Review Extracted Readings")
+    # --- Show extracted PDF text ---
+    with st.expander("📄 Extracted text from PDF (what the parser sees)", expanded=False):
+        for page_key, text in sorted(pdf_text.items()):
+            st.markdown(f"**{page_key}**")
+            st.text(text or "(empty)")
+            st.divider()
+
+    st.subheader("2. Compare Parser Results")
+    st.caption("The dev tool always shows both local and LLM parser outputs. Ground-truth editing starts from the local results by default.")
+    compare_local, compare_llm = st.tabs(["Local parser", "LLM parser"])
+    with compare_local:
+        st.caption(f"{len(local_results)} rows")
+        st.dataframe(_results_to_dataframe(local_results), width="stretch", hide_index=True)
+    with compare_llm:
+        if os.getenv("AI_BUILDER_TOKEN"):
+            st.caption("Model: `gpt-5`")
+            st.caption(f"{len(llm_results)} rows")
+            st.dataframe(_results_to_dataframe(llm_results), width="stretch", hide_index=True)
+        else:
+            st.info("Set `AI_BUILDER_TOKEN` in `.env` to display LLM parser results.")
+
+    if os.getenv("AI_BUILDER_TOKEN") and llm_results:
+        if st.button("Use LLM results as editable baseline", key=f"{key_prefix}_use_llm"):
+            st.session_state[f"{key_prefix}_rows"] = [reading_to_row(r, i) for i, r in enumerate(llm_results)]
+            st.session_state[f"{key_prefix}_additions"] = []
+            st.rerun()
+
+    st.subheader("3. Review Editable Readings")
+    st.caption("Edit the table, then click **Apply readings edits** to save. (Workaround for Streamlit data_editor bug.)")
     if not results:
         st.warning("No readings extracted. Parser returned empty. Check PDF format or try OCR fallback.")
         return
@@ -279,7 +375,7 @@ def main():
 
     edited_df = st.data_editor(
         df_display,
-        use_container_width=True,
+        width="stretch",
         column_config={
             "circuit_id": st.column_config.TextColumn("Circuit", width="medium"),
             "cml_id": st.column_config.TextColumn("CML", width="medium"),
@@ -294,21 +390,31 @@ def main():
         key=f"{key_prefix}_editor",
     )
 
-    if edited_df is not None and not edited_df.empty and len(edited_df) == len(rows):
-        for i, row in enumerate(rows):
-            for col in display_cols:
-                if col in edited_df.columns:
-                    val = edited_df.iloc[i][col]
-                    if col == "is_correct":
-                        row[col] = bool(val) if pd.notna(val) else True
-                    elif pd.notna(val):
-                        row[col] = val
-                    elif col == "corrected_reading":
-                        row[col] = None
-        st.session_state[f"{key_prefix}_rows"] = rows
+    # Workaround for Streamlit bug: updating session_state from data_editor output on every rerun
+    # causes edits to revert (first edit lost, every second change reverted). Only apply on button click.
+    if st.button("Apply readings edits", key=f"{key_prefix}_apply_readings") and edited_df is not None and not edited_df.empty:
+        new_rows = []
+        for i in range(len(edited_df)):
+            r = edited_df.iloc[i]
+            orig = rows[i] if i < len(rows) else {}
+            new_rows.append({
+                "row_idx": orig.get("row_idx", i),
+                "circuit_id": r.get("circuit_id") if pd.notna(r.get("circuit_id")) else orig.get("circuit_id", ""),
+                "cml_id": r.get("cml_id") if pd.notna(r.get("cml_id")) else orig.get("cml_id", ""),
+                "min_reading": r.get("min_reading") if pd.notna(r.get("min_reading")) else orig.get("min_reading", 0),
+                "measurement_date": r.get("measurement_date") if pd.notna(r.get("measurement_date")) else orig.get("measurement_date", ""),
+                "source_file": orig.get("source_file", ""),
+                "extraction_method": r.get("extraction_method") if pd.notna(r.get("extraction_method")) else orig.get("extraction_method", "pdfplumber"),
+                "is_correct": bool(r.get("is_correct")) if pd.notna(r.get("is_correct")) else True,
+                "corrected_reading": r.get("corrected_reading") if pd.notna(r.get("corrected_reading")) else None,
+                "notes": r.get("notes") if pd.notna(r.get("notes")) else orig.get("notes", ""),
+            })
+        st.session_state[f"{key_prefix}_rows"] = new_rows
+        st.rerun()
 
     # --- Additions ---
     st.markdown("**Add missing readings** (parser did not extract these)")
+    st.caption("Add rows, edit, then click **Apply additions** to save.")
     default_circuit = rows[0]["circuit_id"] if rows else ""
     default_date = rows[0]["measurement_date"] if rows else ""
     if additions:
@@ -319,7 +425,7 @@ def main():
         ])
     edited_additions = st.data_editor(
         additions_df,
-        use_container_width=True,
+        width="stretch",
         num_rows="dynamic",
         column_config={
             "circuit_id": st.column_config.TextColumn("Circuit", width="medium", default=default_circuit),
@@ -332,34 +438,26 @@ def main():
         key=f"{key_prefix}_additions_editor",
     )
 
-    if edited_additions is not None and not edited_additions.empty:
+    # Same workaround: only apply additions when button clicked (avoids data_editor revert bug)
+    if st.button("Apply additions", key=f"{key_prefix}_apply_additions") and edited_additions is not None and not edited_additions.empty:
         new_additions = []
         for _, r in edited_additions.iterrows():
-            cml = str(r.get("cml_id", "")).strip()
-            reading = r.get("min_reading", 0)
-            if cml and (reading is None or (isinstance(reading, (int, float)) and reading > 0)):
-                new_additions.append({
-                    "circuit_id": str(r.get("circuit_id", default_circuit)).strip() or default_circuit,
-                    "cml_id": cml,
-                    "min_reading": float(reading) if reading is not None else 0.0,
-                    "measurement_date": str(r.get("measurement_date", default_date)).strip() or default_date,
-                    "notes": str(r.get("notes", "Added manually")).strip() or "Added manually",
-                })
+            new_additions.append({
+                "circuit_id": str(r.get("circuit_id", default_circuit)).strip() or default_circuit,
+                "cml_id": str(r.get("cml_id", "")).strip(),
+                "min_reading": float(r.get("min_reading", 0)) if r.get("min_reading") is not None else 0.0,
+                "measurement_date": str(r.get("measurement_date", default_date)).strip() or default_date,
+                "notes": str(r.get("notes", "Added manually")).strip() or "Added manually",
+            })
         st.session_state[f"{key_prefix}_additions"] = new_additions
+        st.rerun()
 
     # --- Export (form to reduce reruns) ---
-    st.subheader("3. Export Ground Truth")
+    st.subheader("4. Export Ground Truth")
     st.caption("All edits are in-memory. Only **Save** writes to disk.")
 
     include_pdf_text = st.checkbox("Include PDF text in export (for debugging)", value=False, key="incl_pdf_txt")
-
-    pdf_text = None
-    if include_pdf_text:
-        pdf_text_cache_key = f"{key_prefix}_pdf_text"
-        if pdf_text_cache_key not in st.session_state:
-            with st.spinner("Extracting PDF text..."):
-                st.session_state[pdf_text_cache_key] = _extract_pdf_text(pdf_bytes)
-        pdf_text = st.session_state[pdf_text_cache_key]
+    pdf_text = pdf_text if include_pdf_text else None
     export_data = export_ground_truth(
         st.session_state[f"{key_prefix}_rows"],
         st.session_state[f"{key_prefix}_additions"],
@@ -377,7 +475,7 @@ def main():
             pdf_path = GROUND_TRUTH_DIR / source_filename
             json_path.write_text(json_str, encoding="utf-8")
             pdf_path.write_bytes(pdf_bytes)
-            st.success(f"Saved {out_name} + PDF")
+            st.success(f"Saved {out_name} and PDF ({source_filename}) — PDF kept for future parser/package changes")
     with col_dl:
         st.download_button(
             "📥 Download JSON",

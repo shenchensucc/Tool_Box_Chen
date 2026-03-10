@@ -8,13 +8,19 @@ Supports Acuren-style reports with multiple table formats:
 Circuit format: NN-NNNXX (e.g. 52-021K); "1-2", "2-3" are breakdown drawing numbers, not circuit.
 """
 
+import base64
+import json
+import logging
+import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import List, Optional, Tuple
 
 import pdfplumber
 import pymupdf
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -165,17 +171,38 @@ def _extract_cml_ids_from_text(text: str) -> List[str]:
     return cml_ids
 
 
+def _is_date_or_phone_false_positive(v: float) -> bool:
+    """
+    Exclude values that are likely date fragments or phone/fax OCR noise.
+    - 2.2026 from 02.2026 (Feb 2026), 1.2026, etc.
+    - 0.9061 from Fax: 780.79 0.9061 (phone number fragment)
+    """
+    # Date-like: X.20XX where 20XX is year (2020-2035)
+    if 1.0 <= v <= 12.5:
+        frac = v - int(v)
+        if 0.2015 <= frac <= 0.2040:  # .2016 to .2039
+            return True
+    # Phone/fax fragment: 0.9061 from 780.790.1776 OCR; 0.90-0.92 with 4 decimals often noise
+    if 0.904 <= v <= 0.908:  # narrow band for 0.9061
+        return True
+    return False
+
+
 def _extract_numeric_readings(text: str) -> List[float]:
     """
     Extract thickness readings from text. Handles normal (0.285) and fragmented PDF (0 . 2 8 5).
     Excludes false positives from phone numbers (e.g. 0.79 in 780.790.1776) via (?<![\\d.]) lookbehind.
+    Excludes date fragments (2.2026 from 02.2026) and fax fragments (0.9061 from 780.79 0.9061).
     """
+    # Pre-remove phone/fax patterns: "780.79 0.9061" (Fax) - avoid extracting 0.9061
+    text = re.sub(r"\d{3}\.\d{2}\s+0\.\d{3,4}\b", " ", text)
+
     readings = []
     # Normal format: 0.285, 0.380 - not part of longer number (avoid 780.790)
     for m in re.finditer(r"(?<!\d)(?<!\.)0\.\d{2,4}(?!\d)(?!\.\d)", text):
         try:
             v = float(m.group(0))
-            if 0.05 <= v <= 3.0:
+            if 0.05 <= v <= 3.0 and not _is_date_or_phone_false_positive(v):
                 readings.append(v)
         except ValueError:
             pass
@@ -185,16 +212,20 @@ def _extract_numeric_readings(text: str) -> List[float]:
         for m in re.finditer(r"(?<!\d)0\.\d{2,4}(?!\d)", collapsed):
             try:
                 v = float(m.group(0))
-                if 0.05 <= v <= 3.0:
+                if 0.05 <= v <= 3.0 and not _is_date_or_phone_false_positive(v):
                     readings.append(v)
             except ValueError:
                 pass
-    # Fallback: X.XXX (exclude 1.0, 2.0 calibration refs)
+    # Fallback: X.XXX (exclude 1.0, 2.0 calibration refs, date fragments)
     if not readings:
         for m in re.finditer(r"(?<!\d)(\d+\.\d{3,4})(?!\d)", text):
             try:
                 v = float(m.group(1))
-                if 0.05 <= v <= 3.0 and not (0.99 <= v <= 1.01 or 1.99 <= v <= 2.01):
+                if (
+                    0.05 <= v <= 3.0
+                    and not (0.99 <= v <= 1.01 or 1.99 <= v <= 2.01)
+                    and not _is_date_or_phone_false_positive(v)
+                ):
                     readings.append(v)
             except ValueError:
                 pass
@@ -227,11 +258,12 @@ def _validate_and_dedupe_before_export(results: List[ExtractedReading]) -> List[
     return sorted(deduped, key=lambda r: (r.circuit_id, r.cml_id))
 
 
-# Page filtering: prefer "UT REPORT - TEE/ELBOW" summary tables, skip "UT Grid" detailed readings
+# Page filtering: prefer "UT REPORT - TEE/ELBOW/CONNECTIONS" summary tables, skip "UT Grid" detailed readings
+# Summary table has final thickness readings; grid pages (6"x6", 3"x3", 1"x1", 2"x2") are detailed scans - do not read
 # Fragmented PDFs may have "U T R E P O R T - T E E" (spaces between letters)
 _UT_REPORT_SUMMARY = re.compile(
     r"(?:U\s*T\s*R\s*E\s*P\s*O\s*R\s*T|UT\s+REPORT)\s*[-–]\s*"
-    r"(?:T\s*E\s*E|TEE|E\s*L\s*B\s*O\s*W|ELBOW|PIPE|REDUCER|CAP|WELD|STRAIGHT)",
+    r"(?:T\s*E\s*E|TEE|E\s*L\s*B\s*O\s*W|ELBOW|CONNECTIONS?|PIPE|REDUCER|CAP|WELD|STRAIGHT)",
     re.I,
 )
 # Skip pages with detailed UT Grid (confusing intermediate readings; final readings are in UT REPORT summary)
@@ -748,6 +780,24 @@ def _extract_readings_from_text(pdf_path: Path) -> List[float]:
     return all_readings
 
 
+def _preprocess_for_ocr(img):
+    """Enhance contrast and sharpen for better decimal digit recognition."""
+    try:
+        from PIL import ImageEnhance, ImageFilter
+
+        # Convert to RGB if needed
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        # Slight contrast boost helps faint table text
+        enhancer = ImageEnhance.Contrast(img)
+        img = enhancer.enhance(1.2)
+        # Sharpen to clarify digit edges (0.358 vs 0.38)
+        img = img.filter(ImageFilter.SHARPEN)
+        return img
+    except Exception:
+        return img
+
+
 def _run_ocr_on_page(page_image: bytes, dpi: int = 300, psm: int = 6) -> str:
     """
     Run OCR on a page image. Returns extracted text.
@@ -755,9 +805,10 @@ def _run_ocr_on_page(page_image: bytes, dpi: int = 300, psm: int = 6) -> str:
     Tesseract works best at 300+ DPI. PSM 6 = single block (tables); PSM 11 = sparse text.
     """
     try:
+        import io
+
         import pytesseract
         from PIL import Image
-        import io
 
         # Use Windows default install path when Tesseract not in PATH
         _win_path = Path("C:/Program Files/Tesseract-OCR/tesseract.exe")
@@ -771,32 +822,63 @@ def _run_ocr_on_page(page_image: bytes, dpi: int = 300, psm: int = 6) -> str:
             scale = max(1200 / w, 1200 / h, 1.5)
             new_w, new_h = int(w * scale), int(h * scale)
             img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        if os.getenv("INSPECTION_REPORT_OCR_PREPROCESS"):
+            img = _preprocess_for_ocr(img)
         config = f"--psm {psm} --oem 3"  # OEM 3 = default LSTM
         return pytesseract.image_to_string(img, config=config)
     except Exception:
         return ""
 
 
+# OCR: detect grid pages (6"x6", 3"x3", 1"x1", 2"x2" etc.) - do not extract readings from these
+_OCR_GRID_PAGE = re.compile(
+    r"grid\s+scan|grid\s+letters|grid\s+number|"
+    r'[1236]\s*["\']?\s*[xX]\s*[1236]\s*["\']?|'
+    r"letters\s+[A-Z]\s+to\s+[A-Z]|go\s+with\s+flow",
+    re.I,
+)
+
+
 def _extract_with_ocr(pdf_path: Path) -> Tuple[str, List[float], List[str], str]:
-    """Fallback: render PDF pages to images and run OCR. Returns (date, readings, cml_ids, circuit)."""
+    """Fallback: render PDF pages to images and run OCR. Returns (date, readings, cml_ids, circuit).
+    Prefers summary table pages (UT REPORT - Connections/Elbow); skips grid pages (detailed scans).
+    Summary tables may be image-based, so OCR with high sensitivity is used."""
     doc = pymupdf.open(pdf_path)
     full_text = ""
     all_readings = []
+    summary_page_readings: List[float] = []  # Readings from pages that look like summary tables
 
-    for page in doc:
-        # 300 DPI recommended for Tesseract; pymupdf uses 72 base
-        pix = page.get_pixmap(dpi=300)
+    ocr_dpi = 400 if os.getenv("INSPECTION_REPORT_OCR_HIGH_DPI") else 300
+    for page_idx, page in enumerate(doc):
+        # 300-400 DPI recommended for Tesseract; higher helps decimal digits
+        pix = page.get_pixmap(dpi=ocr_dpi)
         img_bytes = pix.tobytes(output="png")
         text = _run_ocr_on_page(img_bytes, psm=6)
         full_text += text + "\n"
+        # Skip page 0 for readings - header has phone/fax/date noise
+        if page_idx == 0:
+            continue
+        # Prefer summary pages; skip grid-only pages when we have summary or other non-grid readings
+        is_summary = _UT_REPORT_SUMMARY.search(text)
+        is_grid_only = (_OCR_GRID_PAGE.search(text) or _UT_GRID_SECTION.search(text)) and not is_summary
         readings = _extract_numeric_readings(text)
+        if is_summary:
+            summary_page_readings.extend(readings)
+        if is_grid_only and summary_page_readings:
+            continue
         all_readings.extend(readings)
-        # If PSM 6 got few readings, retry with PSM 11 (sparse text) for table-like layouts
-        if len(readings) < 3 and len(doc) <= 5:
+        if len(readings) < 3 and len(doc) <= 5 and not os.getenv("INSPECTION_REPORT_OCR_MULTI_PSM"):
             text2 = _run_ocr_on_page(img_bytes, psm=11)
-            all_readings.extend(_extract_numeric_readings(text2))
+            extra = _extract_numeric_readings(text2)
+            all_readings.extend(extra)
+            if _UT_REPORT_SUMMARY.search(text2):
+                summary_page_readings.extend(extra)
 
     doc.close()
+    # Prefer summary table readings when available (high sensitivity for image-based summaries)
+    # If no summary found (image-only), use all readings - summary may be embedded in grid pages
+    if summary_page_readings:
+        all_readings = summary_page_readings
 
     date = _extract_date_from_text(full_text)
     circuit = _extract_circuit_from_text(full_text)
@@ -806,10 +888,12 @@ def _extract_with_ocr(pdf_path: Path) -> Tuple[str, List[float], List[str], str]
 
 
 def _extract_with_easyocr(pdf_path: Path) -> Tuple[str, List[float], List[str], str]:
-    """Optional fallback: EasyOCR when Tesseract returns few readings. No external binary."""
+    """EasyOCR extraction - often better than Tesseract on tables. No external binary."""
     try:
         import easyocr
+        import io
         import numpy as np
+        from PIL import Image
     except ImportError:
         return "", [], [], ""
 
@@ -817,18 +901,658 @@ def _extract_with_easyocr(pdf_path: Path) -> Tuple[str, List[float], List[str], 
     doc = pymupdf.open(pdf_path)
     full_text = ""
     all_readings = []
+    summary_page_readings: List[float] = []
+    ocr_dpi = 400 if os.getenv("INSPECTION_REPORT_OCR_HIGH_DPI") else 300
 
-    for page in doc:
-        pix = page.get_pixmap(dpi=300)
+    for page_idx, page in enumerate(doc):
+        pix = page.get_pixmap(dpi=ocr_dpi)
         img_bytes = pix.tobytes(output="png")
-        from PIL import Image
-        import io
-        img = np.array(Image.open(io.BytesIO(img_bytes)))
+        img = Image.open(io.BytesIO(img_bytes))
+        if os.getenv("INSPECTION_REPORT_OCR_PREPROCESS"):
+            img = _preprocess_for_ocr(img)
+        img = np.array(img)
         result = reader.readtext(img)
+        page_text = ""
         for (_, text, _) in result:
+            page_text += text + "\n"
             full_text += text + "\n"
-            all_readings.extend(_extract_numeric_readings(text))
+        readings = _extract_numeric_readings(page_text)
+        if page_idx > 0:  # Skip header page
+            is_summary = _UT_REPORT_SUMMARY.search(page_text)
+            is_grid_only = (_OCR_GRID_PAGE.search(page_text) or _UT_GRID_SECTION.search(page_text)) and not is_summary
+            if is_summary:
+                summary_page_readings.extend(readings)
+            if not (is_grid_only and summary_page_readings):
+                all_readings.extend(readings)
     doc.close()
+    if summary_page_readings:
+        all_readings = summary_page_readings
+
+    date = _extract_date_from_text(full_text)
+    circuit = _extract_circuit_from_text(full_text)
+    cml_ids = _extract_cml_ids_from_text(full_text)
+    return date or "", all_readings, cml_ids, circuit or ""
+
+
+def _is_image_heavy_report(pdf_path: Path, full_text: str) -> bool:
+    """Heuristic: scanned/image-heavy reports need vision more than text parsing."""
+    if len(full_text.strip()) < 400:
+        return True
+    try:
+        doc = pymupdf.open(pdf_path)
+    except Exception:
+        return False
+
+    try:
+        image_pages = 0
+        for page_idx, page in enumerate(doc):
+            if page_idx == 0:
+                continue
+            page_text = page.get_text() or ""
+            images = page.get_images(full=True)
+            large_images = sum(1 for img in images if len(img) >= 4 and img[2] >= 900 and img[3] >= 400)
+            if large_images >= 1 and len(page_text.strip()) < 400:
+                image_pages += 1
+        return image_pages >= 1
+    finally:
+        doc.close()
+
+
+def _get_candidate_vision_pages(pdf_path: Path, max_pages: int = 5) -> List[int]:
+    """
+    Pick likely result-table pages for vision parsing.
+    Prefer pages with large embedded images and CML/result markers, while skipping grid pages.
+    """
+    try:
+        doc = pymupdf.open(pdf_path)
+    except Exception:
+        return []
+
+    scored_pages: List[Tuple[int, int]] = []
+    page_count = len(doc)
+    try:
+        for page_idx, page in enumerate(doc):
+            if page_idx == 0:
+                continue
+            text = page.get_text() or ""
+            if _OCR_GRID_PAGE.search(text) or _UT_GRID_SECTION.search(text):
+                continue
+
+            score = 0
+            upper_text = text.upper()
+            if _UT_REPORT_SUMMARY.search(text):
+                score += 6
+            if "RESULTS" in upper_text:
+                score += 3
+            if "CML" in upper_text:
+                score += 3
+            if "CIRCUIT" in upper_text:
+                score += 2
+
+            images = page.get_images(full=True)
+            large_images = sum(1 for img in images if len(img) >= 4 and img[2] >= 900 and img[3] >= 400)
+            score += min(large_images, 3)
+
+            if score > 0:
+                scored_pages.append((score, page_idx))
+    finally:
+        doc.close()
+
+    scored_pages.sort(key=lambda item: (-item[0], item[1]))
+    page_indices = [page_idx for _, page_idx in scored_pages[:max_pages]]
+    if page_indices:
+        return page_indices
+    return list(range(1, min(page_count, max_pages + 1)))
+
+
+def _iter_candidate_image_segments(doc, candidate_pages: List[int]):
+    """Yield likely embedded report-image segments from candidate pages."""
+    try:
+        import io
+
+        from PIL import Image
+    except ImportError:
+        return
+
+    for page_idx in reversed(candidate_pages):
+        if page_idx >= len(doc):
+            continue
+        page = doc[page_idx]
+        large_images = []
+        for img in page.get_images(full=True):
+            if len(img) < 4:
+                continue
+            xref = img[0]
+            width, height = img[2], img[3]
+            if width >= 900 and height >= 400:
+                large_images.append((xref, width, height))
+
+        for xref, _, _ in large_images[:3]:
+            try:
+                image_info = doc.extract_image(xref)
+                image = Image.open(io.BytesIO(image_info["image"])).convert("RGB")
+            except Exception:
+                continue
+
+            segments = []
+            if image.width >= image.height:
+                segments.append(("bottom", image.crop((0, image.height // 2, image.width, image.height))))
+            segments.append(("full", image))
+
+            for segment_name, segment in segments:
+                scale = 3 if max(segment.size) < 2400 else 2
+                resized = segment.resize((segment.width * scale, segment.height * scale))
+                yield page_idx, xref, segment_name, resized
+
+
+def _extract_json_object(text: str) -> Optional[dict]:
+    """Parse JSON from an LLM response that may include fences or prose."""
+    if not text:
+        return None
+
+    candidates = []
+    fenced = re.findall(r"```(?:json)?\s*([\[{][\s\S]*?[\]}])\s*```", text, re.I)
+    candidates.extend(fenced)
+
+    obj_start = text.find("{")
+    obj_end = text.rfind("}")
+    if obj_start != -1 and obj_end != -1 and obj_end > obj_start:
+        candidates.append(text[obj_start : obj_end + 1])
+    arr_start = text.find("[")
+    arr_end = text.rfind("]")
+    if arr_start != -1 and arr_end != -1 and arr_end > arr_start:
+        candidates.append(text[arr_start : arr_end + 1])
+
+    for candidate in candidates:
+        try:
+            payload = json.loads(candidate)
+            if isinstance(payload, list):
+                return {"readings": payload}
+            if isinstance(payload, dict):
+                return payload
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
+def _build_structured_llm_results(
+    payload: dict,
+    source_filename: str,
+    fallback_circuit: str,
+    fallback_date: str,
+) -> List[ExtractedReading]:
+    """Normalize JSON returned by the structured vision prompt."""
+    circuit_id = str(payload.get("circuit_id") or fallback_circuit or "Unknown").strip() or "Unknown"
+    measurement_date = str(payload.get("measurement_date") or fallback_date or "").strip()
+
+    results: List[ExtractedReading] = []
+    for item in payload.get("readings", []) or []:
+        if not isinstance(item, dict):
+            continue
+
+        cml_id = str(item.get("cml_id") or item.get("CML_ID") or "").strip()
+        if not cml_id:
+            cml_base = str(item.get("cml_base") or item.get("cml") or item.get("CML") or "").strip()
+            zone = str(item.get("zone") or item.get("section") or item.get("SECTION") or "").strip()
+            if zone and not re.fullmatch(r"\d+", zone):
+                continue
+            if cml_base and zone:
+                cml_id = f"{cml_base}-{zone}"
+        if not cml_id:
+            continue
+        if "-" in cml_id:
+            cml_base, zone = cml_id.rsplit("-", 1)
+            if not re.fullmatch(r"\d+(?:\.\d+)?", cml_base) or not re.fullmatch(r"\d+", zone):
+                continue
+        elif not re.fullmatch(r"\d+(?:\.\d+)?", cml_id):
+            continue
+
+        reading_raw = item.get("min_reading", item.get("reading"))
+        if reading_raw is None:
+            reading_raw = (
+                item.get("minimum_reading")
+                or item.get("MINIMUM_READING")
+                or item.get("MIN_READING")
+                or item.get("READING")
+                or item.get("NORTH")
+                or item.get("THICKNESS")
+                or item.get("MIN")
+            )
+        try:
+            min_reading = float(reading_raw)
+        except (TypeError, ValueError):
+            continue
+        if not (0.05 <= min_reading <= 3.0):
+            continue
+
+        results.append(
+            ExtractedReading(
+                circuit_id=circuit_id,
+                cml_id=cml_id,
+                measurement_date=measurement_date,
+                min_reading=min_reading,
+                all_readings=[min_reading],
+                source_file=source_filename,
+                extraction_method="llm_vision",
+            )
+        )
+
+    return results
+
+
+def _normalize_easyocr_tokens(ocr_result) -> List[dict]:
+    """Convert EasyOCR output into simple positioned tokens."""
+    tokens = []
+    for item in ocr_result or []:
+        if not item or len(item) < 2:
+            continue
+        bbox, text = item[0], str(item[1] or "").strip()
+        conf = float(item[2]) if len(item) > 2 else 0.0
+        if not text:
+            continue
+        xs = [p[0] for p in bbox]
+        ys = [p[1] for p in bbox]
+        tokens.append(
+            {
+                "text": text,
+                "conf": conf,
+                "left": min(xs),
+                "right": max(xs),
+                "top": min(ys),
+                "bottom": max(ys),
+                "cy": (min(ys) + max(ys)) / 2,
+                "height": max(1.0, max(ys) - min(ys)),
+            }
+        )
+    return tokens
+
+
+def _extract_structured_rows_from_easyocr_tokens(
+    tokens: List[dict],
+    source_filename: str,
+    fallback_circuit: str,
+    fallback_date: str,
+    fallback_cml_ids: Optional[List[str]] = None,
+) -> List[ExtractedReading]:
+    """
+    Recover summary-table rows from positioned OCR tokens.
+    This is a lightweight local alternative to a document parser like MinerU.
+    """
+    if not tokens:
+        return []
+
+    joined_text = " ".join(t["text"] for t in sorted(tokens, key=lambda t: (t["top"], t["left"])))
+    upper_text = joined_text.upper()
+    if "CIRCUIT" not in upper_text or "CML" not in upper_text or "SECTION" not in upper_text:
+        return []
+
+    circuit_id = fallback_circuit or "Unknown"
+    circuit_match = re.search(r"\b\d{2,3}-\d{3}[A-Z]?(?:\s+\d+-\d+)?\b", joined_text)
+    if circuit_match:
+        circuit_id = _extract_circuit_base(circuit_match.group(0))
+
+    cml_base = None
+    for expected in fallback_cml_ids or []:
+        if expected and expected in joined_text:
+            cml_base = expected
+            break
+    if not cml_base:
+        cml_match = re.search(r"\b\d+\.\d+\b", joined_text)
+        if cml_match:
+            cml_base = cml_match.group(0)
+    if not cml_base:
+        return []
+
+    avg_height = sum(t["height"] for t in tokens) / max(1, len(tokens))
+    # OCR often places the leftmost section cell and the numeric reading cells on slightly
+    # different baselines; use a wider band so one logical table row stays together.
+    row_tolerance = max(55.0, avg_height * 1.5)
+    header_tokens = [t for t in tokens if re.fullmatch(r"(?:CIRCUIT|CML|SECTION|DIAM\.?|NORTH|SOUTH|EAST|WEST|TOP|BOTTOM|CENTER|HIGH|COMMENTS|A|B|C|D|E)", t["text"], re.I)]
+    header_row = None
+    for token in header_tokens:
+        same_row = [t for t in header_tokens if abs(t["cy"] - token["cy"]) <= row_tolerance]
+        labels = {t["text"].upper().rstrip(".") for t in same_row}
+        if {"CIRCUIT", "CML", "SECTION"}.issubset(labels):
+            header_row = same_row
+            break
+    if not header_row:
+        return []
+
+    x_by_label = {}
+    for token in header_row:
+        label = token["text"].upper().rstrip(".")
+        if label not in x_by_label:
+            x_by_label[label] = token["left"]
+
+    section_x = x_by_label.get("SECTION")
+    cml_x = x_by_label.get("CML")
+    reading_start_x = min(
+        [x_by_label[label] for label in ("A", "NORTH", "TOP") if label in x_by_label] or [x_by_label.get("DIAM", 0) + 80]
+    )
+
+    sorted_tokens = sorted(tokens, key=lambda t: (t["cy"], t["left"]))
+    row_centers: List[float] = []
+    header_cutoff = max(t["cy"] for t in header_row) + max(12.0, avg_height * 0.4)
+    for token in sorted_tokens:
+        if token["cy"] <= header_cutoff:
+            continue
+        if any(abs(token["cy"] - center) <= row_tolerance for center in row_centers):
+            continue
+        row_centers.append(token["cy"])
+
+    results: List[ExtractedReading] = []
+    active_cml_base = cml_base
+    pending_row: Optional[dict] = None
+    for center in row_centers:
+        row_tokens = [t for t in sorted_tokens if abs(t["cy"] - center) <= row_tolerance]
+        row_tokens.sort(key=lambda t: t["left"])
+        row_text = " ".join(t["text"] for t in row_tokens)
+        if re.search(r"N/?A|FLANGE", row_text, re.I):
+            pending_row = None
+            continue
+
+        row_cml_base = active_cml_base
+        row_has_explicit_cml = False
+        if cml_x is not None:
+            cml_candidates = []
+            for token in row_tokens:
+                if re.fullmatch(r"\d+\.\d+", token["text"]):
+                    cml_candidates.append((abs(token["left"] - cml_x), token["left"], token["text"]))
+            if cml_candidates:
+                cml_candidates.sort(key=lambda item: (item[0], item[1]))
+                candidate = cml_candidates[0][2]
+                if not fallback_cml_ids or candidate in fallback_cml_ids:
+                    row_cml_base = candidate
+                    active_cml_base = candidate
+                    row_has_explicit_cml = True
+        if not row_cml_base:
+            continue
+
+        if section_x is None:
+            continue
+        section_candidates = []
+        for token in row_tokens:
+            if re.fullmatch(r"\d{1,2}", token["text"]):
+                section_text = token["text"]
+                if section_text == "11":
+                    section_text = "1"
+                try:
+                    section_num = int(section_text)
+                except ValueError:
+                    continue
+                if 1 <= section_num <= 40:
+                    section_candidates.append((token["left"], section_text))
+        unique_sections = []
+        seen_sections = set()
+        for left, section_text in sorted(section_candidates, key=lambda item: item[0]):
+            if section_text not in seen_sections:
+                unique_sections.append(section_text)
+                seen_sections.add(section_text)
+
+        readings_in_row = []
+        for token in row_tokens:
+            if token["left"] + 10 < reading_start_x:
+                continue
+            if re.fullmatch(r"0\.\d{2,4}", token["text"]):
+                try:
+                    value = float(token["text"])
+                except ValueError:
+                    continue
+                if 0.05 <= value <= 3.0:
+                    readings_in_row.append(value)
+        if not readings_in_row:
+            pending_row = None
+            continue
+
+        if not unique_sections:
+            pending_row = {
+                "cml_base": row_cml_base,
+                "readings": readings_in_row,
+                "inherits_next_cml": not row_has_explicit_cml,
+            }
+            continue
+
+        if pending_row and len(unique_sections) >= 2:
+            pending_section = unique_sections[0]
+            pending_cml_base = row_cml_base if pending_row.get("inherits_next_cml") else pending_row["cml_base"]
+            results.append(
+                ExtractedReading(
+                    circuit_id=circuit_id,
+                    cml_id=f"{pending_cml_base}-{pending_section}",
+                    measurement_date=fallback_date or "",
+                    min_reading=min(pending_row["readings"]),
+                    all_readings=pending_row["readings"],
+                    source_file=source_filename,
+                    extraction_method="ocr_structured",
+                )
+            )
+            section = unique_sections[-1]
+            pending_row = None
+        else:
+            section = unique_sections[-1]
+
+        min_value = min(readings_in_row)
+        results.append(
+            ExtractedReading(
+                circuit_id=circuit_id,
+                cml_id=f"{row_cml_base}-{section}",
+                measurement_date=fallback_date or "",
+                min_reading=min_value,
+                all_readings=readings_in_row,
+                source_file=source_filename,
+                extraction_method="ocr_structured",
+            )
+        )
+        pending_row = None
+
+    return _validate_and_dedupe_before_export(results) if results else []
+
+
+def _extract_structured_with_local_ocr(
+    pdf_path: Path,
+    source_filename: str = "",
+    fallback_circuit: str = "",
+    fallback_date: str = "",
+    fallback_cml_ids: Optional[List[str]] = None,
+) -> List[ExtractedReading]:
+    """Local structured OCR for image-heavy reports using embedded summary images."""
+    try:
+        import easyocr
+        import io
+        import numpy as np
+        from PIL import Image
+    except ImportError:
+        return []
+
+    candidate_pages = _get_candidate_vision_pages(pdf_path, max_pages=5)
+    if not candidate_pages:
+        return []
+
+    try:
+        reader = easyocr.Reader(["en"], gpu=False, verbose=False)
+    except Exception:
+        return []
+
+    doc = pymupdf.open(pdf_path)
+    results: List[ExtractedReading] = []
+    try:
+        for page_idx, xref, segment_name, segment in _iter_candidate_image_segments(doc, candidate_pages):
+            try:
+                ocr_result = reader.readtext(np.array(segment), detail=1)
+            except Exception:
+                continue
+            page_results = _extract_structured_rows_from_easyocr_tokens(
+                _normalize_easyocr_tokens(ocr_result),
+                source_filename=source_filename or pdf_path.name,
+                fallback_circuit=fallback_circuit,
+                fallback_date=fallback_date,
+                fallback_cml_ids=fallback_cml_ids,
+            )
+            if page_results:
+                results.extend(page_results)
+                expected_bases = {cml_id for cml_id in (fallback_cml_ids or []) if cml_id}
+                found_bases = {r.cml_id.split("-", 1)[0] for r in results if "-" in r.cml_id}
+                min_expected_rows = max(5, len(expected_bases) * 2 + 1) if expected_bases else 5
+                if expected_bases and expected_bases.issubset(found_bases) and len(results) >= min_expected_rows:
+                    return _validate_and_dedupe_before_export(results)
+    finally:
+        doc.close()
+
+    return _validate_and_dedupe_before_export(results) if results else []
+
+
+def _extract_structured_with_llm_vision(
+    pdf_path: Path,
+    source_filename: str = "",
+    fallback_circuit: str = "",
+    fallback_date: str = "",
+    fallback_cml_ids: Optional[List[str]] = None,
+) -> List[ExtractedReading]:
+    """
+    Vision fallback for image-heavy reports.
+    Unlike OCR-as-text, this asks the model for structured result rows directly.
+    """
+    try:
+        from openai import OpenAI
+
+        from backend.llm_config import get_api_key, get_chat_base_url
+    except ImportError:
+        return []
+
+    api_key = get_api_key()
+    if not api_key:
+        return []
+    if not (os.getenv("INSPECTION_REPORT_LLM_VISION") or os.getenv("INSPECTION_REPORT_LLM_ONLY")):
+        return []
+
+    vision_model = os.getenv("INSPECTION_REPORT_VISION_MODEL", "gemini-3-flash-preview")
+    max_pages = int(os.getenv("INSPECTION_REPORT_LLM_STRUCTURED_MAX_PAGES", "5"))
+    dpi = int(os.getenv("INSPECTION_REPORT_LLM_STRUCTURED_DPI", os.getenv("INSPECTION_REPORT_LLM_DPI", "170")))
+    candidate_pages = _get_candidate_vision_pages(pdf_path, max_pages=max_pages)
+    if not candidate_pages:
+        return []
+
+    client = OpenAI(base_url=get_chat_base_url(), api_key=api_key)
+    doc = pymupdf.open(pdf_path)
+    results: List[ExtractedReading] = []
+
+    try:
+        import io
+
+        for page_idx, xref, segment_name, segment in _iter_candidate_image_segments(doc, candidate_pages):
+            buf = io.BytesIO()
+            segment.save(buf, format="PNG")
+            b64 = f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode()}"
+            prompt = (
+                "Extract only final summary-table result rows visible in this UT inspection image segment.\n"
+                "Return JSON only as an array of rows. Each row should include circuit, cml, section, and the minimum reading.\n"
+                "Ignore diagrams, grid instructions, headers, filenames, and rows with N/A or FLANGE.\n"
+                f"Fallback circuit_id: {fallback_circuit}\n"
+                f"Fallback measurement_date: {fallback_date}\n"
+                f"Expected CML bases when visible: {', '.join(fallback_cml_ids or [])}"
+            )
+            content = [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": b64}},
+            ]
+            try:
+                resp = client.chat.completions.create(
+                    model=vision_model,
+                    messages=[{"role": "user", "content": content}],
+                    max_tokens=3000,
+                )
+            except Exception as exc:
+                _logger.warning(
+                    "Structured LLM vision failed on page %s image %s (%s): %s",
+                    page_idx + 1,
+                    xref,
+                    segment_name,
+                    exc,
+                    exc_info=False,
+                )
+                continue
+
+            payload = _extract_json_object((resp.choices[0].message.content or "").strip())
+            if not payload:
+                continue
+
+            page_results = _build_structured_llm_results(
+                payload,
+                source_filename=source_filename or pdf_path.name,
+                fallback_circuit=fallback_circuit,
+                fallback_date=fallback_date,
+            )
+            if page_results:
+                results.extend(page_results)
+                expected_bases = {cml_id for cml_id in (fallback_cml_ids or []) if cml_id}
+                found_bases = {r.cml_id.split("-", 1)[0] for r in results if "-" in r.cml_id}
+                if expected_bases and expected_bases.issubset(found_bases) and len(results) >= len(expected_bases) + 1:
+                    return _validate_and_dedupe_before_export(results)
+    finally:
+        doc.close()
+
+    return _validate_and_dedupe_before_export(results) if results else []
+
+
+def _extract_with_llm_vision(pdf_path: Path) -> Tuple[str, List[float], List[str], str]:
+    """
+    LLM as OCR: transcribe page images to text, then use existing parser logic.
+    Returns (date, readings, cml_ids, circuit) - same format as _extract_with_ocr.
+    Enable with INSPECTION_REPORT_LLM_VISION=1 and AI_BUILDER_TOKEN.
+    """
+    if not os.getenv("INSPECTION_REPORT_LLM_VISION"):
+        return "", [], [], ""
+    try:
+        from openai import OpenAI
+
+        from backend.llm_config import get_api_key, get_chat_base_url
+    except ImportError:
+        return "", [], [], ""
+    api_key = get_api_key()
+    if not api_key:
+        return "", [], [], ""
+
+    vision_model = os.getenv("INSPECTION_REPORT_VISION_MODEL", "gemini-3-flash-preview")
+    max_pages = int(os.getenv("INSPECTION_REPORT_LLM_MAX_PAGES", "6"))
+    dpi = int(os.getenv("INSPECTION_REPORT_LLM_DPI", "150"))
+
+    prompt = """Transcribe all text from this page. Include every number, table cell, label, and header.
+Output plain text only. Preserve numbers exactly as shown (e.g. 0.358, 0.365)."""
+
+    client = OpenAI(base_url=get_chat_base_url(), api_key=api_key)
+    full_text = ""
+    all_readings: List[float] = []
+    summary_page_readings: List[float] = []
+
+    doc = pymupdf.open(pdf_path)
+    for page_idx in range(min(len(doc), max_pages)):
+        page = doc[page_idx]
+        pix = page.get_pixmap(dpi=dpi)
+        b64 = f"data:image/png;base64,{base64.b64encode(pix.tobytes(output='png')).decode()}"
+        content = [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": b64}}]
+        try:
+            resp = client.chat.completions.create(
+                model=vision_model,
+                messages=[{"role": "user", "content": content}],
+                max_tokens=4000,
+            )
+        except Exception:
+            continue
+        page_text = (resp.choices[0].message.content or "").strip()
+        full_text += page_text + "\n"
+        if page_idx == 0:
+            continue
+        is_summary = _UT_REPORT_SUMMARY.search(page_text)
+        is_grid_only = (_OCR_GRID_PAGE.search(page_text) or _UT_GRID_SECTION.search(page_text)) and not is_summary
+        readings = _extract_numeric_readings(page_text)
+        if is_summary:
+            summary_page_readings.extend(readings)
+        if not (is_grid_only and summary_page_readings):
+            all_readings.extend(readings)
+    doc.close()
+
+    if summary_page_readings:
+        all_readings = summary_page_readings
 
     date = _extract_date_from_text(full_text)
     circuit = _extract_circuit_from_text(full_text)
@@ -850,7 +1574,9 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
         List of ExtractedReading (one per CML)
     """
     source_filename = source_filename or str(pdf_path)
-
+    date = ""
+    circuit = ""
+    cml_ids: List[str] = []
 
     # First pass: pdfplumber
     full_text = ""
@@ -871,12 +1597,88 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
     # Combine readings (prefer table extraction, fallback to text)
     all_readings = readings_from_tables if readings_from_tables else readings_from_text
 
+    # Seed metadata from text/filename early so image-based fallbacks have context.
+    date = _extract_date_from_text(full_text) or date
+    circuit = _extract_circuit_from_text(full_text) or circuit
+    cml_ids = _extract_cml_ids_from_text(full_text) or cml_ids
+    if not date:
+        m = re.search(r"(\d{2})\.(\d{2})\.(\d{4})", source_filename)
+        if m:
+            date = f"{m.group(3)}-{m.group(1)}-{m.group(2)}"
+    if not circuit:
+        m = re.search(r"([\d]+-[\w]+\s+[\d]+-[\d]+)", source_filename)
+        if m:
+            circuit = m.group(1).strip()
+    if not cml_ids:
+        cml_ids = _extract_cml_ids_from_filename(source_filename)
+
     # Try OCR when: no readings, very little text, or suspicious 0.0-only readings (image-based table)
     _suspicious_readings = all_readings and all(r == 0.0 for r in all_readings)
     _try_ocr = not all_readings or len(full_text) < 100 or _suspicious_readings
+    _image_heavy_report = _is_image_heavy_report(pdf_path, full_text)
+    _used_llm_vision = False
     if _try_ocr:
-        try:
-            ocr_date, ocr_readings, ocr_cml_ids, ocr_circuit = _extract_with_ocr(pdf_path)
+        if _image_heavy_report:
+            structured_local_results = _extract_structured_with_local_ocr(
+                pdf_path,
+                source_filename=source_filename,
+                fallback_circuit=_extract_circuit_base(circuit or "Unknown"),
+                fallback_date=date or "",
+                fallback_cml_ids=cml_ids,
+            )
+            if structured_local_results:
+                return [replace(r, source_file=source_filename) for r in structured_local_results]
+
+            structured_llm_results = _extract_structured_with_llm_vision(
+                pdf_path,
+                source_filename=source_filename,
+                fallback_circuit=_extract_circuit_base(circuit or "Unknown"),
+                fallback_date=date or "",
+                fallback_cml_ids=cml_ids,
+            )
+            if structured_llm_results:
+                return [replace(r, source_file=source_filename) for r in structured_llm_results]
+
+        ocr_date, ocr_readings, ocr_cml_ids, ocr_circuit = "", [], [], ""
+        # INSPECTION_REPORT_LLM_ONLY=1: skip OCR, use LLM Vision directly (for comparison/testing)
+        if os.getenv("INSPECTION_REPORT_LLM_ONLY"):
+            try:
+                llm_date, llm_readings, llm_cml_ids, llm_circuit = _extract_with_llm_vision(pdf_path)
+                if llm_readings:
+                    all_readings = llm_readings
+                    _used_llm_vision = True
+                if llm_date:
+                    date = llm_date
+                if llm_cml_ids:
+                    cml_ids = llm_cml_ids
+                if llm_circuit:
+                    circuit = llm_circuit
+            except Exception as e:
+                _logger.warning("LLM Vision (LLM-only mode) failed: %s", e, exc_info=False)
+        else:
+            # Normal: OCR first, LLM as fallback
+            if os.getenv("INSPECTION_REPORT_OCR_ENGINE") != "tesseract":
+                try:
+                    e_date, e_readings, e_cmls, e_circuit = _extract_with_easyocr(pdf_path)
+                    if e_readings and len(e_readings) >= 4:
+                        ocr_date, ocr_readings, ocr_cml_ids, ocr_circuit = e_date, e_readings, e_cmls, e_circuit
+                except Exception:
+                    pass
+            if not ocr_readings:
+                try:
+                    ocr_date, ocr_readings, ocr_cml_ids, ocr_circuit = _extract_with_ocr(pdf_path)
+                    if len(ocr_readings) < 4:
+                        try:
+                            e_date, e_readings, e_cmls, e_circuit = _extract_with_easyocr(pdf_path)
+                            if e_readings and len(e_readings) > len(ocr_readings):
+                                ocr_date, ocr_readings, ocr_cml_ids, ocr_circuit = e_date, e_readings, e_cmls, e_circuit
+                        except Exception:
+                            pass
+                except Exception as e:
+                    import logging
+                    logging.getLogger(__name__).debug(
+                        "OCR fallback failed (install Tesseract for image-based reports): %s", e
+                    )
             if ocr_readings:
                 all_readings = ocr_readings
             if ocr_date:
@@ -885,29 +1687,30 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
                 cml_ids = ocr_cml_ids
             if ocr_circuit:
                 circuit = ocr_circuit
-            # If Tesseract got few readings, try EasyOCR (pip install easyocr)
-            if len(ocr_readings) < 4:
+            # Optional: LLM as OCR-like fallback when OCR fails or is suspicious
+            if not all_readings or (_suspicious_readings and len(all_readings) < 4):
                 try:
-                    e_date, e_readings, e_cmls, e_circuit = _extract_with_easyocr(pdf_path)
-                    if e_readings and len(e_readings) > len(ocr_readings):
-                        all_readings = e_readings
-                        if e_date:
-                            date = e_date
-                        if e_cmls:
-                            cml_ids = e_cmls
-                        if e_circuit:
-                            circuit = e_circuit
-                except Exception:
-                    pass
-        except Exception as e:
-            import logging
-            logging.getLogger(__name__).debug(
-                "OCR fallback failed (install Tesseract for image-based reports): %s", e
-            )
+                    llm_date, llm_readings, llm_cml_ids, llm_circuit = _extract_with_llm_vision(pdf_path)
+                    if llm_readings:
+                        all_readings = llm_readings
+                        _used_llm_vision = True
+                    if llm_date:
+                        date = llm_date
+                    if llm_cml_ids:
+                        cml_ids = llm_cml_ids
+                    if llm_circuit:
+                        circuit = llm_circuit
+                except Exception as e:
+                    _logger.warning(
+                        "LLM Vision (OCR-like) failed: %s",
+                        e,
+                        exc_info=False,
+                    )
 
-    date = _extract_date_from_text(full_text)
-    circuit = _extract_circuit_from_text(full_text)
-    cml_ids = _extract_cml_ids_from_text(full_text)
+    # Use pdfplumber/full_text only when OCR/LLM didn't provide values
+    date = date or _extract_date_from_text(full_text)
+    circuit = circuit or _extract_circuit_from_text(full_text)
+    cml_ids = cml_ids or _extract_cml_ids_from_text(full_text)
 
     # Fallback: try filename for date (e.g. ..._02.23.2026.pdf)
     if not date:
@@ -977,6 +1780,29 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
                 r.source_file = source_filename
             return generic_results
 
+    # Image-based reports often lose table structure with OCR.
+    # Try local structured OCR first, then vision if needed.
+    if _image_heavy_report:
+        structured_local_results = _extract_structured_with_local_ocr(
+            pdf_path,
+            source_filename=source_filename,
+            fallback_circuit=circuit_base,
+            fallback_date=date_str,
+            fallback_cml_ids=cml_ids,
+        )
+        if structured_local_results:
+            return [replace(r, source_file=source_filename) for r in structured_local_results]
+
+        structured_llm_results = _extract_structured_with_llm_vision(
+            pdf_path,
+            source_filename=source_filename,
+            fallback_circuit=circuit_base,
+            fallback_date=date_str,
+            fallback_cml_ids=cml_ids,
+        )
+        if structured_llm_results:
+            return [replace(r, source_file=source_filename) for r in structured_llm_results]
+
     results = []
 
     if not cml_ids:
@@ -998,28 +1824,52 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
                 _valid_readings = _valid_readings[:6]
             total = len(_valid_readings)
             # Table layout often has CML columns reversed vs filename; try [1.37, 1.29]
+            # Only swap for symmetric 3+3; for 3+2 (after outlier drop) use filename order
             _ocr_cml_ids = [cml_ids[1], cml_ids[0]]
-        if total % n == 0:
+        # Asymmetric zones: 5 readings for 2 CMLs = 3+2 (e.g. 6x6 grid + 3x3 branch)
+        # When 6 readings but one is outlier (<0.25 when others >0.3), use 5 with 3+2
+        _zone_splits = None
+        _use_swapped_order = False
+        if n == 2 and total == 5:
+            _zone_splits = [3, 2]
+        elif n == 2 and total == 6:
+            above_03 = [r for r in _valid_readings if r >= 0.3]
+            below_025 = [r for r in _valid_readings if r < 0.25]
+            if len(above_03) >= 4 and len(below_025) == 1:
+                _valid_readings = [r for r in _valid_readings if r >= 0.25]
+                total = len(_valid_readings)
+                if total == 5:
+                    _zone_splits = [3, 2]
+                    _ocr_cml_ids = list(cml_ids)  # Use filename order for 3+2
+            if _zone_splits is None and total % n == 0:
+                zones_per_cml = total // n
+                if 2 <= zones_per_cml <= 9:
+                    _zone_splits = [zones_per_cml] * n
+                    _use_swapped_order = True  # 3+3 uses swapped
+        elif total % n == 0:
             zones_per_cml = total // n
             if 2 <= zones_per_cml <= 9:
-                ocr_results = []
-                for i, cml_base in enumerate(_ocr_cml_ids if n == 2 else cml_ids):
-                    start = i * zones_per_cml
-                    for z in range(zones_per_cml):
-                        idx = start + z
-                        cml_id = f"{cml_base}-{z + 1}"
-                        ocr_results.append(
-                            ExtractedReading(
-                                circuit_id=circuit_base,
-                                cml_id=cml_id,
-                                measurement_date=date_str,
-                                min_reading=_valid_readings[idx],
-                                all_readings=[_valid_readings[idx]],
-                                source_file=source_filename,
-                                extraction_method="ocr",
-                            )
+                _zone_splits = [zones_per_cml] * n
+        if _zone_splits and sum(_zone_splits) == total:
+            ocr_results = []
+            idx = 0
+            cml_list = _ocr_cml_ids if (n == 2 and _use_swapped_order) else cml_ids
+            for i, cml_base in enumerate(cml_list):
+                for z in range(_zone_splits[i]):
+                    cml_id = f"{cml_base}-{z + 1}"
+                    ocr_results.append(
+                        ExtractedReading(
+                            circuit_id=circuit_base,
+                            cml_id=cml_id,
+                            measurement_date=date_str,
+                            min_reading=_valid_readings[idx],
+                            all_readings=[_valid_readings[idx]],
+                            source_file=source_filename,
+                            extraction_method="llm_vision" if _used_llm_vision else "ocr",
                         )
-                return _validate_and_dedupe_before_export(ocr_results)
+                    )
+                    idx += 1
+            return _validate_and_dedupe_before_export(ocr_results)
 
     # Fallback: aggregate readings by CML (min per CML)
     if len(cml_ids) == 1:

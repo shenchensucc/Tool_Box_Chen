@@ -18,6 +18,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+# Load .env for AI_BUILDER_TOKEN (LLM Vision) and INSPECTION_REPORT_LLM_VISION
+try:
+    from dotenv import load_dotenv
+    load_dotenv(ROOT / ".env")
+except ImportError:
+    pass
+
 from backend.tml.inspection_report_parser import parse_inspection_report_pdf
 from backend.tml.inspection_fixtures import FIXTURE_EXPECTED, FIXTURE_DIR
 

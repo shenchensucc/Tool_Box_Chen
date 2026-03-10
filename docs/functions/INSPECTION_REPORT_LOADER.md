@@ -69,6 +69,24 @@ Reports with both summary and detailed UT Grid readings: parser prefers pages wi
 
 If table parsing returns no rows, falls back to aggregate logic (min reading per CML). OCR used when pdfplumber extracts little or suspicious values.
 
+### LLM Vision (OCR-like)
+
+When `INSPECTION_REPORT_LLM_VISION=1` and `AI_BUILDER_TOKEN` are set, the parser can use an LLM as an OCR-like step:
+
+1. **PDF pages → LLM**: One vision call per page; LLM transcribes all text (plain text, not JSON).
+2. **Text → existing parser**: Same `_extract_numeric_readings`, `_extract_date_from_text`, `_extract_cml_ids_from_text`, zone assignment, etc.
+3. **Output**: `ExtractedReading[]` with `extraction_method="llm_vision"`.
+
+LLM is used as fallback when OCR fails or returns suspicious results. For comparison/testing, set `INSPECTION_REPORT_LLM_ONLY=1` to skip OCR and use LLM directly.
+
+### OCR Tuning
+
+| Env var | Effect |
+|---------|--------|
+| `INSPECTION_REPORT_OCR_ENGINE=tesseract` | Use Tesseract only (skip EasyOCR; faster) |
+| `INSPECTION_REPORT_OCR_HIGH_DPI=1` | 400 DPI for both EasyOCR and Tesseract (better decimal digits) |
+| `INSPECTION_REPORT_OCR_PREPROCESS=1` | Contrast + sharpen before OCR |
+
 ---
 
 ## General Extraction
@@ -98,7 +116,7 @@ If table parsing returns no rows, falls back to aggregate logic (min reading per
 
 ## OCR vs LLM
 
-Python (pdfplumber + pytesseract) is used for deterministic, fast, offline extraction. LLM APIs could interpret ambiguous layouts but add cost and variability. For standardized reports, Python is recommended.
+Python (pdfplumber + OCR) is used for deterministic, fast extraction. An optional **LLM Vision API** path can validate or replace OCR when enabled.
 
 ### Image-based results tables
 
@@ -107,14 +125,21 @@ Some reports (e.g. 52-010B) have "Readings, Grids & Photos on attached pages" �
 1. **Triggers OCR** when pdfplumber returns no readings, little text, or suspicious 0.0-only readings
 2. **Builds zone-level output** from OCR-extracted numbers (e.g. 6 readings + 2 CMLs → 1.29-1..3, 1.37-1..3)
 
-**OCR options:**
+**OCR engines (tried in order):**
 
 | Engine | Install | Notes |
 |--------|---------|------|
-| **Tesseract** (primary) | `winget install UB-Mannheim.TesseractOCR` or https://github.com/UB-Mannheim/tesseract/wiki | 300 DPI, PSM 6/11 for tables |
-| **EasyOCR** (fallback) | `pip install easyocr` or `pip install .[ocr]` | Used when Tesseract returns &lt;4 readings |
+| **EasyOCR** (primary) | `pip install easyocr` | Often better on tables; no external binary |
+| **Tesseract** (fallback) | `winget install UB-Mannheim.TesseractOCR` | 300 DPI, PSM 6/11 for tables |
 
-Tesseract uses 300 DPI and PSM 6 (single block) for tables; retries with PSM 11 (sparse text) if few readings. EasyOCR runs only when Tesseract underperforms.
+EasyOCR runs first when 4+ readings expected; Tesseract used otherwise. Both prefer summary table pages (UT REPORT - Connections/Elbow) over grid pages.
+
+**LLM Vision API (optional):** Set `INSPECTION_REPORT_LLM_VISION=1` and `AI_BUILDER_TOKEN` to use vision models (e.g. kimi-k2.5) via AI Builders Space API. PDF pages are sent as images; the model extracts readings from summary tables. Use as validation or fallback when OCR underperforms.
+
+- **Same token as Chat with Chen:** `AI_BUILDER_TOKEN` in `.env` (see `.env.example`).
+- **When it runs:** LLM Vision is only invoked when pdfplumber/OCR return no readings, or when all readings are 0.0 (suspicious) and fewer than 4. For PDFs that extract successfully via text/OCR, the LLM path is skipped.
+- **Speed:** Use `INSPECTION_REPORT_VISION_MODEL=gemini-3-flash-preview` (default, ~20s) for faster photo-like response. `kimi-k2.5` is slower but may extract better. `INSPECTION_REPORT_LLM_MAX_PAGES=3` and `INSPECTION_REPORT_LLM_DPI=150` reduce payload for speed.
+- **To test:** Run `python dev_tools/test_llm_vision_quick.py` (requires PDF in `ground_truth_data/`).
 
 **Deployment:** The Dockerfile installs `tesseract-ocr` via apt. On Linux, Tesseract is in PATH (`/usr/bin/tesseract`). On Windows dev, the parser uses `C:/Program Files/Tesseract-OCR/tesseract.exe` when present.
 
