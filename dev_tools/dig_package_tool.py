@@ -214,8 +214,8 @@ def main():
                     st.json(dig_ids)
                 else:
                     st.warning("No valid Dig IDs (must contain 'GW')")
-                    if mdl_col_map.get("Dig ID"):
-                        raw_ids = mdl_df[mdl_col_map["Dig ID"]].dropna().unique().tolist()
+                    if mdl_col_map.get("dig_id"):
+                        raw_ids = mdl_df[mdl_col_map["dig_id"]].dropna().unique().tolist()
                         st.caption(f"Raw values: {raw_ids[:10]}")
 
     # --- Step 3: Parse ILI ---
@@ -241,7 +241,7 @@ def main():
     # --- Step 4: Feature matching preview ---
     if mdl_df is not None and mdl_col_map and ili_parsed and dig_ids:
         st.subheader("4. Feature Matching Preview")
-        dig_id_col = mdl_col_map.get("Dig ID")
+        dig_id_col = mdl_col_map.get("dig_id")
         if dig_id_col:
             for dig_id in dig_ids[:5]:  # Show first 5
                 mdl_features = mdl_df[mdl_df[dig_id_col] == dig_id]

@@ -392,6 +392,7 @@ def display_sidebar_navigation():
             st.page_link("pages/8_Inspection_Report_Loader.py", label="📄 Inspection Report Loader")
 
         with st.expander("🛢️ Pipeline", expanded=False):
+            st.page_link("pages/3_Dig_Package_Visual_Tool.py", label="📦 Dig Package Visual Tool")
             st.page_link("pages/3_ILI_Visual_Tool.py", label="📊 ILI Visual Tool")
             st.page_link("pages/4_Metal_Loss_Assessment.py", label="🔬 Metal Loss Assessment")
             st.page_link("pages/6_Metal_Loss_Mass_Assessment.py", label="📉 Metal Loss Mass Assessment")

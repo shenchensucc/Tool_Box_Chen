@@ -1,5 +1,8 @@
+import io
+from typing import Any, Dict, List, Optional
+
 import pandas as pd
-from typing import List, Optional, Dict
+from openpyxl import load_workbook
 
 from backend.logging_config import get_logger
 
@@ -90,6 +93,176 @@ def identify_ili_columns(df: pd.DataFrame, custom_keywords: Optional[Dict[str, L
     found = {k: v for k, v in results.items() if v is not None}
     logger.debug(f"identify_ili_columns: Found {len(found)} columns: {found}")
     return results
+
+
+def merge_keyword_sets(
+    base_keywords: Dict[str, List[str]],
+    override_keywords: Optional[Dict[str, List[str]]] = None,
+) -> Dict[str, List[str]]:
+    """
+    Merge keyword maps while preserving order and de-duplicating values.
+    Override keywords are prepended so vendor/file-specific names win first.
+    """
+    merged: Dict[str, List[str]] = {key: list(values) for key, values in base_keywords.items()}
+    for key, values in (override_keywords or {}).items():
+        combined = list(values) + merged.get(key, [])
+        seen = set()
+        deduped = []
+        for value in combined:
+            norm = str(value).strip().lower()
+            if not norm or norm in seen:
+                continue
+            seen.add(norm)
+            deduped.append(value)
+        merged[key] = deduped
+    return merged
+
+
+def _normalize_excel_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return " ".join(str(value).strip().lower().split())
+
+
+def select_workbook_sheet(workbook, keywords: Optional[List[str]] = None) -> str:
+    """
+    Select the best worksheet by exact match first, then substring match.
+    Falls back to the first sheet when no keyword matches are found.
+    """
+    if not keywords:
+        return workbook.sheetnames[0]
+
+    normalized_keywords = [_normalize_excel_text(keyword) for keyword in keywords if _normalize_excel_text(keyword)]
+    exact_matches = []
+    partial_matches = []
+
+    for sheet_name in workbook.sheetnames:
+        normalized_sheet = _normalize_excel_text(sheet_name)
+        if normalized_sheet in normalized_keywords:
+            exact_matches.append(sheet_name)
+            continue
+        if any(keyword in normalized_sheet or normalized_sheet in keyword for keyword in normalized_keywords):
+            partial_matches.append(sheet_name)
+
+    if exact_matches:
+        return exact_matches[0]
+    if partial_matches:
+        return partial_matches[0]
+    return workbook.sheetnames[0]
+
+
+def detect_header_row(
+    worksheet,
+    keyword_map: Dict[str, List[str]],
+    max_scan_rows: int = 60,
+    min_matches: int = 2,
+) -> Optional[int]:
+    """
+    Detect the most likely header row by scoring rows against expected column keywords.
+    """
+    best_row = None
+    best_score = -1
+    best_non_empty = -1
+    max_row = min(max_scan_rows, worksheet.max_row)
+
+    for row_idx in range(1, max_row + 1):
+        row = list(worksheet.iter_rows(min_row=row_idx, max_row=row_idx, values_only=True))[0]
+        headers = [str(value).strip() if value is not None else f"_col{i}" for i, value in enumerate(row)]
+        non_empty = sum(1 for value in row if _normalize_excel_text(value))
+        if non_empty < 2:
+            continue
+
+        header_df = pd.DataFrame(columns=headers)
+        mapping = identify_ili_columns(header_df, keyword_map)
+        score = len([column for column in mapping.values() if column is not None])
+
+        if score < min_matches:
+            continue
+        if score > best_score or (score == best_score and non_empty > best_non_empty):
+            best_row = row_idx
+            best_score = score
+            best_non_empty = non_empty
+
+    return best_row
+
+
+def read_worksheet_as_dataframe(worksheet, header_row: int) -> pd.DataFrame:
+    """
+    Read a worksheet into a DataFrame using the provided header row.
+    Stops after three consecutive empty rows once data has started.
+    """
+    header_cells = list(worksheet.iter_rows(min_row=header_row, max_row=header_row, values_only=True))[0]
+    headers = [str(value).strip() if value is not None else f"_col{i}" for i, value in enumerate(header_cells)]
+
+    data = []
+    empty_streak = 0
+    for row_idx in range(header_row + 1, worksheet.max_row + 1):
+        row = list(worksheet.iter_rows(min_row=row_idx, max_row=row_idx, values_only=True))[0]
+        row_values = list(row[: len(headers)])
+        if len(row_values) < len(headers):
+            row_values.extend([None] * (len(headers) - len(row_values)))
+
+        if not any(_normalize_excel_text(value) for value in row_values):
+            if data:
+                empty_streak += 1
+                if empty_streak >= 3:
+                    break
+            continue
+
+        empty_streak = 0
+        data.append(row_values)
+
+    return pd.DataFrame(data, columns=headers)
+
+
+def read_excel_with_detected_header(
+    file_content: bytes,
+    keyword_map: Dict[str, List[str]],
+    sheet_keywords: Optional[List[str]] = None,
+    max_scan_rows: int = 60,
+    min_matches: int = 2,
+) -> tuple[pd.DataFrame, Dict[str, Optional[str]], str, int]:
+    """
+    Read an Excel worksheet using keyword-based sheet selection and header detection.
+
+    Returns:
+        (df, column_mapping, sheet_name, header_row)
+    """
+    workbook = load_workbook(io.BytesIO(file_content), data_only=True)
+    try:
+        primary_sheet = select_workbook_sheet(workbook, sheet_keywords)
+        candidate_sheet_names = [primary_sheet] + [name for name in workbook.sheetnames if name != primary_sheet]
+
+        best_result = None
+        best_score = -1
+        for sheet_name in candidate_sheet_names:
+            worksheet = workbook[sheet_name]
+            header_row = detect_header_row(
+                worksheet,
+                keyword_map=keyword_map,
+                max_scan_rows=max_scan_rows,
+                min_matches=min_matches,
+            )
+            if header_row is None:
+                continue
+
+            df = read_worksheet_as_dataframe(worksheet, header_row)
+            mapping = identify_ili_columns(df, keyword_map)
+            score = len([column for column in mapping.values() if column is not None])
+            if score > best_score:
+                best_result = (df, mapping, sheet_name, header_row)
+                best_score = score
+
+        if best_result is not None:
+            return best_result
+
+        fallback_worksheet = workbook[primary_sheet]
+        fallback_header_row = 1
+        fallback_df = read_worksheet_as_dataframe(fallback_worksheet, fallback_header_row)
+        fallback_mapping = identify_ili_columns(fallback_df, keyword_map)
+        return fallback_df, fallback_mapping, primary_sheet, fallback_header_row
+    finally:
+        workbook.close()
 
 def parse_pasted_ili_text(text: str) -> pd.DataFrame:
     """

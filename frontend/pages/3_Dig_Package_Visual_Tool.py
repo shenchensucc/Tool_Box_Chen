@@ -3,7 +3,6 @@ from pathlib import Path
 
 import streamlit as st
 
-# Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from chat_panel import render_chat_expander
@@ -16,13 +15,12 @@ from frontend_utils import (
     set_page_config,
     show_backend_unavailable_and_retry,
 )
-from ili_visual_shared import render_ili_visual_tool
+from ili_visual_shared import render_dig_package_visual_tool
 
-# Page configuration
-set_page_config("ILI Visual Tool", "🛢️")
+
+set_page_config("Dig Package Visual Tool", "📦")
 apply_custom_styling()
 
-# Custom Sidebar Navigation
 display_sidebar_navigation()
 
 cols, chat_visible = get_layout_with_chat()
@@ -30,24 +28,25 @@ left_col, right_col = cols
 
 with left_col:
     display_header(
-        "🛢️ ILI Visual Tool",
-        "Visualize In-Line Inspection (ILI) data from uploaded Excel files or clipboard input",
+        "📦 Dig Package Visual Tool",
+        "Visualize ILI data directly from dig package Excel files",
     )
 
     if not check_backend_health():
         show_backend_unavailable_and_retry()
         st.stop()
 
-    render_ili_visual_tool()
+    render_dig_package_visual_tool()
 
     st.markdown("---")
     st.markdown(
         """
         <div style='text-align: center; color: #95a5a6;'>
-            <p>ILI Visual Tool | Powered by FastAPI + Plotly</p>
+            <p>Dig Package Visual Tool | Powered by FastAPI + Plotly</p>
         </div>
         """,
         unsafe_allow_html=True,
-    ) 
+    )
+
 with right_col:
     render_chat_expander(right_col, chat_visible)

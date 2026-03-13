@@ -58,12 +58,13 @@ with left_col:
         )
 
     with col3:
-        st.metric(label="Active Tools", value="2", delta="+1")
+        st.metric(label="Active Tools", value="3", delta="+1")
         st.markdown(
             """
             <div style='padding: 1rem; background-color: #f8f9fa; border-radius: 5px;'>
                 <h4>Available Tools</h4>
                 <ul style='color: #7f8c8d;'>
+                    <li>Dig Package Visual Tool ✅</li>
                     <li>ILI Visual Tool ✅</li>
                     <li>TML Data Loader ✅</li>
                     <li>More coming soon...</li>

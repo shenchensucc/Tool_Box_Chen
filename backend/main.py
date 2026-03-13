@@ -1478,11 +1478,10 @@ async def generate_dig_package_endpoint(
         "ili_formats": ili_formats,
     })
     try:
-        # Validate file sizes
-        validate_file_size(mdl_file)
+        validate_excel_file(mdl_file)
         for ili_file in ili_files:
-            validate_file_size(ili_file)
-        validate_file_size(template_file)
+            validate_excel_file(ili_file)
+        validate_excel_file(template_file)
 
         # Read contents
         mdl_content = await mdl_file.read()
@@ -1493,7 +1492,12 @@ async def generate_dig_package_endpoint(
             ili_contents.append(await ili_file.read())
             
         # Parse formats
-        formats_list = ili_formats.split(",") if ili_formats else ["Rosen-MFLA"] * len(ili_files)
+        formats_list = [fmt.strip() for fmt in ili_formats.split(",") if fmt.strip()] if ili_formats else ["Rosen-MFLA"] * len(ili_files)
+        if len(formats_list) != len(ili_files):
+            raise HTTPException(
+                status_code=400,
+                detail=f"ILI format count ({len(formats_list)}) does not match uploaded ILI file count ({len(ili_files)}).",
+            )
         logger.info(f"[dig-package/generate] Parsed: {len(ili_contents)} ILI files, formats={formats_list}")
 
         # Generate dig packages
@@ -1522,6 +1526,8 @@ async def generate_dig_package_endpoint(
             headers={"Content-Disposition": f"attachment; filename=Dig_Packages_R{revision}_{timestamp}.zip"}
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         log_error(logger, "dig-package/generate", e)
         raise HTTPException(status_code=500, detail=f"Error generating dig packages: {str(e)}")

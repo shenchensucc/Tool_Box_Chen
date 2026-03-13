@@ -63,7 +63,8 @@ with left_col:
 
             ### Features
 
-            - **ILI Visual Tool**: Upload and analyze in-line inspection data
+            - **Dig Package Visual Tool**: Visualize ILI data from dig package Excel files
+            - **ILI Visual Tool**: Upload Excel or paste clipboard data for ILI visualization
             - **TML Data Loader**: Process up to 20 TML workflows simultaneously
             - **Interactive Charts**: Powered by Plotly for rich visualizations
             - **Data Export**: Download processed results

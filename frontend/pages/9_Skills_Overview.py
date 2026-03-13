@@ -111,7 +111,8 @@ python dev_tools/validate_ground_truth.py --fixtures-only
         &nbsp;&nbsp;└─ Inspection Report Loader → Parse PDFs → Read summaries / Generate dataloader<br>
         <br>
         <strong>🛢️ Pipeline</strong><br>
-        &nbsp;&nbsp;├─ ILI Visual Tool &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;→ Upload & analyze in-line inspection data<br>
+        &nbsp;&nbsp;├─ Dig Package Visual Tool → Visualize dig package Excel data<br>
+        &nbsp;&nbsp;├─ ILI Visual Tool &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;→ Upload Excel or paste ILI data<br>
         &nbsp;&nbsp;├─ Metal Loss Assessment &nbsp;→ Assess metal loss from ILI data<br>
         &nbsp;&nbsp;├─ Metal Loss Mass Assessment → Mass assessment workflows<br>
         &nbsp;&nbsp;└─ Dig Package Generator &nbsp;&nbsp;→ Generate dig packages for excavations<br>

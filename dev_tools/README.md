@@ -98,6 +98,34 @@ streamlit run dev_tools/dig_package_tool.py --server.runOnSave true
 
 **Synergy with ILI Visual Tool**: Generated dig package Excel files can be visualized in the **ILI Visual Tool** (Dig Package input format). The same `dig_package_reader` module parses the Feature summary and Joint Summary sections for the pipeline visual.
 
+---
+
+## ILI Visual Dig Package Dev Tool
+
+Tool for iterating only on the **ILI Visual Tool** dig package parser and blue-line logic.
+
+### Purpose
+
+- Use the **exact same parser logic** as the ILI Visual dig package flow
+- Upload a single dig package and inspect what the visual path can actually read
+- Show **section detection** for `Feature summary` and `Joint Summary`
+- Show **column mapping**, parsed joint-summary rows, girth welds, seam spans, and target GWD longseam
+- Export a compact JSON snapshot for debugging and logic revision
+
+### Run
+
+```bash
+streamlit run dev_tools/ili_visual_dig_package_tool.py --server.runOnSave true
+```
+
+### Usage
+
+1. Upload one dig package Excel file, or enter a path relative to project root
+2. Review section metadata and the final column mapping used by the visual path
+3. Compare raw `Feature summary` / `Joint Summary` tables against parsed outputs
+4. Inspect the built `girth_welds` and `seam_welds` payloads to debug missing blue lines
+5. Download the JSON snapshot when you want to share a reproducible parser case
+
 ### Ground Truth Format
 
 Saved to `dev_tools/ground_truth_data/dig_package/`:

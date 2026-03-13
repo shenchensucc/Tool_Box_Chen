@@ -70,6 +70,18 @@ def validate_one(gt_path: Path) -> tuple[bool | None, str]:
     except Exception as e:
         return False, f"Parse error: {e}"
 
+    ili_files = source_files.get("ili", [])
+    if ili_files and len(ili_formats) != len(ili_files):
+        return False, f"ILI format count {len(ili_formats)} does not match ILI file count {len(ili_files)}"
+    for ili_name, ili_format in zip(ili_files, ili_formats):
+        ili_path = find_file(ili_name, base_dir, case_folder)
+        if not ili_path:
+            return None, f"ILI file not found: {ili_name}"
+        try:
+            parse_ili_file(ili_path.read_bytes(), ili_format)
+        except Exception as e:
+            return False, f"ILI parse error ({ili_name}, {ili_format}): {e}"
+
     # Compare
     missing = expected_dig_ids - got_dig_ids
     extra = got_dig_ids - expected_dig_ids
@@ -78,7 +90,7 @@ def validate_one(gt_path: Path) -> tuple[bool | None, str]:
         return False, f"Missing dig IDs: {sorted(missing)}"
     if extra:
         return False, f"Extra dig IDs: {sorted(extra)}"
-    return True, f"OK ({len(got_dig_ids)} dig IDs)"
+    return True, f"OK ({len(got_dig_ids)} dig IDs, {len(ili_files)} ILI files parsed)"
 
 
 def main():

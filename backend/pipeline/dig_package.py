@@ -10,22 +10,23 @@ It matches features, populates templates, and generates individual dig packages.
 """
 
 import io
-import os
 import json
-import base64
 import tempfile
 import zipfile
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill
-from openpyxl.utils import get_column_letter
 
-from backend.pipeline.ili_reader import find_column_names, identify_ili_columns, COLUMN_KEYWORDS as GLOBAL_KEYWORDS
 from backend.logging_config import get_logger
+from backend.pipeline.ili_reader import (
+    COLUMN_KEYWORDS as ILI_COLUMN_KEYWORDS,
+    find_column_names,
+    merge_keyword_sets,
+    read_excel_with_detected_header,
+)
 
 logger = get_logger("backend.pipeline.dig_package")
 
@@ -34,52 +35,79 @@ logger = get_logger("backend.pipeline.dig_package")
 # Keyword Definitions for Column Matching
 # ============================================================================
 
-# Vendor-specific mappings can still be used for specialized matching if needed,
-# but we'll prefer the global COLUMN_KEYWORDS from ili_reader.py for general tasks.
-VENDOR_MAPPINGS = {
+# MDL columns use a different schema from source ILI files.
+MDL_COLUMN_KEYWORDS = {
+    "dig_id": ["Dig ID", "Dig Name", "DigName", "NEW Dig Name", "Excavation ID"],
+    "feature_id": ["Feature ID", "ILI Feature ID", "ID#", "Feature Identifier", "Target ID"],
+    "pipeline_name": ["Pipeline Name", "Pipeline_Name", "PipelineName", "Line Name"],
+    "pipe_od": ["Pipe OD", "Pipe_OD", "PipeOD", "OD (mm)", "Pipe Diameter"],
+    "pipe_nwt": ["Pipe NWT", "Pipe_NWT", "PipeNWT", "Nominal Wall Thickness (mm)", "Wall Thickness"],
+    "mop": ["MOP", "MAOP", "Maximum Operating Pressure"],
+    "sep": ["SEP", "Safe Excavation Pressure"],
+    "latitude": ["Latitude", "Lat"],
+    "longitude": ["Longitude", "Lon", "Long"],
+    "milepost": ["Milepost", "MP", "Mile Post"],
+    "pipe_year": ["Pipe Year", "Year", "Installation Year"],
+    "pipe_grade": ["Pipe Grade", "Grade", "Material Grade"],
+    "ili_run_name": ["ILI Run Name", "ILI Run", "Run Name"],
+    "ili_run_accuracy": ["ILI Run Accuracy", "Run Accuracy", "ILI Accuracy"],
+    "upstream_agm": ["Upstream AGM", "US AGM", "US_AGM"],
+    "downstream_agm": ["Downstream AGM", "DS AGM", "DS_AGM"],
+    "assessment_length": ["Assessment Length", "Assess Length"],
+    "start_assessment": ["Start Assessment", "Assessment Start", "US Assessment"],
+    "end_assessment": ["End Assessment", "Assessment End", "DS Assessment"],
+    "exposure_length": ["Exposure Length", "Expose Length"],
+    "start_exposure": ["Start Exposure", "Exposure Start", "US Exposure"],
+    "end_exposure": ["End Exposure", "Exposure End", "DS Exposure"],
+    "target_girth_weld": ["Target Girth Weld", "Target GW", "TGW", "Target Joint"],
+    "length": ["Feature Length", "Length", "Length (mm)", "Length (in)"],
+    "width": ["Feature Width", "Width", "Width (mm)", "Width (in)"],
+}
+
+ILI_VENDOR_KEYWORD_OVERRIDES = {
     "TDW": {
-        "Feature ID": ["ID", "Feature Number", "FeatureID", "Target ID"],
-        "Feature Type": ["Type", "Feature Type", "Anomaly Type"],
-        "Feature Description": ["Description", "Feature Description", "Anomaly Description"],
-        "Feature Length": ["Length", "Length (in)", "Length (mm)"],
-        "Feature Width": ["Width", "Width (in)", "Width (mm)"],
-        "Feature Depth": ["Depth", "Depth (%)", "Max Depth"],
-        "Feature Orientation": ["Orientation", "Clock Orientation", "O'Clock"],
-        "ILI Chainage": ["Chainage", "Odometer", "Distance"],
-        "Joint Number": ["Joint", "Joint Number", "Weld Number"],
+        "feature_id": ["ID", "Feature Number", "FeatureID", "Target ID"],
+        "feature_type": ["Type", "Feature Type", "Anomaly Type"],
+        "feature_desc": ["Description", "Feature Description", "Anomaly Description"],
+        "length": ["Length", "Length (in)", "Length (mm)"],
+        "width": ["Width", "Width (in)", "Width (mm)"],
+        "depth": ["Depth", "Depth (%)", "Max Depth"],
+        "orientation": ["Orientation", "Clock Orientation", "O'Clock"],
+        "distance": ["Chainage", "Odometer", "Distance"],
+        "joint_number": ["Joint", "Joint Number", "Weld Number"],
     },
     "Rosen-MFLA": {
-        "Feature ID": ["ID#", "Feature Identifier", "Feature ID", "ILI Feature ID"],
-        "Feature Type": ["Feature Type", "Feature", "Event"],
-        "Feature Description": ["Feature Description", "Description", "Anomaly"],
-        "Feature Length": ["Length (mm)", "Length (in)", "Length"],
-        "Feature Width": ["Width (mm)", "Width (in)", "Width"],
-        "Feature Depth": ["Depth (%)", "Max Depth", "Peak Depth"],
-        "Feature Orientation": ["Orientation (clock)", "Clock Orient.", "Orientation (hh:mm)"],
-        "ILI Chainage": ["Wheel Count (ft)", "Log Dist.", "ILI Chainage (m)", "Odometer (m)"],
-        "Joint Number": ["Joint No. or US GW No.", "Joint No", "US GW No"],
+        "feature_id": ["ID#", "Feature Identifier", "Feature ID", "ILI Feature ID"],
+        "feature_type": ["Feature Type", "Feature", "Event"],
+        "feature_desc": ["Feature Description", "Description", "Anomaly"],
+        "length": ["Length (mm)", "Length (in)", "Length"],
+        "width": ["Width (mm)", "Width (in)", "Width"],
+        "depth": ["Depth (%)", "Max Depth", "Peak Depth"],
+        "orientation": ["Orientation (clock)", "Clock Orient.", "Orientation (hh:mm)"],
+        "distance": ["Wheel Count (ft)", "Log Dist.", "ILI Chainage (m)", "Odometer (m)"],
+        "joint_number": ["Joint No. or US GW No.", "Joint No", "US GW No"],
     },
     "Rosen-MFLC": {
-        "Feature ID": ["ID#", "Feature Identifier", "Feature ID", "ILI Feature ID"],
-        "Feature Type": ["Feature Type", "Feature", "Event"],
-        "Feature Description": ["Feature Description", "Description", "Anomaly"],
-        "Feature Length": ["Length (mm)", "Length (in)", "Length"],
-        "Feature Width": ["Width (mm)", "Width (in)", "Width"],
-        "Feature Depth": ["Depth (%)", "Max Depth", "Peak Depth"],
-        "Feature Orientation": ["Orientation (clock)", "Clock Orient.", "Orientation (hh:mm)"],
-        "ILI Chainage": ["Wheel Count (ft)", "Log Dist.", "ILI Chainage (m)", "Odometer (m)"],
-        "Joint Number": ["Joint No. or US GW No.", "Joint No", "US GW No"],
+        "feature_id": ["ID#", "Feature Identifier", "Feature ID", "ILI Feature ID"],
+        "feature_type": ["Feature Type", "Feature", "Event"],
+        "feature_desc": ["Feature Description", "Description", "Anomaly"],
+        "length": ["Length (mm)", "Length (in)", "Length"],
+        "width": ["Width (mm)", "Width (in)", "Width"],
+        "depth": ["Depth (%)", "Max Depth", "Peak Depth"],
+        "orientation": ["Orientation (clock)", "Clock Orient.", "Orientation (hh:mm)"],
+        "distance": ["Wheel Count (ft)", "Log Dist.", "ILI Chainage (m)", "Odometer (m)"],
+        "joint_number": ["Joint No. or US GW No.", "Joint No", "US GW No"],
     },
     "Rosen-EMAT": {
-        "Feature ID": ["ID#", "Feature Identifier", "Feature ID", "ILI Feature ID"],
-        "Feature Type": ["Feature Type", "Feature", "Event"],
-        "Feature Description": ["Feature Description", "Description", "Anomaly"],
-        "Feature Length": ["Length (mm)", "Length (in)", "Length"],
-        "Feature Width": ["Width (mm)", "Width (in)", "Width"],
-        "Feature Depth": ["Depth (%)", "Max Depth", "Peak Depth"],
-        "Feature Orientation": ["Orientation (clock)", "Clock Orient.", "Orientation (hh:mm)"],
-        "ILI Chainage": ["Wheel Count (ft)", "Log Dist.", "ILI Chainage (m)", "Odometer (m)"],
-        "Joint Number": ["Joint No. or US GW No.", "Joint No", "US GW No"],
+        "feature_id": ["ID#", "Feature Identifier", "Feature ID", "ILI Feature ID"],
+        "feature_type": ["Feature Type", "Feature", "Event"],
+        "feature_desc": ["Feature Description", "Description", "Anomaly"],
+        "length": ["Length (mm)", "Length (in)", "Length"],
+        "width": ["Width (mm)", "Width (in)", "Width"],
+        "depth": ["Depth (%)", "Max Depth", "Peak Depth"],
+        "orientation": ["Orientation (clock)", "Clock Orient.", "Orientation (hh:mm)"],
+        "distance": ["Wheel Count (ft)", "Log Dist.", "ILI Chainage (m)", "Odometer (m)"],
+        "joint_number": ["Joint No. or US GW No.", "Joint No", "US GW No"],
     }
 }
 
@@ -92,27 +120,6 @@ ANOMALIES_WORKSHEET_KEYWORDS = ["Anomalies", "Anomaly", "Anomaly Listing"]
 # ============================================================================
 # Utility Functions
 # ============================================================================
-
-
-def find_worksheet_by_keywords(workbook, keywords: List[str]) -> Optional[str]:
-    """
-    Find worksheet name by matching against keywords.
-    
-    Args:
-        workbook: openpyxl workbook object
-        keywords: List of possible worksheet names
-        
-    Returns:
-        Worksheet name if found, None otherwise
-    """
-    sheet_names = workbook.sheetnames
-    sheet_names_lower = {name.lower(): name for name in sheet_names}
-    
-    for keyword in keywords:
-        keyword_lower = keyword.lower().strip()
-        if keyword_lower in sheet_names_lower:
-            return sheet_names_lower[keyword_lower]
-    return None
 
 
 def get_cell_from_named_range(workbook, range_name: str):
@@ -159,6 +166,45 @@ def is_valid_dig_id(dig_id: str) -> bool:
     return "GW" in str(dig_id).upper()
 
 
+def _normalize_match_value(value: Any) -> str:
+    """Normalize IDs and labels so matching is resilient to whitespace and numeric formatting."""
+    if value is None or pd.isna(value):
+        return ""
+    if isinstance(value, (int, float)):
+        return str(int(value)) if float(value).is_integer() else f"{float(value):.6f}".rstrip("0").rstrip(".")
+    text = str(value).strip()
+    try:
+        numeric_value = float(text.replace(",", ""))
+        return str(int(numeric_value)) if numeric_value.is_integer() else f"{numeric_value:.6f}".rstrip("0").rstrip(".")
+    except ValueError:
+        return " ".join(text.upper().split())
+
+
+def _coerce_numeric(value: Any) -> Optional[float]:
+    numeric = pd.to_numeric(value, errors="coerce")
+    return float(numeric) if pd.notna(numeric) else None
+
+
+def _dimensions_match(mdl_value: Any, ili_value: Any) -> bool:
+    """
+    Match numeric dimensions directly or via mm/in conversion.
+    This catches common MDL-vs-vendor unit differences without overfitting.
+    """
+    mdl_num = _coerce_numeric(mdl_value)
+    ili_num = _coerce_numeric(ili_value)
+    if mdl_num is None or ili_num is None:
+        return False
+
+    direct_match = abs(mdl_num - ili_num) <= max(0.01, 0.01 * max(abs(mdl_num), abs(ili_num)))
+    if direct_match:
+        return True
+
+    mm_to_in = mdl_num / 25.4
+    in_to_mm = mdl_num * 25.4
+    tolerance = max(0.02, 0.02 * max(abs(ili_num), abs(mm_to_in), abs(in_to_mm)))
+    return abs(mm_to_in - ili_num) <= tolerance or abs(in_to_mm - ili_num) <= tolerance
+
+
 # ============================================================================
 # MDL Parsing Functions
 # ============================================================================
@@ -173,47 +219,15 @@ def parse_mdl_file(file_content: bytes) -> Tuple[pd.DataFrame, Dict[str, str]]:
     Returns:
         Tuple of (DataFrame with mapped columns, column mapping dict)
     """
-    # Load workbook
-    wb = load_workbook(io.BytesIO(file_content), data_only=True)
-    
-    # Find MDL worksheet
-    sheet_name = find_worksheet_by_keywords(wb, MDL_WORKSHEET_KEYWORDS)
-    if not sheet_name:
-        sheet_name = wb.sheetnames[0]  # Default to first sheet
-    
-    # Read data
-    ws = wb[sheet_name]
-    data = []
-    headers = []
-    
-    # Find header row (first non-empty row)
-    for row in ws.iter_rows():
-        row_values = [cell.value for cell in row]
-        if any(val for val in row_values):
-            headers = row_values
-            break
-    
-    # Read data rows
-    header_found = False
-    for row in ws.iter_rows():
-        row_values = [cell.value for cell in row]
-        if not header_found:
-            if row_values == headers:
-                header_found = True
-            continue
-        if any(val for val in row_values):
-            data.append(row_values)
-    
-    # Create DataFrame
-    df = pd.DataFrame(data, columns=headers)
-    
-    # Map columns to standard names
-    column_mapping = {}
-    for standard_name, keywords in GLOBAL_KEYWORDS.items():
-        found_col = find_column_names(df, keywords)
-        if found_col:
-            column_mapping[standard_name] = found_col
-    
+    df, column_mapping, sheet_name, header_row = read_excel_with_detected_header(
+        file_content=file_content,
+        keyword_map=MDL_COLUMN_KEYWORDS,
+        sheet_keywords=MDL_WORKSHEET_KEYWORDS,
+        min_matches=3,
+    )
+    logger.info(
+        f"parse_mdl_file: sheet='{sheet_name}', header_row={header_row}, mapped={list(column_mapping.keys())}"
+    )
     return df, column_mapping
 
 
@@ -228,7 +242,7 @@ def extract_dig_ids(mdl_df: pd.DataFrame, column_mapping: Dict[str, str]) -> Lis
     Returns:
         List of unique valid Dig IDs
     """
-    dig_id_col = column_mapping.get("Dig ID")
+    dig_id_col = column_mapping.get("dig_id")
     if not dig_id_col:
         return []
     
@@ -253,55 +267,20 @@ def parse_ili_file(file_content: bytes, vendor_format: str = "Rosen-MFLA") -> Tu
     Returns:
         Tuple of (DataFrame with mapped columns, column mapping dict, worksheet name)
     """
-    # Load workbook
-    wb = load_workbook(io.BytesIO(file_content), data_only=True)
-    
-    # Find ILI worksheet
-    sheet_name = find_worksheet_by_keywords(wb, ILI_WORKSHEET_KEYWORDS)
-    if not sheet_name:
-        sheet_name = wb.sheetnames[0]  # Default to first sheet
-    
-    # Check for Rosen-type data (has Anomalies worksheet)
-    anomalies_sheet = find_worksheet_by_keywords(wb, ANOMALIES_WORKSHEET_KEYWORDS)
-    if "Rosen" in vendor_format and anomalies_sheet:
-        # Use Anomalies worksheet for Rosen-type data
-        sheet_name = anomalies_sheet
-    
-    # Read data
-    ws = wb[sheet_name]
-    data = []
-    headers = []
-    
-    # Find header row
-    for row in ws.iter_rows():
-        row_values = [cell.value for cell in row]
-        if any(val is not None for val in row_values):
-            headers = row_values
-            break
-    
-    # Read data rows
-    header_found = False
-    for row in ws.iter_rows():
-        row_values = [cell.value for cell in row]
-        if not header_found:
-            if row_values == headers:
-                header_found = True
-            continue
-        if any(val is not None for val in row_values):
-            data.append(row_values)
-    
-    # Create DataFrame
-    df = pd.DataFrame(data, columns=headers)
-    
-    # Map columns to standard names using vendor mapping
-    column_mapping = {}
-    vendor_keywords = VENDOR_MAPPINGS.get(vendor_format, VENDOR_MAPPINGS["Rosen-MFLA"])
-    
-    for standard_name, keywords in vendor_keywords.items():
-        found_col = find_column_names(df, keywords)
-        if found_col:
-            column_mapping[standard_name] = found_col
-    
+    sheet_keywords = ANOMALIES_WORKSHEET_KEYWORDS if "Rosen" in vendor_format else ILI_WORKSHEET_KEYWORDS
+    keyword_map = merge_keyword_sets(
+        ILI_COLUMN_KEYWORDS,
+        ILI_VENDOR_KEYWORD_OVERRIDES.get(vendor_format, ILI_VENDOR_KEYWORD_OVERRIDES["Rosen-MFLA"]),
+    )
+    df, column_mapping, sheet_name, header_row = read_excel_with_detected_header(
+        file_content=file_content,
+        keyword_map=keyword_map,
+        sheet_keywords=sheet_keywords,
+        min_matches=4,
+    )
+    logger.info(
+        f"parse_ili_file: vendor={vendor_format}, sheet='{sheet_name}', header_row={header_row}, mapped={list(column_mapping.keys())}"
+    )
     return df, column_mapping, sheet_name
 
 
@@ -321,11 +300,12 @@ def match_features_by_id(mdl_feature_id: Any, ili_df: pd.DataFrame, ili_col_map:
     Returns:
         Matched rows from ILI DataFrame
     """
-    feat_id_col = ili_col_map.get("Feature ID")
+    feat_id_col = ili_col_map.get("feature_id")
     if not feat_id_col:
         return pd.DataFrame()
-    
-    matched = ili_df[ili_df[feat_id_col] == mdl_feature_id]
+
+    mdl_key = _normalize_match_value(mdl_feature_id)
+    matched = ili_df[ili_df[feat_id_col].apply(_normalize_match_value) == mdl_key]
     return matched
 
 
@@ -343,25 +323,19 @@ def match_features_by_dimensions(mdl_length: float, mdl_width: float,
     Returns:
         Matched rows from ILI DataFrame
     """
-    length_col = ili_col_map.get("Feature Length")
-    width_col = ili_col_map.get("Feature Width")
+    length_col = ili_col_map.get("length")
+    width_col = ili_col_map.get("width")
     
     if not length_col or not width_col:
         return pd.DataFrame()
     
-    # Round to 3 decimal places for matching
-    mdl_length_rounded = round(float(mdl_length), 3) if pd.notna(mdl_length) else None
-    mdl_width_rounded = round(float(mdl_width), 3) if pd.notna(mdl_width) else None
-    
-    if mdl_length_rounded is None or mdl_width_rounded is None:
+    if pd.isna(mdl_length) or pd.isna(mdl_width):
         return pd.DataFrame()
-    
-    # Filter ILI data
+
     matched = ili_df[
-        (ili_df[length_col].apply(lambda x: round(float(x), 3) if pd.notna(x) else None) == mdl_length_rounded) &
-        (ili_df[width_col].apply(lambda x: round(float(x), 3) if pd.notna(x) else None) == mdl_width_rounded)
+        ili_df[length_col].apply(lambda x: _dimensions_match(mdl_length, x)) &
+        ili_df[width_col].apply(lambda x: _dimensions_match(mdl_width, x))
     ]
-    
     return matched
 
 
@@ -381,9 +355,9 @@ def get_target_feature_indices(mdl_features: pd.DataFrame, ili_df: pd.DataFrame,
     """
     target_indices = []
     
-    feat_id_col_mdl = mdl_col_map.get("Feature ID")
-    length_col_mdl = mdl_col_map.get("Feature Length")
-    width_col_mdl = mdl_col_map.get("Feature Width")
+    feat_id_col_mdl = mdl_col_map.get("feature_id")
+    length_col_mdl = mdl_col_map.get("length")
+    width_col_mdl = mdl_col_map.get("width")
     
     for _, mdl_row in mdl_features.iterrows():
         # Try Feature ID matching first
@@ -433,22 +407,22 @@ def populate_single_value_fields(wb, mdl_row: pd.Series, mdl_col_map: Dict[str, 
     
     # Populate fields
     field_mapping = {
-        "tmp_DigID_": get_value("Dig ID"),
+        "tmp_DigID_": get_value("dig_id"),
         "tmp_revNum": revision,
-        "tmp_pipNme": get_value("Pipeline Name"),
-        "tmp_pipeOD": get_value("Pipe OD"),
-        "tmp_pipeNWT": get_value("Pipe NWT"),
-        "tmp_mop": get_value("MOP"),
-        "tmp_sep": get_value("SEP"),
-        "tmp_Lat": get_value("Latitude"),
-        "tmp_Lon": get_value("Longitude"),
-        "tmp_mp_": get_value("Milepost"),
-        "tmp_tarGWsPipYer": get_value("Pipe Year"),
-        "tmp_tarGWsPipGrd": get_value("Pipe Grade"),
-        "tmp_ILI_Run_Name": get_value("ILI Run Name"),
-        "tmp_ILI_Run_Name_Acc": get_value("ILI Run Accuracy"),
-        "US_AGM": get_value("Upstream AGM"),
-        "DS_AGM": get_value("Downstream AGM"),
+        "tmp_pipNme": get_value("pipeline_name"),
+        "tmp_pipeOD": get_value("pipe_od"),
+        "tmp_pipeNWT": get_value("pipe_nwt"),
+        "tmp_mop": get_value("mop"),
+        "tmp_sep": get_value("sep"),
+        "tmp_Lat": get_value("latitude"),
+        "tmp_Lon": get_value("longitude"),
+        "tmp_mp_": get_value("milepost"),
+        "tmp_tarGWsPipYer": get_value("pipe_year"),
+        "tmp_tarGWsPipGrd": get_value("pipe_grade"),
+        "tmp_ILI_Run_Name": get_value("ili_run_name"),
+        "tmp_ILI_Run_Name_Acc": get_value("ili_run_accuracy"),
+        "US_AGM": get_value("upstream_agm"),
+        "DS_AGM": get_value("downstream_agm"),
         "tmp_numExv": excavation_num,
     }
     
@@ -480,28 +454,27 @@ def populate_excavation_summary(wb, mdl_row: pd.Series, mdl_col_map: Dict[str, s
             return val if pd.notna(val) else "-"
         return "-"
     
-    # Get active sheet
-    ws = wb.active
-    
     # Assessment section
     exv_num_cell = get_cell_from_named_range(wb, "tmp_numExv_num")
     if exv_num_cell:
+        ws = exv_num_cell.parent
         row = exv_num_cell.row
         col = exv_num_cell.column
         ws.cell(row, col).value = f"Excavation #{excavation_num}"
-        ws.cell(row + 1, col).value = get_value("Assessment Length")
-        ws.cell(row + 2, col).value = get_value("Start Assessment")
-        ws.cell(row + 3, col).value = get_value("End Assessment")
+        ws.cell(row + 1, col).value = get_value("assessment_length")
+        ws.cell(row + 2, col).value = get_value("start_assessment")
+        ws.cell(row + 3, col).value = get_value("end_assessment")
     
     # Exposure section
     exp_num_cell = get_cell_from_named_range(wb, "tmp_numExp_num")
     if exp_num_cell:
+        ws = exp_num_cell.parent
         row = exp_num_cell.row
         col = exp_num_cell.column
         ws.cell(row, col).value = f"Excavation #{excavation_num}"
-        ws.cell(row + 1, col).value = get_value("Exposure Length")
-        ws.cell(row + 2, col).value = get_value("Start Exposure")
-        ws.cell(row + 3, col).value = get_value("End Exposure")
+        ws.cell(row + 1, col).value = get_value("exposure_length")
+        ws.cell(row + 2, col).value = get_value("start_exposure")
+        ws.cell(row + 3, col).value = get_value("end_exposure")
 
 
 def populate_feature_table(wb, ili_datasets: List[Dict[str, Any]], excavation_num: int):
@@ -518,13 +491,11 @@ def populate_feature_table(wb, ili_datasets: List[Dict[str, Any]], excavation_nu
             - format: Vendor format (TDW, Rosen-MFLA, etc.)
         excavation_num: Excavation number
     """
-    ws = wb.active
-    
     # Find starting row
     start_row_cell = get_cell_from_named_range(wb, "tmp_feaIDs_row")
     if not start_row_cell:
         return
-    
+    ws = start_row_cell.parent
     current_row = start_row_cell.row + 2
     
     # Helper for ILI values
@@ -564,8 +535,8 @@ def populate_feature_table(wb, ili_datasets: List[Dict[str, Any]], excavation_nu
             is_target = ili_idx in target_indices
             
             # Values
-            feat_id = get_ili_value(ili_row, ili_col_map, "Feature ID")
-            chainage = get_ili_value(ili_row, ili_col_map, "ILI Chainage")
+            feat_id = get_ili_value(ili_row, ili_col_map, "feature_id")
+            chainage = get_ili_value(ili_row, ili_col_map, "distance")
             
             # Calculate distance from TGW
             dist_from_tgw = "-"
@@ -575,12 +546,12 @@ def populate_feature_table(wb, ili_datasets: List[Dict[str, Any]], excavation_nu
             # Set values
             ws.cell(current_row, 1).value = str(feat_id)
             ws.cell(current_row, 2).value = excavation_num
-            ws.cell(current_row, 3).value = get_ili_value(ili_row, ili_col_map, "Feature Type")
-            ws.cell(current_row, 4).value = get_ili_value(ili_row, ili_col_map, "Feature Description")
-            ws.cell(current_row, 5).value = get_ili_value(ili_row, ili_col_map, "Feature Depth")
-            ws.cell(current_row, 6).value = get_ili_value(ili_row, ili_col_map, "Feature Length")
-            ws.cell(current_row, 7).value = get_ili_value(ili_row, ili_col_map, "Feature Width")
-            ws.cell(current_row, 8).value = get_ili_value(ili_row, ili_col_map, "Feature Orientation")
+            ws.cell(current_row, 3).value = get_ili_value(ili_row, ili_col_map, "feature_type")
+            ws.cell(current_row, 4).value = get_ili_value(ili_row, ili_col_map, "feature_desc")
+            ws.cell(current_row, 5).value = get_ili_value(ili_row, ili_col_map, "depth")
+            ws.cell(current_row, 6).value = get_ili_value(ili_row, ili_col_map, "length")
+            ws.cell(current_row, 7).value = get_ili_value(ili_row, ili_col_map, "width")
+            ws.cell(current_row, 8).value = get_ili_value(ili_row, ili_col_map, "orientation")
             ws.cell(current_row, 9).value = chainage
             ws.cell(current_row, 10).value = dist_from_tgw
             
@@ -614,29 +585,36 @@ def convert_excel_to_pdf(excel_path: str, pdf_path: str) -> bool:
     Returns:
         True if successful, False otherwise
     """
+    excel = None
+    workbook = None
     try:
         # Try Windows COM automation (best quality)
         import win32com.client
-        
+
         excel = win32com.client.Dispatch("Excel.Application")
         excel.Visible = False
         excel.DisplayAlerts = False
-        
-        wb = excel.Workbooks.Open(str(Path(excel_path).absolute()))
-        wb.ActiveSheet.ExportAsFixedFormat(0, str(Path(pdf_path).absolute()))
-        wb.Close(False)
-        excel.Quit()
-        
+
+        workbook = excel.Workbooks.Open(str(Path(excel_path).absolute()))
+        workbook.ExportAsFixedFormat(0, str(Path(pdf_path).absolute()))
         return True
     except ImportError:
-        # Fallback: Copy Excel as PDF placeholder
-        # Note: This won't create actual PDF, just copy the Excel
-        # For production, consider weasyprint or reportlab
         logger.warning(f"win32com not available. PDF conversion skipped for {excel_path}")
         return False
     except Exception as e:
         logger.error(f"Error converting Excel to PDF: {type(e).__name__}: {e}")
         return False
+    finally:
+        if workbook is not None:
+            try:
+                workbook.Close(False)
+            except Exception:
+                pass
+        if excel is not None:
+            try:
+                excel.Quit()
+            except Exception:
+                pass
 
 
 # ============================================================================
@@ -658,7 +636,7 @@ def get_target_gw_chainage(mdl_row: pd.Series, ili_df: pd.DataFrame,
         Chainage value or None if not found
     """
     # Get TGW ID from MDL
-    tgw_col = mdl_col_map.get("Target Girth Weld")
+    tgw_col = mdl_col_map.get("target_girth_weld")
     if not tgw_col or tgw_col not in mdl_row.index:
         return None
         
@@ -666,25 +644,30 @@ def get_target_gw_chainage(mdl_row: pd.Series, ili_df: pd.DataFrame,
     if pd.isna(tgw_id):
         return None
         
-    tgw_id_str = str(tgw_id).strip()
-    
+    tgw_id_str = _normalize_match_value(tgw_id)
+
     # Columns to search in ILI
-    search_cols = ["Joint Number", "Girth Weld", "Feature ID", "Feature Description"]
-    
-    for col_key in search_cols:
-        col_name = ili_col_map.get(col_key)
+    search_columns = [
+        ili_col_map.get("joint_number"),
+        ili_col_map.get("feature_id"),
+        ili_col_map.get("feature_desc"),
+        find_column_names(ili_df, ["Girth Weld", "Girth Weld No", "GWD", "GW"]),
+    ]
+
+    chainage_col = ili_col_map.get("distance")
+    if not chainage_col or chainage_col not in ili_df.columns:
+        return None
+
+    for col_name in search_columns:
         if not col_name or col_name not in ili_df.columns:
             continue
-            
-        # Search for exact match
-        # We convert column to string for comparison
-        matches = ili_df[ili_df[col_name].astype(str).str.strip() == tgw_id_str]
-        
+
+        matches = ili_df[ili_df[col_name].apply(_normalize_match_value) == tgw_id_str]
         if not matches.empty:
-            chainage_col = ili_col_map.get("ILI Chainage")
-            if chainage_col and chainage_col in matches.columns:
-                return float(matches.iloc[0][chainage_col])
-                
+            chainage = _coerce_numeric(matches.iloc[0][chainage_col])
+            if chainage is not None:
+                return chainage
+
     return None
 
 
@@ -704,32 +687,32 @@ def filter_ili_data_by_range(ili_df: pd.DataFrame, target_gw_chainage: float,
     Returns:
         Filtered ILI DataFrame
     """
-    chainage_col = ili_col_map.get("ILI Chainage")
+    chainage_col = ili_col_map.get("distance")
     if not chainage_col or chainage_col not in ili_df.columns:
         return ili_df
         
     # Get assessment lengths from MDL
-    start_assess_col = mdl_col_map.get("Start Assessment")
-    end_assess_col = mdl_col_map.get("End Assessment")
+    start_assess_col = mdl_col_map.get("start_assessment")
+    end_assess_col = mdl_col_map.get("end_assessment")
     
     start_offset = 30.0  # Default 30m
     end_offset = 30.0    # Default 30m
     
     if start_assess_col and start_assess_col in mdl_row.index:
-        val = mdl_row[start_assess_col]
-        if pd.notna(val) and isinstance(val, (int, float)):
-            start_offset = abs(float(val))
-            
+        val = _coerce_numeric(mdl_row[start_assess_col])
+        if val is not None:
+            start_offset = abs(val)
+
     if end_assess_col and end_assess_col in mdl_row.index:
-        val = mdl_row[end_assess_col]
-        if pd.notna(val) and isinstance(val, (int, float)):
-            end_offset = abs(float(val))
-            
+        val = _coerce_numeric(mdl_row[end_assess_col])
+        if val is not None:
+            end_offset = abs(val)
+
     min_chainage = target_gw_chainage - start_offset
     max_chainage = target_gw_chainage + end_offset
-    
-    # Filter
-    mask = (ili_df[chainage_col] >= min_chainage) & (ili_df[chainage_col] <= max_chainage)
+
+    chainage_numeric = pd.to_numeric(ili_df[chainage_col], errors="coerce")
+    mask = (chainage_numeric >= min_chainage) & (chainage_numeric <= max_chainage)
     return ili_df[mask].copy()
 
 
@@ -748,6 +731,11 @@ def generate_dig_packages(mdl_content: bytes, ili_contents: List[bytes], templat
     Returns:
         BytesIO object containing the ZIP file
     """
+    if len(ili_contents) != len(ili_formats):
+        raise ValueError(
+            f"ILI file count ({len(ili_contents)}) does not match format count ({len(ili_formats)})."
+        )
+
     # Parse MDL
     logger.info(f"generate_dig_packages: Parsing MDL, {len(ili_contents)} ILI files, formats={ili_formats}")
     mdl_df, mdl_col_map = parse_mdl_file(mdl_content)
@@ -782,12 +770,21 @@ def generate_dig_packages(mdl_content: bytes, ili_contents: List[bytes], templat
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
         
+        summary = {
+            "revision": revision,
+            "dig_ids_requested": dig_ids,
+            "generated": [],
+            "skipped": [],
+            "ili_files": [{"format": item["format"], "rows": len(item["df"])} for item in ili_data_parsed],
+        }
+
         # Process each dig ID
         for excavation_num, dig_id in enumerate(dig_ids, start=1):
             # Filter MDL for current dig ID
-            dig_id_col = mdl_col_map.get("Dig ID")
+            dig_id_col = mdl_col_map.get("dig_id")
             mdl_features = mdl_df[mdl_df[dig_id_col] == dig_id]
             if mdl_features.empty:
+                summary["skipped"].append({"dig_id": dig_id, "reason": "No MDL rows matched dig ID after parsing"})
                 continue
             
             mdl_first_row = mdl_features.iloc[0]
@@ -826,6 +823,7 @@ def generate_dig_packages(mdl_content: bytes, ili_contents: List[bytes], templat
                     })
             
             if not ili_datasets_for_dig:
+                summary["skipped"].append({"dig_id": dig_id, "reason": "No ILI rows found in assessment range"})
                 continue
 
             # Load and populate template
@@ -842,7 +840,21 @@ def generate_dig_packages(mdl_content: bytes, ili_contents: List[bytes], templat
             # Convert to PDF
             pdf_filename = f"{dig_id}_DP_R{revision}.pdf"
             pdf_path = temp_path / pdf_filename
-            convert_excel_to_pdf(str(excel_path), str(pdf_path))
+            pdf_generated = convert_excel_to_pdf(str(excel_path), str(pdf_path))
+            summary["generated"].append({
+                "dig_id": dig_id,
+                "excavation_num": excavation_num,
+                "excel_file": excel_filename,
+                "pdf_file": pdf_filename if pdf_generated else None,
+                "pdf_generated": pdf_generated,
+                "ili_dataset_count": len(ili_datasets_for_dig),
+            })
+
+        if not summary["generated"]:
+            raise ValueError("No dig packages were generated. Check MDL mapping and ILI matching results.")
+
+        summary_path = temp_path / f"Dig_Package_Generation_Summary_R{revision}.json"
+        summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
         
         # Create ZIP
         zip_buffer = io.BytesIO()
