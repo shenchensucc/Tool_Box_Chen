@@ -16,7 +16,7 @@ import tempfile
 import zipfile
 import uuid
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 from backend.logging_config import get_logger, log_params, log_error
@@ -147,6 +147,42 @@ def save_temp_file(upload_file: UploadFile) -> Path:
         content = upload_file.file.read()
         tmp.write(content)
         return Path(tmp.name)
+
+
+def _enrich_summary_with_table_evidence(summary: List[Dict[str, Any]], readings: List[Any]) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    Attach parser provenance fields to summary rows and return unique table evidence payload.
+    """
+    by_circuit_cml = {}
+    for r in readings:
+        by_circuit_cml[(str(r.circuit_id), str(r.cml_id))] = r
+
+    evidence_by_id: Dict[str, Dict[str, Any]] = {}
+    enriched = []
+    for row in summary:
+        row_copy = dict(row)
+        circuit = str(row_copy.get("Circuit", "")).strip()
+        cml = str(row_copy.get("CML", "")).strip()
+        match = by_circuit_cml.get((circuit, cml))
+
+        row_copy["Source File"] = getattr(match, "source_file", "") or ""
+        row_copy["Source Page"] = getattr(match, "source_page", "") or ""
+        row_copy["Extraction Method"] = getattr(match, "extraction_method", "") or ""
+        row_copy["Table Image ID"] = getattr(match, "table_image_id", "") or ""
+
+        table_image_id = getattr(match, "table_image_id", "") or ""
+        table_image_base64 = getattr(match, "table_image_base64", "") or ""
+        if table_image_id and table_image_base64 and table_image_id not in evidence_by_id:
+            evidence_by_id[table_image_id] = {
+                "table_image_id": table_image_id,
+                "source_file": getattr(match, "source_file", "") or "",
+                "source_page": getattr(match, "source_page", "") or "",
+                "extraction_method": getattr(match, "extraction_method", "") or "",
+                "image_base64": table_image_base64,
+            }
+        enriched.append(row_copy)
+
+    return enriched, list(evidence_by_id.values())
 
 
 def calculate_stats(series: pd.Series) -> ColumnStats:
@@ -1094,6 +1130,7 @@ async def read_inspection_reports(
             output_path="",
             use_placeholder_when_missing=True,
         )
+        summary, table_evidence = _enrich_summary_with_table_evidence(summary, readings)
 
         logger.info(f"[tml/inspection-report/read] Read {len(pdf_files)} PDFs, {len(summary)} CML(s)")
 
@@ -1102,6 +1139,7 @@ async def read_inspection_reports(
             message=f"Read {len(pdf_files)} PDF(s), extracted **{len(summary)}** CML(s). Use Generate Dataloader to create Excel.",
             records_count=records_count,
             summary=summary,
+            table_evidence=table_evidence,
         )
     except Exception as e:
         log_error(logger, "tml/inspection-report/read", e)
@@ -1177,12 +1215,14 @@ async def process_inspection_reports(
             template_path=template_path,
             use_placeholder_when_missing=True,
         )
+        summary, table_evidence = _enrich_summary_with_table_evidence(summary, readings)
 
         if records_count == 0:
             return InspectionReportResponse(
                 success=True,
                 message="No records to write.",
                 summary=summary,
+                table_evidence=table_evidence,
                 records_count=0,
             )
 
@@ -1203,6 +1243,7 @@ async def process_inspection_reports(
             output_filename="Inspection_Report_Dataloader.xlsx",
             records_count=records_count,
             summary=summary,
+            table_evidence=table_evidence,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

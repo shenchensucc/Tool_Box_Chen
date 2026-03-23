@@ -9,6 +9,7 @@ Circuit format: NN-NNNXX (e.g. 52-021K); "1-2", "2-3" are breakdown drawing numb
 """
 
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -21,6 +22,10 @@ import pdfplumber
 import pymupdf
 
 _logger = logging.getLogger(__name__)
+_EASYOCR_READER = None
+_EASYOCR_INIT_FAILED = False
+_PADDLEOCR_READER = None
+_PADDLEOCR_INIT_FAILED = False
 
 
 @dataclass
@@ -34,6 +39,10 @@ class ExtractedReading:
     all_readings: List[float] = field(default_factory=list)
     source_file: str = ""
     extraction_method: str = "pdfplumber"  # "pdfplumber" or "ocr"
+    source_page: Optional[int] = None  # 1-based page index
+    table_bbox: Optional[Tuple[float, float, float, float]] = None
+    table_image_id: str = ""
+    table_image_base64: str = ""
 
 
 def _parse_date(date_str: str) -> Optional[str]:
@@ -314,6 +323,94 @@ def _get_summary_page_indices(pdf_path: Path) -> Optional[List[int]]:
     return summary_pages if summary_pages else None
 
 
+def _iter_tables_with_bbox(page):
+    """
+    Yield tuples of (rows, bbox) for a pdfplumber page.
+    BBox format is (x0, top, x1, bottom) in PDF points.
+    """
+    settings = {"vertical_strategy": "text", "horizontal_strategy": "text"}
+    try:
+        for table in page.find_tables(table_settings=settings):
+            rows = table.extract() or []
+            bbox = None
+            if getattr(table, "bbox", None):
+                try:
+                    bbox = tuple(float(v) for v in table.bbox)
+                except Exception:
+                    bbox = None
+            yield rows, bbox
+        return
+    except Exception:
+        pass
+
+    for rows in page.extract_tables(settings) or []:
+        yield rows, None
+
+
+def _attach_table_images(pdf_path: Path, results: List[ExtractedReading]) -> List[ExtractedReading]:
+    """
+    Render table crops as base64 PNG for extracted rows that include page+bbox context.
+    Reuses one image per unique (page, bbox) to support multi-PDF and multi-table validation.
+    """
+    indexed = {}
+    for r in results:
+        if r.source_page and r.table_bbox:
+            key = (int(r.source_page), tuple(round(v, 2) for v in r.table_bbox))
+            indexed[key] = r.table_bbox
+    if not indexed:
+        return results
+
+    evidence_by_key = {}
+    try:
+        doc = pymupdf.open(pdf_path)
+    except Exception:
+        return results
+
+    try:
+        for (page_number, rounded_bbox), raw_bbox in indexed.items():
+            page_idx = page_number - 1
+            if page_idx < 0 or page_idx >= len(doc):
+                continue
+
+            page = doc[page_idx]
+            x0, y0, x1, y1 = raw_bbox
+            margin = 8
+            clip = pymupdf.Rect(x0 - margin, y0 - margin, x1 + margin, y1 + margin)
+            clip &= page.rect
+            if clip.is_empty:
+                continue
+
+            try:
+                pix = page.get_pixmap(matrix=pymupdf.Matrix(2.0, 2.0), clip=clip, alpha=False)
+                png_bytes = pix.tobytes(output="png")
+                table_id_seed = f"{page_number}:{rounded_bbox}"
+                table_id = f"tbl_{hashlib.md5(table_id_seed.encode('utf-8')).hexdigest()[:10]}"
+                evidence_by_key[(page_number, rounded_bbox)] = (
+                    table_id,
+                    base64.b64encode(png_bytes).decode("ascii"),
+                )
+            except Exception:
+                continue
+    finally:
+        doc.close()
+
+    for r in results:
+        if not (r.source_page and r.table_bbox):
+            continue
+        key = (int(r.source_page), tuple(round(v, 2) for v in r.table_bbox))
+        if key in evidence_by_key:
+            r.table_image_id, r.table_image_base64 = evidence_by_key[key]
+    return results
+
+
+def _finalize_results(pdf_path: Path, source_filename: str, results: List[ExtractedReading]) -> List[ExtractedReading]:
+    """Attach source filename and optional table images before returning results."""
+    for r in results:
+        if not r.source_file:
+            r.source_file = source_filename
+    return _attach_table_images(pdf_path, results)
+
+
 def _parse_ut_report_summary_table(
     pdf_path: Path, circuit_base: str, cml_bases: List[str], date_str: str
 ) -> List[ExtractedReading]:
@@ -332,8 +429,7 @@ def _parse_ut_report_summary_table(
             if page_idx >= len(pdf.pages):
                 continue
             page = pdf.pages[page_idx]
-            tables = page.extract_tables({"vertical_strategy": "text", "horizontal_strategy": "text"})
-            for table in tables or []:
+            for table, table_bbox in _iter_tables_with_bbox(page):
                 for row in table:
                     if not row:
                         continue
@@ -405,6 +501,8 @@ def _parse_ut_report_summary_table(
                                 min_reading=reading,
                                 all_readings=[reading],
                                 extraction_method="pdfplumber",
+                                source_page=page_idx + 1,
+                                table_bbox=table_bbox,
                             )
                         )
     return results
@@ -428,8 +526,7 @@ def _parse_acuren_results_table(
             page_text = page.extract_text() or ""
             if not _should_process_page(page_text, summary_page_indices, page_idx):
                 continue
-            tables = page.extract_tables({"vertical_strategy": "text", "horizontal_strategy": "text"})
-            for table in tables or []:
+            for table, table_bbox in _iter_tables_with_bbox(page):
                 for row in table:
                     if not row:
                         continue
@@ -509,6 +606,8 @@ def _parse_acuren_results_table(
                                         min_reading=reading,
                                         all_readings=[reading],
                                         extraction_method="pdfplumber",
+                                        source_page=page_idx + 1,
+                                        table_bbox=table_bbox,
                                     )
                                 )
     return results
@@ -528,8 +627,7 @@ def _parse_single_cml_permissive(
             page_text = page.extract_text() or ""
             if not _should_process_page(page_text, summary_page_indices, page_idx):
                 continue
-            tables = page.extract_tables({"vertical_strategy": "text", "horizontal_strategy": "text"})
-            for table in tables or []:
+            for table, table_bbox in _iter_tables_with_bbox(page):
                 for row in table:
                     if not row:
                         continue
@@ -586,6 +684,8 @@ def _parse_single_cml_permissive(
                                 min_reading=reading,
                                 all_readings=[reading],
                                 extraction_method="pdfplumber",
+                                source_page=page_idx + 1,
+                                table_bbox=table_bbox,
                             )
                         )
     return results
@@ -617,8 +717,7 @@ def _parse_generic_zone_table(
             ]
             if len(page_cmls) == 1:
                 current_cml_base = page_cmls[0]
-            tables = page.extract_tables({"vertical_strategy": "text", "horizontal_strategy": "text"})
-            for table in tables or []:
+            for table, table_bbox in _iter_tables_with_bbox(page):
                 for row in table:
                     if not row:
                         continue
@@ -736,6 +835,8 @@ def _parse_generic_zone_table(
                                     min_reading=min_reading,
                                     all_readings=readings_in_row,
                                     extraction_method="pdfplumber",
+                                    source_page=page_idx + 1,
+                                    table_bbox=table_bbox,
                                 )
                             )
 
@@ -781,19 +882,27 @@ def _extract_readings_from_text(pdf_path: Path) -> List[float]:
 
 
 def _preprocess_for_ocr(img):
-    """Enhance contrast and sharpen for better decimal digit recognition."""
-    try:
-        from PIL import ImageEnhance, ImageFilter
+    """Enhance image for better OCR on inspection report tables.
 
-        # Convert to RGB if needed
-        if img.mode != "RGB":
-            img = img.convert("RGB")
-        # Slight contrast boost helps faint table text
-        enhancer = ImageEnhance.Contrast(img)
-        img = enhancer.enhance(1.2)
-        # Sharpen to clarify digit edges (0.358 vs 0.38)
-        img = img.filter(ImageFilter.SHARPEN)
-        return img
+    Pipeline: grayscale → autocontrast → unsharp mask.
+    Grayscale removes color noise from scanned pages.
+    Autocontrast normalises exposure across different scan qualities.
+    UnsharpMask clarifies digit edges (0.285 vs 0.28, 0.358 vs 0.35) without
+    introducing halation artefacts that a simple SHARPEN filter can cause.
+    """
+    try:
+        from PIL import ImageEnhance, ImageFilter, ImageOps
+
+        # Grayscale gives a uniform, noise-reduced base for both Tesseract and EasyOCR/Paddle
+        gray = img.convert("L")
+        # Autocontrast: stretches histogram to [0, 255]; cutoff=1 clips 1% of dark/light pixels
+        # to avoid a single dark border or white glare dominating the normalisation.
+        gray = ImageOps.autocontrast(gray, cutoff=1)
+        # UnsharpMask: radius controls the blur kernel; percent is the boost strength;
+        # threshold avoids sharpening already-sharp edges twice.
+        gray = gray.filter(ImageFilter.UnsharpMask(radius=1, percent=180, threshold=3))
+        # Return RGB so pytesseract / EasyOCR / PaddleOCR all accept it without conversion.
+        return gray.convert("RGB")
     except Exception:
         return img
 
@@ -816,13 +925,14 @@ def _run_ocr_on_page(page_image: bytes, dpi: int = 300, psm: int = 6) -> str:
             pytesseract.pytesseract.tesseract_cmd = str(_win_path)
 
         img = Image.open(io.BytesIO(page_image))
-        # Rescale if small: Tesseract prefers 300 DPI; capital letters ~30px height
+        # Rescale if small: Tesseract needs ≥1400 px per side for reliable 3-decimal readings.
         w, h = img.size
-        if w < 1200 or h < 1200:  # ~4" at 300 DPI
-            scale = max(1200 / w, 1200 / h, 1.5)
+        if w < 1400 or h < 1400:
+            scale = max(1400 / w, 1400 / h, 1.5)
             new_w, new_h = int(w * scale), int(h * scale)
             img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-        if os.getenv("INSPECTION_REPORT_OCR_PREPROCESS"):
+        # Preprocessing is on by default; set INSPECTION_REPORT_OCR_PREPROCESS=0 to disable.
+        if os.getenv("INSPECTION_REPORT_OCR_PREPROCESS", "1") != "0":
             img = _preprocess_for_ocr(img)
         config = f"--psm {psm} --oem 3"  # OEM 3 = default LSTM
         return pytesseract.image_to_string(img, config=config)
@@ -848,9 +958,9 @@ def _extract_with_ocr(pdf_path: Path) -> Tuple[str, List[float], List[str], str]
     all_readings = []
     summary_page_readings: List[float] = []  # Readings from pages that look like summary tables
 
-    ocr_dpi = 400 if os.getenv("INSPECTION_REPORT_OCR_HIGH_DPI") else 300
+    ocr_dpi = 400 if os.getenv("INSPECTION_REPORT_OCR_HIGH_DPI") else 350
     for page_idx, page in enumerate(doc):
-        # 300-400 DPI recommended for Tesseract; higher helps decimal digits
+        # 350-400 DPI recommended for Tesseract; higher helps decimal digits
         pix = page.get_pixmap(dpi=ocr_dpi)
         img_bytes = pix.tobytes(output="png")
         text = _run_ocr_on_page(img_bytes, psm=6)
@@ -890,25 +1000,27 @@ def _extract_with_ocr(pdf_path: Path) -> Tuple[str, List[float], List[str], str]
 def _extract_with_easyocr(pdf_path: Path) -> Tuple[str, List[float], List[str], str]:
     """EasyOCR extraction - often better than Tesseract on tables. No external binary."""
     try:
-        import easyocr
         import io
         import numpy as np
         from PIL import Image
     except ImportError:
         return "", [], [], ""
 
-    reader = easyocr.Reader(["en"], gpu=False, verbose=False)
+    reader = _get_easyocr_reader()
+    if reader is None:
+        return "", [], [], ""
     doc = pymupdf.open(pdf_path)
     full_text = ""
     all_readings = []
     summary_page_readings: List[float] = []
-    ocr_dpi = 400 if os.getenv("INSPECTION_REPORT_OCR_HIGH_DPI") else 300
+    ocr_dpi = 400 if os.getenv("INSPECTION_REPORT_OCR_HIGH_DPI") else 350
 
     for page_idx, page in enumerate(doc):
         pix = page.get_pixmap(dpi=ocr_dpi)
         img_bytes = pix.tobytes(output="png")
         img = Image.open(io.BytesIO(img_bytes))
-        if os.getenv("INSPECTION_REPORT_OCR_PREPROCESS"):
+        # Preprocessing is on by default; set INSPECTION_REPORT_OCR_PREPROCESS=0 to disable.
+        if os.getenv("INSPECTION_REPORT_OCR_PREPROCESS", "1") != "0":
             img = _preprocess_for_ocr(img)
         img = np.array(img)
         result = reader.readtext(img)
@@ -1045,6 +1157,19 @@ def _iter_candidate_image_segments(doc, candidate_pages: List[int]):
                 yield page_idx, xref, segment_name, resized
 
 
+def _iter_candidate_page_segments(doc, candidate_pages: List[int], dpi: int = 320):
+    """Yield full-page rendered images for candidate pages (image-first OCR path)."""
+    for page_idx in candidate_pages:
+        if page_idx < 0 or page_idx >= len(doc):
+            continue
+        try:
+            page = doc[page_idx]
+            pix = page.get_pixmap(dpi=dpi, alpha=False)
+            yield page_idx, f"page-{page_idx + 1}", "full_page", pix
+        except Exception:
+            continue
+
+
 def _extract_json_object(text: str) -> Optional[dict]:
     """Parse JSON from an LLM response that may include fences or prose."""
     if not text:
@@ -1167,6 +1292,148 @@ def _normalize_easyocr_tokens(ocr_result) -> List[dict]:
     return tokens
 
 
+def _normalize_paddleocr_tokens(ocr_result) -> List[dict]:
+    """Convert PaddleOCR output into simple positioned tokens."""
+    tokens = []
+    lines = []
+    if isinstance(ocr_result, list):
+        if ocr_result and isinstance(ocr_result[0], list) and ocr_result and ocr_result[0]:
+            # Common form: [ [ [bbox, (text, conf)], ... ] ]
+            first = ocr_result[0]
+            if first and isinstance(first[0], (list, tuple)):
+                lines = first
+        if not lines:
+            # Alternate form: [ [bbox, (text, conf)], ... ]
+            lines = ocr_result
+    for item in lines or []:
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
+            continue
+        bbox, txt_conf = item[0], item[1]
+        if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+            continue
+        text = ""
+        conf = 0.0
+        if isinstance(txt_conf, (list, tuple)) and len(txt_conf) >= 2:
+            text = str(txt_conf[0] or "").strip()
+            try:
+                conf = float(txt_conf[1])
+            except Exception:
+                conf = 0.0
+        else:
+            text = str(txt_conf or "").strip()
+        if not text:
+            continue
+        try:
+            xs = [float(p[0]) for p in bbox]
+            ys = [float(p[1]) for p in bbox]
+        except Exception:
+            continue
+        tokens.append(
+            {
+                "text": text,
+                "conf": conf,
+                "left": min(xs),
+                "right": max(xs),
+                "top": min(ys),
+                "bottom": max(ys),
+                "cy": (min(ys) + max(ys)) / 2,
+                "height": max(1.0, max(ys) - min(ys)),
+            }
+        )
+    return tokens
+
+
+def _get_easyocr_reader():
+    """Reuse a singleton EasyOCR reader to avoid heavy re-initialization."""
+    global _EASYOCR_READER, _EASYOCR_INIT_FAILED
+    if _EASYOCR_INIT_FAILED:
+        return None
+    if _EASYOCR_READER is not None:
+        return _EASYOCR_READER
+    try:
+        import easyocr
+    except ImportError:
+        _EASYOCR_INIT_FAILED = True
+        return None
+    try:
+        _EASYOCR_READER = easyocr.Reader(["en"], gpu=False, verbose=False)
+    except Exception:
+        _EASYOCR_INIT_FAILED = True
+        return None
+    return _EASYOCR_READER
+
+
+def _get_paddleocr_reader():
+    """Reuse a singleton PaddleOCR reader. Better for grid/table text in many reports."""
+    global _PADDLEOCR_READER, _PADDLEOCR_INIT_FAILED
+    if _PADDLEOCR_INIT_FAILED:
+        return None
+    if _PADDLEOCR_READER is not None:
+        return _PADDLEOCR_READER
+    try:
+        from paddleocr import PaddleOCR
+    except Exception:
+        # Catches ImportError but also DLL/binary errors (FileNotFoundError on Windows
+        # when paddle's native libs are missing or incompatible). Mark as failed so we
+        # never retry — the failed import is slow and prints noisy warnings.
+        _PADDLEOCR_INIT_FAILED = True
+        return None
+    try:
+        _PADDLEOCR_READER = PaddleOCR(
+            use_angle_cls=True,
+            lang="en",
+            show_log=False,
+        )
+    except Exception:
+        _PADDLEOCR_INIT_FAILED = True
+        return None
+    return _PADDLEOCR_READER
+
+
+def _run_structured_ocr_on_image(img_np):
+    """
+    Return normalized OCR tokens from preferred structured OCR engine.
+    Engine order:
+    - INSPECTION_REPORT_STRUCTURED_OCR_ENGINE=paddle: PaddleOCR only
+    - INSPECTION_REPORT_STRUCTURED_OCR_ENGINE=easyocr: EasyOCR only
+    - default/auto: PaddleOCR first, then EasyOCR fallback
+    """
+    engine = os.getenv("INSPECTION_REPORT_STRUCTURED_OCR_ENGINE", "auto").strip().lower()
+    token_sets: List[List[dict]] = []
+
+    if engine in ("paddle", "auto"):
+        reader = _get_paddleocr_reader()
+        if reader is not None:
+            try:
+                paddle_result = reader.ocr(img_np, cls=True)
+                paddle_tokens = _normalize_paddleocr_tokens(paddle_result)
+                if paddle_tokens:
+                    token_sets.append(paddle_tokens)
+                    if engine == "paddle":
+                        return paddle_tokens
+            except Exception:
+                pass
+
+    if engine in ("easyocr", "auto"):
+        reader = _get_easyocr_reader()
+        if reader is not None:
+            try:
+                easy_result = reader.readtext(img_np, detail=1)
+                easy_tokens = _normalize_easyocr_tokens(easy_result)
+                if easy_tokens:
+                    token_sets.append(easy_tokens)
+                    if engine == "easyocr":
+                        return easy_tokens
+            except Exception:
+                pass
+
+    # In auto mode, prefer richer token output (usually better row reconstruction).
+    if token_sets:
+        token_sets.sort(key=len, reverse=True)
+        return token_sets[0]
+    return []
+
+
 def _extract_structured_rows_from_easyocr_tokens(
     tokens: List[dict],
     source_filename: str,
@@ -1187,9 +1454,14 @@ def _extract_structured_rows_from_easyocr_tokens(
         return []
 
     circuit_id = fallback_circuit or "Unknown"
-    circuit_match = re.search(r"\b\d{2,3}-\d{3}[A-Z]?(?:\s+\d+-\d+)?\b", joined_text)
-    if circuit_match:
-        circuit_id = _extract_circuit_base(circuit_match.group(0))
+    # Only attempt OCR-based circuit extraction when fallback is absent or unknown.
+    # Report numbers embedded in page text (e.g. "UT-ROBJOS-26-063") contain patterns
+    # like "26-063" that match the circuit regex but are NOT the actual circuit ID.
+    # When pdfplumber already resolved the circuit (e.g. "52-001G"), trust that over OCR.
+    if not fallback_circuit or fallback_circuit in ("Unknown", ""):
+        circuit_match = re.search(r"\b\d{2,3}-\d{3}[A-Z]?(?:\s+\d+-\d+)?\b", joined_text)
+        if circuit_match:
+            circuit_id = _extract_circuit_base(circuit_match.group(0))
 
     cml_base = None
     for expected in fallback_cml_ids or []:
@@ -1289,11 +1561,18 @@ def _extract_structured_rows_from_easyocr_tokens(
                 unique_sections.append(section_text)
                 seen_sections.add(section_text)
 
+        # Minimum OCR confidence for numeric reading tokens.
+        # 0.6 rejects clear noise while allowing marginally blurry scans.
+        # Set INSPECTION_REPORT_OCR_MIN_CONF=0 to disable confidence gating.
+        _min_conf = float(os.getenv("INSPECTION_REPORT_OCR_MIN_CONF", "0.6"))
+
         readings_in_row = []
         for token in row_tokens:
             if token["left"] + 10 < reading_start_x:
                 continue
             if re.fullmatch(r"0\.\d{2,4}", token["text"]):
+                if _min_conf > 0 and token.get("conf", 1.0) < _min_conf:
+                    continue  # discard low-confidence decimal token (likely OCR noise)
                 try:
                     value = float(token["text"])
                 except ValueError:
@@ -1357,32 +1636,33 @@ def _extract_structured_with_local_ocr(
 ) -> List[ExtractedReading]:
     """Local structured OCR for image-heavy reports using embedded summary images."""
     try:
-        import easyocr
         import io
         import numpy as np
         from PIL import Image
     except ImportError:
         return []
 
-    candidate_pages = _get_candidate_vision_pages(pdf_path, max_pages=5)
+    candidate_pages = _get_candidate_vision_pages(pdf_path, max_pages=6)
     if not candidate_pages:
         return []
 
-    try:
-        reader = easyocr.Reader(["en"], gpu=False, verbose=False)
-    except Exception:
+    # Require at least one OCR backend.
+    if _get_paddleocr_reader() is None and _get_easyocr_reader() is None:
         return []
 
     doc = pymupdf.open(pdf_path)
     results: List[ExtractedReading] = []
     try:
+        import io
+
+        # Pass 1: embedded report images (high precision on image-based summary tables).
         for page_idx, xref, segment_name, segment in _iter_candidate_image_segments(doc, candidate_pages):
             try:
-                ocr_result = reader.readtext(np.array(segment), detail=1)
+                tokens = _run_structured_ocr_on_image(np.array(segment))
             except Exception:
                 continue
             page_results = _extract_structured_rows_from_easyocr_tokens(
-                _normalize_easyocr_tokens(ocr_result),
+                tokens,
                 source_filename=source_filename or pdf_path.name,
                 fallback_circuit=fallback_circuit,
                 fallback_date=fallback_date,
@@ -1395,10 +1675,70 @@ def _extract_structured_with_local_ocr(
                 min_expected_rows = max(5, len(expected_bases) * 2 + 1) if expected_bases else 5
                 if expected_bases and expected_bases.issubset(found_bases) and len(results) >= min_expected_rows:
                     return _validate_and_dedupe_before_export(results)
+
+        # Pass 2: full page rendered as image (helps when table is vector PDF text and not embedded image).
+        for page_idx, xref, segment_name, pix in _iter_candidate_page_segments(doc, candidate_pages):
+            try:
+                segment = Image.open(io.BytesIO(pix.tobytes(output="png"))).convert("RGB")
+                tokens = _run_structured_ocr_on_image(np.array(segment))
+            except Exception:
+                continue
+            page_results = _extract_structured_rows_from_easyocr_tokens(
+                tokens,
+                source_filename=source_filename or pdf_path.name,
+                fallback_circuit=fallback_circuit,
+                fallback_date=fallback_date,
+                fallback_cml_ids=fallback_cml_ids,
+            )
+            if page_results:
+                results.extend(page_results)
     finally:
         doc.close()
 
-    return _validate_and_dedupe_before_export(results) if results else []
+    finalized = _validate_and_dedupe_before_export(results) if results else []
+    # Guard against weak OCR matches: require at least a few row-level readings.
+    if finalized and len(finalized) < 3:
+        return []
+    return finalized
+
+
+def _supplement_with_pdfplumber(
+    pdf_path: Path,
+    circuit_base: str,
+    cml_ids: List[str],
+    date_str: str,
+    primary_results: List[ExtractedReading],
+) -> List[ExtractedReading]:
+    """Fill in zones from pdfplumber that the structured OCR pass missed.
+
+    OCR can miss zone 1 or other rows when they are close to the header or lack
+    explicit CML tokens.  pdfplumber-based parsers often recover these rows since
+    they work from PDF text rather than rendered images.  We only ADD rows, never
+    replace: if OCR already found a zone, the OCR reading is kept.
+    """
+    primary_keys = {(r.circuit_id, r.cml_id) for r in primary_results}
+    plumber: List[ExtractedReading] = []
+    try:
+        if len(cml_ids) == 1 and _get_summary_page_indices(pdf_path):
+            plumber = _parse_ut_report_summary_table(pdf_path, circuit_base, cml_ids, date_str)
+        if not plumber:
+            plumber = _parse_acuren_results_table(pdf_path, circuit_base, cml_ids, date_str)
+        if not plumber and len(cml_ids) == 1:
+            plumber = _parse_single_cml_permissive(pdf_path, circuit_base, cml_ids[0], date_str)
+        if not plumber:
+            plumber = _parse_generic_zone_table(pdf_path, circuit_base, cml_ids, date_str)
+    except Exception:
+        pass
+
+    if not plumber:
+        return primary_results
+
+    supplemented = list(primary_results)
+    for r in plumber:
+        if (r.circuit_id, r.cml_id) not in primary_keys:
+            supplemented.append(r)
+
+    return _validate_and_dedupe_before_export(supplemented)
 
 
 def _extract_structured_with_llm_vision(
@@ -1612,6 +1952,33 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
     if not cml_ids:
         cml_ids = _extract_cml_ids_from_filename(source_filename)
 
+    # Image-first strategy: try structured OCR from page images before PDF table parsing.
+    # This improves accuracy for mixed/vector/scanned reports where PDF table text is fragmented.
+    if os.getenv("INSPECTION_REPORT_IMAGE_FIRST", "1") != "0":
+        image_first_results = _extract_structured_with_local_ocr(
+            pdf_path,
+            source_filename=source_filename,
+            fallback_circuit=_extract_circuit_base(circuit or "Unknown"),
+            fallback_date=date or "",
+            fallback_cml_ids=cml_ids,
+        )
+        if image_first_results:
+            if cml_ids:
+                expected = set(cml_ids)
+                found = {r.cml_id.split("-", 1)[0] for r in image_first_results if "-" in r.cml_id}
+                if found & expected:
+                    # Supplement OCR results with pdfplumber for any zones OCR missed
+                    # (e.g. zone 1 rows that appear very close to the header in the image).
+                    merged = _supplement_with_pdfplumber(
+                        pdf_path, _extract_circuit_base(circuit or "Unknown"), cml_ids, date or "", image_first_results
+                    )
+                    return _finalize_results(pdf_path, source_filename, merged)
+            elif len(image_first_results) >= 3:
+                merged = _supplement_with_pdfplumber(
+                    pdf_path, _extract_circuit_base(circuit or "Unknown"), cml_ids, date or "", image_first_results
+                )
+                return _finalize_results(pdf_path, source_filename, merged)
+
     # Try OCR when: no readings, very little text, or suspicious 0.0-only readings (image-based table)
     _suspicious_readings = all_readings and all(r == 0.0 for r in all_readings)
     _try_ocr = not all_readings or len(full_text) < 100 or _suspicious_readings
@@ -1627,7 +1994,9 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
                 fallback_cml_ids=cml_ids,
             )
             if structured_local_results:
-                return [replace(r, source_file=source_filename) for r in structured_local_results]
+                return _finalize_results(
+                    pdf_path, source_filename, [replace(r, source_file=source_filename) for r in structured_local_results]
+                )
 
             structured_llm_results = _extract_structured_with_llm_vision(
                 pdf_path,
@@ -1637,7 +2006,9 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
                 fallback_cml_ids=cml_ids,
             )
             if structured_llm_results:
-                return [replace(r, source_file=source_filename) for r in structured_llm_results]
+                return _finalize_results(
+                    pdf_path, source_filename, [replace(r, source_file=source_filename) for r in structured_llm_results]
+                )
 
         ocr_date, ocr_readings, ocr_cml_ids, ocr_circuit = "", [], [], ""
         # INSPECTION_REPORT_LLM_ONLY=1: skip OCR, use LLM Vision directly (for comparison/testing)
@@ -1740,9 +2111,7 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
     if len(cml_ids) >= 3:
         generic_results = _parse_generic_zone_table(pdf_path, circuit_base, cml_ids, date_str)
         if generic_results:
-            for r in generic_results:
-                r.source_file = source_filename
-            return generic_results
+            return _finalize_results(pdf_path, source_filename, generic_results)
 
     # Single CML with UT REPORT - TEE/ELBOW summary page: use dedicated summary table parser
     if len(cml_ids) == 1 and _get_summary_page_indices(pdf_path):
@@ -1750,9 +2119,7 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
         if ut_summary_results:
             ut_summary_results = _dedupe_by_cml_keep_min(ut_summary_results)
             ut_summary_results = _validate_and_dedupe_before_export(ut_summary_results)
-            for r in ut_summary_results:
-                r.source_file = source_filename
-            return ut_summary_results
+            return _finalize_results(pdf_path, source_filename, ut_summary_results)
 
     acuren_results = _parse_acuren_results_table(pdf_path, circuit_base, cml_ids, date_str)
     if acuren_results:
@@ -1763,9 +2130,7 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
                 acuren_results = permissive
         acuren_results = _dedupe_by_cml_keep_min(acuren_results)
         acuren_results = _validate_and_dedupe_before_export(acuren_results)
-        for r in acuren_results:
-            r.source_file = source_filename
-        return acuren_results
+        return _finalize_results(pdf_path, source_filename, acuren_results)
     if len(cml_ids) < 3:
         generic_results = _parse_generic_zone_table(pdf_path, circuit_base, cml_ids, date_str)
         if generic_results:
@@ -1776,9 +2141,7 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
                     generic_results = permissive
             generic_results = _dedupe_by_cml_keep_min(generic_results)
             generic_results = _validate_and_dedupe_before_export(generic_results)
-            for r in generic_results:
-                r.source_file = source_filename
-            return generic_results
+            return _finalize_results(pdf_path, source_filename, generic_results)
 
     # Image-based reports often lose table structure with OCR.
     # Try local structured OCR first, then vision if needed.
@@ -1791,7 +2154,9 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
             fallback_cml_ids=cml_ids,
         )
         if structured_local_results:
-            return [replace(r, source_file=source_filename) for r in structured_local_results]
+            return _finalize_results(
+                pdf_path, source_filename, [replace(r, source_file=source_filename) for r in structured_local_results]
+            )
 
         structured_llm_results = _extract_structured_with_llm_vision(
             pdf_path,
@@ -1801,7 +2166,9 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
             fallback_cml_ids=cml_ids,
         )
         if structured_llm_results:
-            return [replace(r, source_file=source_filename) for r in structured_llm_results]
+            return _finalize_results(
+                pdf_path, source_filename, [replace(r, source_file=source_filename) for r in structured_llm_results]
+            )
 
     results = []
 
@@ -1869,7 +2236,7 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
                         )
                     )
                     idx += 1
-            return _validate_and_dedupe_before_export(ocr_results)
+            return _finalize_results(pdf_path, source_filename, _validate_and_dedupe_before_export(ocr_results))
 
     # Fallback: aggregate readings by CML (min per CML)
     if len(cml_ids) == 1:
@@ -1912,7 +2279,7 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
                 )
             )
 
-    return results
+    return _finalize_results(pdf_path, source_filename, results)
 
 
 def parse_inspection_report_pdfs(pdf_paths: List[Path], source_filenames: Optional[List[str]] = None) -> List[ExtractedReading]:

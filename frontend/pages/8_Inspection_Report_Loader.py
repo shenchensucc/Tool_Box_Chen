@@ -1,3 +1,4 @@
+import base64
 import sys
 from pathlib import Path
 
@@ -180,6 +181,7 @@ with left_col:
         res = st.session_state.insp_result
         success = res.get("success", False)
         summary = res.get("summary", [])
+        table_evidence = res.get("table_evidence", [])
         records_count = res.get("records_count", 0)
         has_download = bool(res.get("download_token"))
 
@@ -191,6 +193,64 @@ with left_col:
             st.subheader("📊 Summary Table")
             df = pd.DataFrame(summary)
             st.dataframe(df, use_container_width=True, hide_index=True)
+
+            if table_evidence:
+                evidence_by_id = {
+                    item.get("table_image_id"): item
+                    for item in table_evidence
+                    if item.get("table_image_id")
+                }
+                rows_by_image = {}
+                for row in summary:
+                    image_id = row.get("Table Image ID")
+                    if image_id:
+                        rows_by_image.setdefault(image_id, []).append(row)
+
+                st.subheader("🧾 Source Table Validation")
+                st.caption(
+                    "Each card shows the source table screenshot used for OCR/table parsing, "
+                    "with the extracted rows mapped to that image."
+                )
+                for image_id, related_rows in rows_by_image.items():
+                    evidence = evidence_by_id.get(image_id)
+                    if not evidence:
+                        continue
+                    src_file = evidence.get("source_file") or "Unknown file"
+                    src_page = evidence.get("source_page") or "?"
+                    method = evidence.get("extraction_method") or "unknown"
+
+                    with st.expander(
+                        f"📷 {src_file} | Page {src_page} | {len(related_rows)} row(s) | {method}",
+                        expanded=False,
+                    ):
+                        image_b64 = evidence.get("image_base64")
+                        if image_b64:
+                            try:
+                                zoom_key = f"insp_zoom_{image_id}"
+                                zoom_enabled = st.checkbox("Zoom image", value=False, key=zoom_key)
+                                st.image(
+                                    base64.b64decode(image_b64),
+                                    caption=f"Table Image ID: {image_id}",
+                                    width=None if zoom_enabled else 360,
+                                    use_container_width=zoom_enabled,
+                                )
+                            except Exception:
+                                st.warning(f"Could not render evidence image for `{image_id}`.")
+
+                        validate_cols = [
+                            "Circuit",
+                            "CML",
+                            "Min Reading",
+                            "Date",
+                            "Source File",
+                            "Source Page",
+                            "Extraction Method",
+                        ]
+                        st.dataframe(
+                            pd.DataFrame(related_rows)[[c for c in validate_cols if c in related_rows[0]]],
+                            use_container_width=True,
+                            hide_index=True,
+                        )
 
         elif success and records_count == 0:
             st.warning("⚠️ No records extracted. Check PDF format.")

@@ -112,25 +112,85 @@ def _extract_pdf_text(pdf_bytes: bytes) -> dict:
     return pages_text
 
 
+def _validate_one_gt(gt_path: Path, search_dirs: list[Path]) -> tuple[bool | None, str, int, int]:
+    """Validate parser against a single ground truth JSON. Returns (ok, msg, passed, total)."""
+    try:
+        gt = json.loads(gt_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        return None, f"Bad JSON: {e}", 0, 0
+
+    source_file = gt.get("source_file", "")
+    if not source_file:
+        return None, "No source_file", 0, 0
+
+    pdf_path = None
+    for d in search_dirs:
+        p = d / source_file
+        if p.exists():
+            pdf_path = p
+            break
+    if not pdf_path:
+        return None, "PDF not found", 0, 0
+
+    # Build expected map (is_correct readings + additions)
+    expected = {}
+    for r in gt.get("readings", []):
+        if r.get("is_correct"):
+            key = (r["circuit_id"], r["cml_id"])
+            expected[key] = r.get("expected_reading") or r["min_reading"]
+    for a in gt.get("additions", []):
+        key = (a["circuit_id"], a["cml_id"])
+        expected[key] = a["min_reading"]
+    if not expected:
+        return None, "No expected readings", 0, 0
+
+    try:
+        results = parse_inspection_report_pdf(pdf_path, source_file)
+    except Exception as e:
+        return False, f"Parser error: {e}", 0, len(expected)
+
+    got = {(r.circuit_id, r.cml_id): r.min_reading for r in results}
+    errors = []
+    passed = 0
+    for (circ, cml), exp_read in expected.items():
+        if (circ, cml) not in got:
+            errors.append(f"Missing {cml}")
+        elif abs(got[(circ, cml)] - exp_read) > 0.01:
+            errors.append(f"{cml}: got {got[(circ, cml)]:.3f} ≠ {exp_read:.3f}")
+        else:
+            passed += 1
+
+    if errors:
+        return False, "; ".join(errors[:3]) + ("…" if len(errors) > 3 else ""), passed, len(expected)
+    return True, f"{len(expected)} readings", passed, len(expected)
+
+
 def _load_training_summary() -> list[dict]:
     """Load summary of all ground truth files (no PDF parsing)."""
+    search_dirs = [GROUND_TRUTH_DIR, ROOT / "tests" / "fixtures"]
     summary = []
     for p in sorted(GROUND_TRUTH_DIR.glob("*_ground_truth.json")):
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
             pdf_name = data.get("source_file", p.stem.replace("_ground_truth", "") + ".pdf")
-            pdf_path = GROUND_TRUTH_DIR / pdf_name
-            has_pdf = pdf_path.exists()
+            pdf_path = None
+            for d in search_dirs:
+                candidate = d / pdf_name
+                if candidate.exists():
+                    pdf_path = candidate
+                    break
+            has_pdf = pdf_path is not None
             n_readings = len(data.get("readings", []))
             n_additions = len(data.get("additions", []))
             summary.append({
                 "name": p.stem.replace("_ground_truth", ""),
+                "gt_path": p,
                 "pdf_exists": has_pdf,
                 "readings": n_readings,
                 "additions": n_additions,
             })
         except Exception:
-            summary.append({"name": p.stem, "pdf_exists": False, "readings": 0, "additions": 0})
+            summary.append({"name": p.stem, "gt_path": p, "pdf_exists": False, "readings": 0, "additions": 0})
     return summary
 
 
@@ -236,6 +296,71 @@ def export_ground_truth(
     return out
 
 
+def _render_pdf_pages(pdf_bytes: bytes) -> list[bytes]:
+    """Render each PDF page to a PNG image using pymupdf."""
+    try:
+        import pymupdf
+        import io
+        doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+        images = []
+        for page in doc:
+            pix = page.get_pixmap(dpi=150)
+            images.append(pix.tobytes(output="png"))
+        doc.close()
+        return images
+    except Exception:
+        return []
+
+
+def _inline_validate(pdf_bytes: bytes, source_filename: str, rows: list[dict], additions: list[dict]) -> tuple[bool, str, int, int]:
+    """Validate current parser output against the annotated ground truth in session state."""
+    # Build expected from current annotations
+    expected = {}
+    for r in rows:
+        if r.get("is_correct", True):
+            key = (r["circuit_id"], r["cml_id"])
+            corr = r.get("corrected_reading")
+            try:
+                expected[key] = float(corr) if corr is not None else r["min_reading"]
+            except (TypeError, ValueError):
+                expected[key] = r["min_reading"]
+    for a in additions:
+        cml = a.get("cml_id", "").strip()
+        circ = a.get("circuit_id", "").strip()
+        if cml and circ:
+            try:
+                expected[(circ, cml)] = float(a["min_reading"])
+            except (TypeError, ValueError):
+                pass
+
+    if not expected:
+        return None, "No expected readings defined", 0, 0
+
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+        tmp.write(pdf_bytes)
+        tmp_path = Path(tmp.name)
+    try:
+        results = parse_inspection_report_pdf(tmp_path, source_filename)
+    except Exception as e:
+        return False, f"Parser error: {e}", 0, len(expected)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    got = {(r.circuit_id, r.cml_id): r.min_reading for r in results}
+    errors, passed = [], 0
+    for (circ, cml), exp_read in expected.items():
+        if (circ, cml) not in got:
+            errors.append(f"Missing {cml}")
+        elif abs(got[(circ, cml)] - exp_read) > 0.01:
+            errors.append(f"{cml}: got {got[(circ, cml)]:.3f} ≠ {exp_read:.3f}")
+        else:
+            passed += 1
+
+    if errors:
+        return False, "; ".join(errors[:5]) + ("…" if len(errors) > 5 else ""), passed, len(expected)
+    return True, f"All {len(expected)} readings correct", passed, len(expected)
+
+
 def main():
     st.set_page_config("Inspection Report Ground Truth", "🔧", layout="wide")  # noqa: F401
     st.title("🔧 Inspection Report Ground Truth Dev Tool")
@@ -244,19 +369,57 @@ def main():
         "and export to training data for parser improvement."
     )
 
-    # --- Training Summary (sidebar) ---
+    search_dirs = [GROUND_TRUTH_DIR, ROOT / "tests" / "fixtures"]
+
+    # --- Sidebar: Training Summary with live validation ---
     with st.sidebar:
-        st.subheader("📋 Training Set Summary")
+        st.subheader("📋 Training Set")
         summary = _load_training_summary()
+
+        run_validate = st.button("▶ Run All Validations", key="run_all_validate", use_container_width=True)
+
         if summary:
+            # Store validation results in session state so they persist across reruns
+            if "sidebar_validate_results" not in st.session_state:
+                st.session_state.sidebar_validate_results = {}
+
+            if run_validate:
+                with st.spinner("Validating all ground truth files…"):
+                    for s in summary:
+                        if s["pdf_exists"]:
+                            ok, msg, passed, total = _validate_one_gt(s["gt_path"], search_dirs)
+                            st.session_state.sidebar_validate_results[s["name"]] = (ok, msg, passed, total)
+                        else:
+                            st.session_state.sidebar_validate_results[s["name"]] = (None, "no PDF", 0, 0)
+
+            vr = st.session_state.sidebar_validate_results
+            total_pass = sum(1 for v in vr.values() if v[0] is True)
+            total_fail = sum(1 for v in vr.values() if v[0] is False)
+            if vr:
+                st.caption(f"**{total_pass} ✅ / {total_fail} ❌** of {len(vr)} validated")
+
             for s in summary:
-                pdf_icon = "✅" if s["pdf_exists"] else "⚠️"
-                short = s["name"][:50] + ("…" if len(s["name"]) > 50 else "")
-                st.caption(f"{pdf_icon} {short}")
-                st.caption(f"   {s['readings']} readings, {s['additions']} additions")
-            st.divider()
+                v = vr.get(s["name"])
+                if v:
+                    ok, msg, passed, total = v
+                    if ok is True:
+                        icon = "✅"
+                        detail = f"{passed}/{total}"
+                    elif ok is False:
+                        icon = "❌"
+                        detail = f"{passed}/{total} — {msg}"
+                    else:
+                        icon = "⚠️" if not s["pdf_exists"] else "—"
+                        detail = msg
+                else:
+                    icon = "✅" if s["pdf_exists"] else "⚠️"
+                    detail = f"{s['readings']}r {s['additions']}a"
+
+                short = s["name"][:38] + ("…" if len(s["name"]) > 38 else "")
+                st.caption(f"{icon} {short}")
+                st.caption(f"   {detail}")
         else:
-            st.info("No ground truth files yet. Save one to get started.")
+            st.info("No ground truth files yet.")
 
     # --- PDF input ---
     st.subheader("1. Load PDF")
@@ -293,13 +456,23 @@ def main():
         st.info("Upload a PDF or enter a fixture path to begin.")
         return
 
-    # --- Parse (cache by filename) ---
+    # --- Parse (cache by filename; Reparse button clears cache) ---
     key_prefix = f"gt_{hash(source_filename) % 10**8}"
     local_cache_key = f"{key_prefix}_parsed_results_local"
     llm_cache_key = f"{key_prefix}_parsed_results_llm"
     pdf_text_cache_key = f"{key_prefix}_pdf_text"
+    pages_cache_key = f"{key_prefix}_pages"
+
+    col_parse_info, col_reparse = st.columns([4, 1])
+    with col_reparse:
+        if st.button("🔄 Reparse", key=f"{key_prefix}_reparse", help="Clear cache and re-run the parser"):
+            for k in [local_cache_key, llm_cache_key, pdf_text_cache_key, pages_cache_key,
+                      f"{key_prefix}_rows", f"{key_prefix}_additions"]:
+                st.session_state.pop(k, None)
+            st.rerun()
+
     if local_cache_key not in st.session_state or llm_cache_key not in st.session_state:
-        with st.spinner("Parsing local and LLM variants..."):
+        with st.spinner("Parsing PDF…"):
             with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
                 tmp.write(pdf_bytes)
                 tmp_path = Path(tmp.name)
@@ -310,12 +483,32 @@ def main():
                 tmp_path.unlink(missing_ok=True)
             st.session_state[local_cache_key] = local_results
             st.session_state[llm_cache_key] = llm_results
-        with st.spinner("Extracting PDF text..."):
+        with st.spinner("Extracting PDF text…"):
             st.session_state[pdf_text_cache_key] = _extract_pdf_text(pdf_bytes)
+        with st.spinner("Rendering PDF pages…"):
+            st.session_state[pages_cache_key] = _render_pdf_pages(pdf_bytes)
+
+    with col_parse_info:
+        st.caption(f"Loaded: **{source_filename}**")
+
     local_results = st.session_state[local_cache_key]
     llm_results = st.session_state[llm_cache_key]
     results = local_results
     pdf_text = st.session_state[pdf_text_cache_key]
+    pdf_pages = st.session_state.get(pages_cache_key, [])
+
+    # --- PDF page preview ---
+    with st.expander("🖼 PDF Page Preview", expanded=False):
+        if pdf_pages:
+            cols_per_row = 2
+            for i in range(0, len(pdf_pages), cols_per_row):
+                cols = st.columns(cols_per_row)
+                for j, col in enumerate(cols):
+                    idx = i + j
+                    if idx < len(pdf_pages):
+                        col.image(pdf_pages[idx], caption=f"Page {idx + 1}", use_container_width=True)
+        else:
+            st.info("Could not render PDF pages (pymupdf required).")
 
     # --- Show extracted PDF text ---
     with st.expander("📄 Extracted text from PDF (what the parser sees)", expanded=False):
@@ -452,18 +645,35 @@ def main():
         st.session_state[f"{key_prefix}_additions"] = new_additions
         st.rerun()
 
+    # --- Inline validation ---
+    st.subheader("4. Validate Against Current Annotations")
+    st.caption("Check whether the parser now produces the readings you have marked as correct (including additions).")
+    if st.button("▶ Validate this PDF now", key=f"{key_prefix}_inline_validate", type="primary"):
+        with st.spinner("Re-parsing and checking…"):
+            ok, msg, passed, total = _inline_validate(
+                pdf_bytes, source_filename,
+                st.session_state[f"{key_prefix}_rows"],
+                st.session_state[f"{key_prefix}_additions"],
+            )
+        if ok is True:
+            st.success(f"✅ PASS — {msg}")
+        elif ok is False:
+            st.error(f"❌ FAIL ({passed}/{total}) — {msg}")
+        else:
+            st.warning(f"⚠️ {msg}")
+
     # --- Export (form to reduce reruns) ---
-    st.subheader("4. Export Ground Truth")
+    st.subheader("5. Export Ground Truth")
     st.caption("All edits are in-memory. Only **Save** writes to disk.")
 
     include_pdf_text = st.checkbox("Include PDF text in export (for debugging)", value=False, key="incl_pdf_txt")
-    pdf_text = pdf_text if include_pdf_text else None
+    pdf_text_export = pdf_text if include_pdf_text else None
     export_data = export_ground_truth(
         st.session_state[f"{key_prefix}_rows"],
         st.session_state[f"{key_prefix}_additions"],
         source_filename,
         source_path,
-        pdf_text=pdf_text,
+        pdf_text=pdf_text_export,
     )
     json_str = json.dumps(export_data, indent=2)
     out_name = Path(source_filename).stem + "_ground_truth.json"
@@ -475,7 +685,9 @@ def main():
             pdf_path = GROUND_TRUTH_DIR / source_filename
             json_path.write_text(json_str, encoding="utf-8")
             pdf_path.write_bytes(pdf_bytes)
-            st.success(f"Saved {out_name} and PDF ({source_filename}) — PDF kept for future parser/package changes")
+            # Clear sidebar validation cache so it reflects the new file
+            st.session_state.pop("sidebar_validate_results", None)
+            st.success(f"Saved {out_name} and PDF ({source_filename})")
     with col_dl:
         st.download_button(
             "📥 Download JSON",
