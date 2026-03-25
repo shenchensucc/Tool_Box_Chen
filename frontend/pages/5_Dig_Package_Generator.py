@@ -19,11 +19,11 @@ from frontend_utils import (
     check_backend_health,
     display_header,
     display_sidebar_navigation,
-    get_layout_with_chat,
+    get_layout_main,
     set_page_config,
     show_backend_unavailable_and_retry,
 )
-from chat_panel import render_chat_expander
+from chat_panel import render_floating_chat_shell
 
 # Page configuration
 set_page_config("Dig Package Generator", "📦")
@@ -32,10 +32,9 @@ apply_custom_styling()
 # Custom Sidebar Navigation
 display_sidebar_navigation()
 
-cols, chat_visible = get_layout_with_chat()
-left_col, right_col = cols
+main = get_layout_main()
 
-with left_col:
+with main:
     # Header
     display_header(
         "📦 Dig Package Generator",
@@ -326,6 +325,4 @@ with left_col:
         unsafe_allow_html=True,
     )
 
-with right_col:
-    render_chat_expander(right_col, chat_visible)
-
+render_floating_chat_shell()

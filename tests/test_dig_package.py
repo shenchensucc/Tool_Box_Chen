@@ -198,6 +198,42 @@ def test_parse_joint_summary_matrix_reads_sources_from_merged_label_block():
     assert all(value <= 12.95 for seam_map in by_source.values() for value in seam_map.values())
 
 
+def test_parse_joint_summary_matrix_interleaved_duplicate_column_headers():
+    """PNG-style Joint Summary: two ILI columns per GWD (30900 / 30900__2), one longseam row."""
+    joint_df = pd.DataFrame(
+        [
+            [
+                "Long Seam Orientation (hh:mm) (2022 Rosen) (2025 TDW)",
+                "10:40",
+                "10:30",
+                "10:45",
+                "10:35",
+            ],
+            [
+                "Joint Length (m) (2022 Rosen) (2025 TDW)",
+                13.5,
+                13.6,
+                13.84,
+                13.92,
+            ],
+        ],
+        columns=["Metric", "30900", "30900__2", "30930", "30930__2"],
+    )
+
+    parsed = _parse_joint_summary_matrix(joint_df, parse_orientation_to_hours, logger=dig_package_reader_logger)
+
+    assert parsed is not None
+    by_source = parsed["gwd_by_source"]
+    assert set(by_source.keys()) == {"2022 Rosen", "2025 TDW"}
+    assert by_source["2022 Rosen"][30900] == 10 + 40 / 60
+    assert by_source["2025 TDW"][30900] == 10 + 30 / 60
+    assert by_source["2022 Rosen"][30930] == 10 + 45 / 60
+    assert by_source["2025 TDW"][30930] == 10 + 35 / 60
+    jl = parsed["joint_lengths"]
+    assert jl[30900] == round((13.5 + 13.6) / 2, 2)
+    assert jl[30930] == round((13.84 + 13.92) / 2, 2)
+
+
 def test_reshape_joint_summary_dataframe_splits_metric_and_source():
     joint_df = pd.DataFrame(
         [
@@ -299,6 +335,70 @@ def test_build_feature_map_from_dig_package_returns_joint_summary_rows_and_conte
     assert ctx["target"]["gwd_number"] == 4580
     assert ctx["upstream"]["longseam_label"] == "11:28"
     assert feature_summary_raw["joint_context_by_source"]["2022 Rosen-MFLA"]["downstream"]["gwd_number"] == 4590
+
+
+def test_build_feature_map_tgw_layout_uses_joint_lengths_for_four_red_lines():
+    """When Joint Summary has ≥4 GWDs + joint lengths, girth welds sit at 0 and ±joint lengths."""
+    workbook = Workbook()
+    ws = workbook.active
+    ws.title = "Dig Package"
+    ws["A1"] = "Joint Summary"
+    ws["A2"] = "Girth Weld No."
+    ws["B2"] = "Girth Weld No."
+    ws["C2"] = 4560
+    ws["D2"] = 4570
+    ws["E2"] = 4580
+    ws["F2"] = 4590
+    ws.merge_cells("A3:B3")
+    ws["A3"] = "Long Seam Orientation (hh:mm)\n(2022 Rosen)\n(2025 TDW)"
+    ws["C3"] = "10:00"
+    ws["D3"] = "10:10"
+    ws["E3"] = "10:20"
+    ws["F3"] = "10:30"
+    ws.merge_cells("A4:B4")
+    ws["A4"] = "Long Seam Orientation (hh:mm)\n(2022 Rosen)\n(2025 TDW)"
+    ws["C4"] = "10:05"
+    ws["D4"] = "10:15"
+    ws["E4"] = "10:25"
+    ws["F4"] = "10:35"
+
+    ws.merge_cells("A5:B5")
+    ws["A5"] = "Joint Length (m)\n(2022 Rosen)\n(2025 TDW)"
+    ws["C5"] = 12.0
+    ws["D5"] = 17.5
+    ws["E5"] = 19.0
+    ws["F5"] = 18.5
+
+    ws["A9"] = "Feature Summary"
+    ws["A10"] = "Distance from TGW (m)"
+    ws["B10"] = "Feature Type"
+    ws["C10"] = "Joint Number"
+    ws["D10"] = "ILI Source"
+    ws["A11"] = -5.0
+    ws["B11"] = "Metal Loss"
+    ws["C11"] = 1
+    ws["D11"] = "2022 Rosen-MFLA"
+
+    _, scatter_data, _, _, _, _ = build_feature_map_from_dig_package(_workbook_bytes(workbook))
+
+    assert scatter_data.get("joint_summary_tgw_layout") is True
+    gws = sorted(scatter_data["girth_welds"], key=lambda g: g["chainage"])
+    assert len(gws) == 4
+    assert abs(gws[0]["chainage"] - (-17.5)) < 0.01
+    assert abs(gws[1]["chainage"] - 0.0) < 0.01
+    assert abs(gws[2]["chainage"] - 19.0) < 0.01
+    assert abs(gws[3]["chainage"] - 37.5) < 0.01
+    seams = scatter_data.get("seam_welds", [])
+    assert len(seams) >= 3
+    tol = 0.02
+
+    def _has_span(a: float, b: float) -> bool:
+        return any(
+            abs(s["chainage_start"] - a) < tol and abs(s["chainage_end"] - b) < tol for s in seams
+        )
+
+    assert _has_span(-17.5, 0.0)
+    assert _has_span(0.0, 19.0)
 
 
 def test_find_header_row_after_skips_repeated_merged_section_title():

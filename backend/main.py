@@ -25,7 +25,8 @@ logger = get_logger("backend.main")
 import pandas as pd
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from fastapi.staticfiles import StaticFiles
 from openpyxl import load_workbook
 
 from backend.models import (
@@ -85,6 +86,15 @@ from backend.tools.web_search import web_search
 from backend.tools.schemas import WEB_SEARCH_SCHEMA
 
 app = FastAPI(title="Chen's Engineer Toolbox API", version="0.1.0")
+
+# PDF.js (Mozilla) for in-app preview — canvas rendering, not the browser PDF plug-in.
+_PDFJS_DIR = Path(__file__).resolve().parent / "static" / "pdfjs"
+if _PDFJS_DIR.is_dir():
+    app.mount(
+        "/static/pdfjs",
+        StaticFiles(directory=str(_PDFJS_DIR)),
+        name="pdfjs",
+    )
 
 # CORS middleware for local development
 app.add_middleware(
@@ -791,6 +801,78 @@ async def process_dig_package(file: UploadFile = File(...)):
     except Exception as e:
         log_error(logger, "ili/process-dig-package", e)
         return FeatureMapResponse(success=False, error=f"{type(e).__name__}: {str(e)}")
+
+
+def _convert_excel_to_pdf_win32(xlsx_bytes: bytes) -> bytes:
+    """
+    Convert Excel bytes → PDF bytes using Excel COM automation (Windows only).
+    Must be called from a thread (not the async event loop) because COM is STA.
+    Raises RuntimeError on failure.
+    """
+    import tempfile
+    import pythoncom
+    import win32com.client
+
+    pythoncom.CoInitialize()
+    xlsx_tmp = pdf_tmp = None
+    excel = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            f.write(xlsx_bytes)
+            xlsx_tmp = f.name
+        pdf_tmp = xlsx_tmp.replace(".xlsx", ".pdf")
+
+        excel = win32com.client.DispatchEx("Excel.Application")
+        excel.Visible = False
+        excel.DisplayAlerts = False
+        excel.AskToUpdateLinks = False
+
+        wb = excel.Workbooks.Open(
+            xlsx_tmp,
+            UpdateLinks=0,
+            ReadOnly=True,
+            IgnoreReadOnlyRecommended=True,
+        )
+        # xlTypePDF = 0; xlQualityStandard = 0
+        wb.ExportAsFixedFormat(0, pdf_tmp, 0, True)
+        wb.Close(False)
+
+        with open(pdf_tmp, "rb") as fh:
+            return fh.read()
+    finally:
+        if excel is not None:
+            try:
+                excel.Quit()
+            except Exception:
+                pass
+        pythoncom.CoUninitialize()
+        for p in [xlsx_tmp, pdf_tmp]:
+            if p and os.path.exists(p):
+                try:
+                    os.unlink(p)
+                except Exception:
+                    pass
+
+
+@app.post("/api/ili/excel-to-pdf")
+async def excel_to_pdf(file: UploadFile = File(...)):
+    """
+    Convert an Excel workbook to PDF using Excel COM automation (Windows / MS Office required).
+    Returns raw PDF bytes with Content-Type application/pdf on success.
+    Returns JSON {error: ...} with status 501 if win32com is unavailable,
+    or status 500 for any other failure.
+    """
+    content = await file.read()
+    try:
+        pdf_bytes = await asyncio.to_thread(_convert_excel_to_pdf_win32, content)
+        logger.info(f"[ili/excel-to-pdf] Converted {file.filename} ({len(content)} B) → PDF ({len(pdf_bytes)} B)")
+        return Response(content=pdf_bytes, media_type="application/pdf")
+    except ImportError:
+        logger.warning("[ili/excel-to-pdf] win32com not installed — PDF conversion unavailable")
+        return JSONResponse({"error": "win32com_unavailable"}, status_code=501)
+    except Exception as e:
+        log_error(logger, "ili/excel-to-pdf", e)
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @app.post("/api/tml/process", response_model=TMLProcessResponse)

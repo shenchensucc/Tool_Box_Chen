@@ -4,11 +4,11 @@ from frontend_utils import (
     apply_custom_styling,
     check_backend_health,
     display_sidebar_navigation,
-    get_layout_with_chat,
+    get_layout_main,
     set_page_config,
     show_backend_unavailable_and_retry,
 )
-from chat_panel import render_chat_expander
+from chat_panel import render_floating_chat_shell
 
 # Page configuration
 set_page_config("Chen's Engineer Toolbox", "🔧")
@@ -17,12 +17,9 @@ apply_custom_styling()
 # Custom Sidebar Navigation with Expandable Sections
 display_sidebar_navigation()
 
-# Layout: main content (left) + resizer + Chat with Chen (right, hideable, sticky)
-cols, chat_visible = get_layout_with_chat()
+main = get_layout_main()
 
-left_col, right_col = cols
-
-with left_col:
+with main:
     # Main content
     st.markdown(
     """
@@ -100,5 +97,4 @@ with left_col:
         unsafe_allow_html=True,
     )
 
-with right_col:
-    render_chat_expander(right_col, chat_visible) 
+render_floating_chat_shell()

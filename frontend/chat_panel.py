@@ -1,8 +1,6 @@
-"""Chat with Chen - collapsible right-side chat panel."""
+"""Chat with Chen — floating FAB + modal dialog (full-width main layout)."""
 
 import os
-from typing import Any
-
 import httpx
 import streamlit as st
 
@@ -64,10 +62,10 @@ def _call_chat_api(messages: list[dict], model: str) -> str | None:
         return f"Error: {str(e)}"
 
 
-def render_chat_panel():
+def render_chat_panel(*, in_modal: bool = False):
     """
-    Render the collapsible Chat with Chen panel.
-    Use inside an expander or a right column.
+    Chat UI (model, messages, input). When ``in_modal=True``, outer title is omitted
+    (dialog already shows "Chat with Chen").
     """
     _ensure_chat_state()
 
@@ -81,29 +79,10 @@ def render_chat_panel():
     model_ids = [m["id"] for m in model_options]
     model_names = [m["name"] for m in model_options]
 
-    # Header: collapse + size switch on top row; title below (stable, no shift on selection)
-    header_row1_col1, header_row1_col2 = st.columns([1, 4])
-    with header_row1_col1:
-        if st.button("◀", key="chat_hide", help="Collapse chat to right edge", type="secondary"):
-            st.session_state.chat_panel_visible = False
-            st.rerun()
-    with header_row1_col2:
-        size_choice = st.radio(
-            "Size",
-            options=["Small", "Large"],
-            index=0 if st.session_state.get("chat_panel_width", 20) == 20 else 1,
-            key="chat_size_toggle",
-            horizontal=True,
-            label_visibility="collapsed",
-        )
-        new_width = 20 if size_choice == "Small" else 40
-        if new_width != st.session_state.get("chat_panel_width", 20):
-            st.session_state.chat_panel_width = new_width
-            st.rerun()
-    st.markdown("#### 💬 Chat with Chen")
-    st.markdown("---")
+    if not in_modal:
+        st.markdown("#### 💬 Chat with Chen")
+        st.markdown("---")
 
-    # LLM model selection - always visible
     selected_idx = st.selectbox(
         "⚙️ LLM Model",
         range(len(model_ids)),
@@ -112,7 +91,6 @@ def render_chat_panel():
     )
     st.session_state.chat_model = model_ids[selected_idx]
 
-    # Scrollable message area (fixed height, ChatGPT-like)
     with st.container(height=360):
         if not st.session_state.chat_messages:
             with st.chat_message("assistant"):
@@ -127,7 +105,6 @@ def render_chat_panel():
                 with st.chat_message("assistant"):
                     st.markdown(content)
 
-    # Input at bottom (ChatGPT-style)
     prompt = st.chat_input("Ask about tools or anything...")
     if prompt:
         st.session_state.chat_messages.append({"role": "user", "content": prompt})
@@ -148,25 +125,65 @@ def render_chat_panel():
         st.rerun()
 
 
-def render_chat_panel_with_controls():
+@st.dialog("💬 Chat with Chen", width="large")
+def _chat_dialog():
+    render_chat_panel(in_modal=True)
+    if st.button("Close", key="chat_modal_close", type="secondary"):
+        st.rerun()
+
+
+def _render_chat_fab_link():
+    """Fixed bottom-right FAB using HTML so it sits on the viewport (not trapped in a narrow block)."""
+    st.markdown(
+        """
+        <style>
+          a#chen-chat-fab {
+            position: fixed !important;
+            bottom: 22px !important;
+            right: 22px !important;
+            z-index: 2147483000 !important;
+            width: 58px !important;
+            height: 58px !important;
+            border-radius: 50% !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            text-decoration: none !important;
+            font-size: 26px !important;
+            line-height: 1 !important;
+            cursor: pointer !important;
+            background: linear-gradient(145deg, #5b6ee8, #7c3fb8) !important;
+            color: #fff !important;
+            box-shadow: 0 4px 18px rgba(0,0,0,0.28) !important;
+            border: 2px solid rgba(255,255,255,0.35) !important;
+            transition: transform 0.15s ease, box-shadow 0.15s ease !important;
+          }
+          a#chen-chat-fab:hover {
+            transform: scale(1.07) !important;
+            box-shadow: 0 6px 22px rgba(0,0,0,0.32) !important;
+          }
+        </style>
+        <a href="?open_chat=1" id="chen-chat-fab" target="_self" title="Chat with Chen">💬</a>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_floating_chat_shell():
     """
-    Render Chat with Chen panel (hide button is in header).
-    Call this inside the right column when chat is visible.
+    Call once at the bottom of each page (after main content).
+    Opens chat in a modal when the user clicks the FAB or visits with ``?open_chat=1``.
     """
-    render_chat_panel()
+    _ensure_chat_state()
+    if st.query_params.get("open_chat") == "1":
+        try:
+            st.query_params.pop("open_chat")
+        except Exception:
+            pass
+        _chat_dialog()
+    _render_chat_fab_link()
 
 
 def render_chat_expander(right_col, visible: bool):
-    """
-    Render Chat with Chen in right column, or collapsed tab when hidden.
-    visible: from get_layout_with_chat() return.
-    """
-    if visible:
-        with right_col:
-            render_chat_panel_with_controls()
-    else:
-        with right_col:
-            # Collapsed: narrow tab on right edge to expand
-            if st.button("💬 Chat", key="chat_show_tab", help="Show Chat with Chen"):
-                st.session_state.chat_panel_visible = True
-                st.rerun()
+    """Deprecated no-op — use ``render_floating_chat_shell()`` once at the bottom of the page."""
+    _ = (right_col, visible)

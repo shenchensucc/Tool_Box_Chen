@@ -14,10 +14,10 @@ from frontend_utils import (
     apply_custom_styling,
     display_header,
     display_sidebar_navigation,
-    get_layout_with_chat,
+    get_layout_main,
     set_page_config,
 )
-from chat_panel import render_chat_expander
+from chat_panel import render_floating_chat_shell
 
 # Page configuration
 set_page_config("Skills Overview - Chen's Toolbox", "🧠")
@@ -26,10 +26,9 @@ apply_custom_styling()
 # Custom Sidebar Navigation
 display_sidebar_navigation()
 
-cols, chat_visible = get_layout_with_chat()
-left_col, right_col = cols
+main = get_layout_main()
 
-with left_col:
+with main:
     display_header(
         "🧠 Skills Overview",
         "Cursor IDE skills and app capabilities — for developers and further development",
@@ -168,5 +167,4 @@ python dev_tools/validate_ground_truth.py --fixtures-only
         unsafe_allow_html=True,
     )
 
-with right_col:
-    render_chat_expander(right_col, chat_visible)
+render_floating_chat_shell()

@@ -13,10 +13,11 @@ from frontend_utils import (
     check_backend_health,
     display_header,
     display_sidebar_navigation,
-    get_layout_with_chat,
+    get_layout_main,
     set_page_config,
     show_backend_unavailable_and_retry,
 )
+from chat_panel import render_floating_chat_shell
 
 
 def _show_debug_error(title: str, status_code: int, detail: str, endpoint: str):
@@ -36,10 +37,9 @@ apply_custom_styling()
 # Custom Sidebar Navigation
 display_sidebar_navigation()
 
-cols, chat_visible = get_layout_with_chat()
-left_col, right_col = cols
+main = get_layout_main()
 
-with left_col:
+with main:
     # Header
     display_header(
         "🔴 De-active CML",
@@ -197,3 +197,5 @@ with left_col:
         """)
 
     st.caption("De-active CML | Chen's Engineer Toolbox")
+
+render_floating_chat_shell()

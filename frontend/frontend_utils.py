@@ -177,6 +177,35 @@ def display_header(title: str, description: Optional[str] = None):
     st.markdown("---")
 
 
+def display_session_privacy_banner() -> None:
+    """
+    High-visibility reminder that uploads/results are not persisted server-side
+    (session-only in the browser).
+    """
+    st.markdown(
+        """
+        <div style="
+            background: linear-gradient(135deg, #fef08a 0%, #fde047 50%, #facc15 100%);
+            border: 2px solid #ca8a04;
+            border-radius: 10px;
+            padding: 14px 18px;
+            margin: 0 0 1rem 0;
+            font-size: 1.05rem;
+            line-height: 1.45;
+            font-weight: 600;
+            color: #713f12;
+            box-shadow: 0 3px 10px rgba(180, 83, 9, 0.35);
+        ">
+            <span style="font-size: 1.2rem;">🔒</span>
+            <strong>Reminder:</strong>
+            This app does not save your uploads or results on the server —
+            everything stays in your current browser session only.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 async def call_preview_api(file) -> Optional[Dict[str, Any]]:
     """Call the backend preview API"""
     try:
@@ -322,6 +351,30 @@ async def call_process_dig_package_api(file) -> Optional[Dict[str, Any]]:
         return None
 
 
+async def call_excel_to_pdf_api(file_bytes: bytes, filename: str) -> Optional[bytes]:
+    """
+    Ask the backend to convert an Excel file to PDF (uses Excel COM on Windows).
+    Returns raw PDF bytes on success, None if conversion is unavailable or fails.
+    """
+    url = f"{BACKEND_URL}/api/ili/excel-to-pdf"
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            files = {
+                "file": (
+                    filename,
+                    file_bytes,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            }
+            response = await client.post(url, files=files)
+            if response.status_code == 200:
+                return response.content  # raw PDF bytes
+            # 501 = win32com not available; 500 = other error — caller falls back silently
+            return None
+    except Exception:
+        return None
+
+
 @st.cache_resource(ttl=10)  # Cache for 10 seconds (allows quick retry when backend starts)
 def check_backend_health() -> bool:
     """Check if backend is running (cached for 10 seconds)"""
@@ -353,28 +406,19 @@ def show_backend_unavailable_and_retry() -> None:
         st.rerun()
 
 
+def get_layout_main():
+    """
+    Full-width main container. Chat uses a floating FAB + dialog — see ``chat_panel.render_floating_chat_shell``.
+    """
+    return st.container()
+
+
 def get_layout_with_chat():
     """
-    Return (cols, chat_visible) for main content + Chat with Chen panel.
-    Chat width: Small (20%) or Large (40%), toggled in chat panel header.
-    When visible: cols = (left_col, right_col) - 2 columns.
-    When hidden: cols = (left_col, right_col) - 2 columns.
+    Same as :func:`get_layout_main` (single full-width container).
+    Call ``chat_panel.render_floating_chat_shell()`` at the end of each page for Chat with Chen.
     """
-    if "chat_panel_visible" not in st.session_state:
-        st.session_state.chat_panel_visible = True
-    if "chat_panel_width" not in st.session_state:
-        st.session_state.chat_panel_width = 20  # Small=20%, Large=40%
-
-    visible = st.session_state.chat_panel_visible
-    w = 40 if st.session_state.chat_panel_width == 40 else 20  # Small=20% or Large=40%
-    st.session_state.chat_panel_width = w  # Normalize to 20 or 40
-
-    if visible:
-        left_ratio = 100 - w
-        right_ratio = w
-        return st.columns([left_ratio, right_ratio]), visible
-    else:
-        return st.columns([9, 1]), visible
+    return get_layout_main()
 
 
 def display_sidebar_navigation():

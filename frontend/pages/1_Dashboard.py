@@ -4,10 +4,10 @@ from frontend_utils import (
     apply_custom_styling,
     display_header,
     display_sidebar_navigation,
-    get_layout_with_chat,
+    get_layout_main,
     set_page_config,
 )
-from chat_panel import render_chat_expander
+from chat_panel import render_floating_chat_shell
 
 # Page configuration
 set_page_config("Dashboard - Chen's Toolbox", "📊")
@@ -16,13 +16,9 @@ apply_custom_styling()
 # Custom Sidebar Navigation
 display_sidebar_navigation()
 
-cols, chat_visible = get_layout_with_chat()
-if chat_visible:
-    left_col, right_col = cols
-else:
-    left_col, right_col = cols
+main = get_layout_main()
 
-with left_col:
+with main:
     # Header
     display_header("📊 Dashboard", "Overview of your engineering projects and data")
 
@@ -97,5 +93,4 @@ with left_col:
     st.markdown("### Activity Overview")
     st.info("📈 Activity charts and visualizations will appear here as you use the tools.")
 
-with right_col:
-    render_chat_expander(right_col, chat_visible) 
+render_floating_chat_shell()
