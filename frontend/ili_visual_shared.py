@@ -77,6 +77,9 @@ _DEPTH_RGB = {
     "red": (220, 20, 60),
 }
 
+# Reset axes / double-click return to the layout ranges set on the figure (feature x extent, fixed y).
+_FEATURE_MAP_PLOTLY_CONFIG: dict = {"doubleClick": "reset"}
+
 
 def _depth_color(d, alpha: float = 1.0):
     """Map depth % to color for feature boxes. alpha=1.0 full, 0.2 for 20% visible."""
@@ -249,7 +252,37 @@ def _build_feature_map_figure(
         pad = max(span * 0.05, 0.3)
         return (lo - pad, hi + pad)
 
-    x_range_choice = _feature_xaxis_range()
+    def _feature_centers_xaxis_range() -> Optional[tuple[float, float]]:
+        """Fallback: defect chainage centres only (no box half-width)."""
+        xs: list[float] = []
+        for f in plot_features:
+            try:
+                xs.append(float(f["x"]))
+            except (TypeError, ValueError):
+                continue
+        if not xs:
+            return None
+        lo, hi = min(xs), max(xs)
+        span = max(hi - lo, 0.5)
+        pad = max(span * 0.05, 0.3)
+        return (lo - pad, hi + pad)
+
+    def _scatter_xaxis_range() -> Optional[tuple[float, float]]:
+        """Last resort: full scatter x column extent."""
+        xv = scatter_data.get("x_values") or []
+        if not xv:
+            return None
+        lo, hi = float(min(xv)), float(max(xv))
+        span = max(hi - lo, 0.5)
+        pad = max(span * 0.05, 0.3)
+        return (lo - pad, hi + pad)
+
+    # Default x view for initial render and Plotly "Reset axes" (needs fixed range + autorange off).
+    x_range_choice = (
+        _feature_xaxis_range()
+        or _feature_centers_xaxis_range()
+        or _scatter_xaxis_range()
+    )
 
     x_min_plot = min(x_values) if x_values else 0
     x_max_plot = max(x_values) if x_values else 1
@@ -374,6 +407,10 @@ def _build_feature_map_figure(
         xaxis_kwargs["range"] = list(x_range_choice)
         xaxis_kwargs["autorange"] = False
 
+    # Orientation as decimal hours: 12:48 → 12.8; axis runs 0–13 with top tick labelled 12:60.
+    _y_orient_tickvals = list(range(0, 14))
+    _y_orient_ticktext = [f"{h:02d}:00" for h in range(0, 13)] + ["12:60"]
+
     fig.update_layout(
         title=title,
         xaxis_title=x_axis_title,
@@ -391,10 +428,11 @@ def _build_feature_map_figure(
             linewidth=2,
             linecolor="black",
             mirror=True,
-            tickvals=list(range(0, 13)),
-            ticktext=[f"{h:02d}:00" for h in range(0, 13)],
-            range=[0, 12],
-            # Box zoom / scroll zoom only change chainage (x); clock axis stays 0–12 h
+            tickvals=_y_orient_tickvals,
+            ticktext=_y_orient_ticktext,
+            range=[0, 13],
+            autorange=False,
+            # Box zoom / scroll zoom only change chainage (x); orientation axis stays fixed
             fixedrange=True,
         ),
         annotations=annotations,
@@ -839,7 +877,7 @@ def render_feature_map(
         height=450,
         use_opacity_overlay=filter_by_source,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, config=_FEATURE_MAP_PLOTLY_CONFIG)
 
     combined_contexts = _selected_joint_contexts(selected_sources)
     if combined_contexts:
@@ -902,7 +940,11 @@ def render_feature_map(
                 height=380,
             )
             fig_breakdown.update_layout(title=f"Source: {src} ({count} features)")
-            st.plotly_chart(fig_breakdown, use_container_width=True)
+            st.plotly_chart(
+                fig_breakdown,
+                use_container_width=True,
+                config=_FEATURE_MAP_PLOTLY_CONFIG,
+            )
             src_context = joint_context_by_source.get(src)
             if src_context:
                 st.caption("Joint context: " + _format_joint_context_summary(src_context))
@@ -1204,53 +1246,49 @@ def _render_dig_package_source_preview(
     component_h = 880 if compact else 920
     html_fallback_h = 780 if compact else 840
 
+    fname = dig_file.name
+    dl_key = f"dig_pkg_download_{fname}"
+
     def _excel_download() -> None:
         st.download_button(
             "⬇ Excel",
             data=raw_bytes,
-            file_name=dig_file.name,
+            file_name=fname,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="dig_pkg_download",
+            key=dl_key,
         )
 
-    pdf_key = f"dig_pkg_pdf_{dig_file.name}"
+    pdf_key = f"dig_pkg_pdf_{fname}"
     if pdf_key not in st.session_state:
         with st.spinner("Converting to PDF for exact preview (using Excel)…"):
             pdf_bytes = asyncio.run(call_excel_to_pdf_api(raw_bytes, dig_file.name))
         st.session_state[pdf_key] = pdf_bytes
 
     pdf_bytes = st.session_state.get(pdf_key)
-    stem = dig_file.name.rsplit(".", 1)[0] if "." in dig_file.name else dig_file.name
+    stem = fname.rsplit(".", 1)[0] if "." in fname else fname
+    pdf_dl_key = f"dig_pkg_download_pdf_{fname}"
 
     if pdf_bytes:
-        if compact:
-            with st.popover("⬇", help="Download Excel or PDF"):
+        popover_label = "⬇" if compact else "⬇ Downloads"
+        popover_help = "Download Excel or PDF" if compact else "Excel and PDF"
+        with st.popover(popover_label, help=popover_help):
+            if compact:
                 st.caption("Workbook")
-                _excel_download()
-                st.download_button(
-                    "PDF",
-                    data=pdf_bytes,
-                    file_name=f"{stem}.pdf",
-                    mime="application/pdf",
-                    key="dig_pkg_download_pdf",
-                )
-        else:
-            with st.popover("⬇ Downloads", help="Excel and PDF"):
-                _excel_download()
-                st.download_button(
-                    "PDF",
-                    data=pdf_bytes,
-                    file_name=f"{stem}.pdf",
-                    mime="application/pdf",
-                    key="dig_pkg_download_pdf",
-                )
+            _excel_download()
+            st.download_button(
+                "PDF",
+                data=pdf_bytes,
+                file_name=f"{stem}.pdf",
+                mime="application/pdf",
+                key=pdf_dl_key,
+            )
 
         pdfjs_base = f"{BACKEND_URL.rstrip('/')}/static/pdfjs"
         pdf_fingerprint = hashlib.md5(
             pdf_bytes[:16384], usedforsecurity=False
         ).hexdigest()[:20]
         viewer_sig = (
-            dig_file.name,
+            fname,
             len(pdf_bytes),
             pdf_fingerprint,
             len(raw_bytes),
@@ -1259,11 +1297,11 @@ def _render_dig_package_source_preview(
             pdfjs_base,
             140.0,
         )
-        sig_key = "dig_pkg_pdf_viewer_sig"
-        html_key = f"dig_pkg_pdf_viewer_html_{dig_file.name}"
+        sig_key = f"dig_pkg_pdf_viewer_sig_{fname}"
+        html_key = f"dig_pkg_pdf_viewer_html_{fname}"
         if st.session_state.get(sig_key) != viewer_sig:
             b64 = base64.b64encode(pdf_bytes).decode()
-            vid = _stable_dig_pdf_dom_id(dig_file.name)
+            vid = _stable_dig_pdf_dom_id(fname)
             st.session_state[html_key] = _dig_pdf_js_viewer_html(
                 vid, pdfjs_base, b64, scale, wrap_max_h, default_zoom_pct=140.0
             )
@@ -1305,14 +1343,22 @@ def _init_dig_package_session_state() -> None:
     st.session_state.setdefault("dig_split_left_frac", 0.5)
 
 
+def _dig_package_feature_map_kwargs(fm: dict) -> dict:
+    """Shared args for dig package maps (stacked source filters; same fragment everywhere)."""
+    return {
+        "fm": fm,
+        "total_before_filter": fm.get("total_rows"),
+        "key_prefix": "dig_package",
+        "source_filter_layout": "stack",
+    }
+
+
 def render_dig_package_visual_tool() -> None:
     _init_dig_package_session_state()
 
-    st.markdown("### 📦 Dig Package")
     st.caption(
-        "Upload a dig package Excel file with section headers. The tool extracts ILI features from "
-        "**Feature summary** and longseam orientation from **Joint Summary**. "
-        "Uses **Distance from TGW (m)** as the default x-axis and supports multiple ILI sources."
+        "Upload a dig package Excel with **Feature summary** and optional **Joint Summary**. "
+        "Features and longseam lines use **Distance from TGW (m)** when present; multiple ILI sources are supported."
     )
 
     dig_file = st.file_uploader(
@@ -1342,8 +1388,6 @@ def render_dig_package_visual_tool() -> None:
                     st.success(f"✅ Parsed **{result.get('total_rows', 0)} features** from {dig_file.name}")
                 elif result and not result.get("success"):
                     st.error(result.get("error", "Process failed"))
-        else:
-            st.success(f"✅ File loaded: **{dig_file.name}**")
 
         fm = st.session_state.dig_package_feature_map_data
         raw_bytes = st.session_state.get("dig_package_file_bytes")
@@ -1390,12 +1434,7 @@ def render_dig_package_visual_tool() -> None:
                     )
 
                 with col_maps:
-                    render_feature_map_fragment(
-                        fm,
-                        total_before_filter=fm.get("total_rows"),
-                        key_prefix="dig_package",
-                        source_filter_layout="stack",
-                    )
+                    render_feature_map_fragment(**_dig_package_feature_map_kwargs(fm))
                 with col_book:
                     with st.container(border=True):
                         st.markdown("**📄 Original workbook**")
@@ -1403,19 +1442,10 @@ def render_dig_package_visual_tool() -> None:
                             dig_file, raw_bytes, compact=True
                         )
             else:
-                render_feature_map_fragment(
-                    fm,
-                    total_before_filter=fm.get("total_rows"),
-                    key_prefix="dig_package",
-                    source_filter_layout="stack",
-                )
+                render_feature_map_fragment(**_dig_package_feature_map_kwargs(fm))
         elif maps_ok:
             st.markdown("---")
-            render_feature_map_fragment(
-                fm,
-                total_before_filter=fm.get("total_rows"),
-                key_prefix="dig_package",
-            )
+            render_feature_map_fragment(**_dig_package_feature_map_kwargs(fm))
         elif raw_bytes:
             st.markdown("---")
             st.markdown("### 📄 Original workbook")
@@ -1428,14 +1458,8 @@ def render_dig_package_visual_tool() -> None:
 
     else:
         st.info(
-            """
-            👆 **Upload a dig package Excel file**
-
-            Dig packages are sectioned Excel files with headers like "Feature summary" and "Joint Summary".
-            The tool auto-extracts ILI features and longseam orientation for visualization.
-
-            **Privacy:** Your file is not stored on our servers — processing is limited to this browser session.
-            """
+            "👆 Upload a **dig package** Excel (sections **Feature summary** / **Joint Summary**). "
+            "Parsing runs automatically after upload."
         )
 
 

@@ -8,7 +8,8 @@ A Python-based web application providing tools for facility and pipeline enginee
 - **🏭 Facility Tools**:
   - **TML Data Loader**: Process Thickness Monitoring Location (TML) data with 20 customizable workflows
 - **🛢️ Pipeline Tools**:
-  - **ILI Visual Tool**: Upload and analyze In-Line Inspection (ILI) data from Excel files
+  - **ILI Visual Tool**: Upload or paste In-Line Inspection (ILI) data for the unwrapped pipe feature map
+  - **Dig Package Visual Tool**: Visualize ILI features and longseam lines from dig package Excel (Feature summary + Joint Summary)
   - **Metal Loss Assessment**: Assess pipeline metal loss features using modified B31G methodology with corrosion growth projections
   - **Metal Loss Mass Assessment**: Mass assessment of metal loss features across multiple pipeline segments
   - **Dig Package Generator**: Generate dig packages from MDL, ILI data, and template files
@@ -32,7 +33,8 @@ Tool_Box_Chen/
 │   ├── pages/                     # Streamlit pages (auto-discovered)
 │   │   ├── 1_Dashboard.py         # Dashboard overview
 │   │   ├── 2_TML_Data_Loader.py   # TML data processing tool
-│   │   ├── 3_ILI_Visual_Tool.py   # ILI data analysis tool
+│   │   ├── 3_Dig_Package_Visual_Tool.py  # Dig package Excel → feature map + workbook preview
+│   │   ├── 3_ILI_Visual_Tool.py   # ILI upload / paste → feature map
 │   │   ├── 4_Metal_Loss_Assessment.py  # Metal loss assessment tool
 │   │   ├── 5_Dig_Package_Generator.py  # Dig package generation tool
 │   │   └── 6_Metal_Loss_Mass_Assessment.py  # Metal loss mass assessment tool

@@ -15,6 +15,7 @@ Welcome to the comprehensive documentation for **Chen's Engineer Toolbox**.
 
 ### 🧩 Function-Specific Development
 - [**functions/ILI_VISUAL_TOOL.md**](functions/ILI_VISUAL_TOOL.md) - ILI Visual Tool development guide
+- [**DIG_PACKAGE_EXCEL_READING.md**](DIG_PACKAGE_EXCEL_READING.md) - Dig package Excel sections, Joint Summary matrix, TGW layout (shared by **Dig Package Visual Tool**)
 - [**functions/DASHBOARD.md**](functions/DASHBOARD.md) - Dashboard functionality guide
 - [**functions/FACILITY.md**](functions/FACILITY.md) - Facility tools development guide
 - [**functions/BACKEND_API.md**](functions/BACKEND_API.md) - Backend API development guide

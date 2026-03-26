@@ -108,6 +108,7 @@ This tool is **visualization only**.
 
 - [ARCHITECTURE.md](../ARCHITECTURE.md)
 - [BACKEND_API.md](BACKEND_API.md)
+- [DIG_PACKAGE_EXCEL_READING.md](../DIG_PACKAGE_EXCEL_READING.md) — dig package Excel (Joint Summary, TGW layout). Used by **Dig Package Visual Tool** (`frontend/pages/3_Dig_Package_Visual_Tool.py`); ILI Visual shares `ili_visual_shared.render_feature_map` for the map only.
 
 ---
 

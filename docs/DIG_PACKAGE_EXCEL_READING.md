@@ -1,5 +1,17 @@
 # Dig Package Excel Reading — Data Flow
 
+## Dig Package Visual Tool (app)
+
+| Piece | Location |
+|-------|----------|
+| Streamlit page | `frontend/pages/3_Dig_Package_Visual_Tool.py` |
+| UI + maps + workbook preview | `frontend/ili_visual_shared.py` — `render_dig_package_visual_tool`, `render_feature_map_fragment`, `_render_dig_package_source_preview` |
+| API | `POST /api/ili/process-dig-package` → `build_feature_map_from_dig_package` in `backend/pipeline/dig_package_reader.py` |
+
+The page title and sidebar already identify the tool; the body uses a short caption only (no duplicate heading).
+
+---
+
 ## Overview
 
 The dig package Excel has **two main sections** that we read:
@@ -22,7 +34,7 @@ Each source may report a slightly different longseam angle for the same joint.
 | What **clock hour** is the longseam for GWD *N* for vendor *V*? | **Joint Summary** matrix (after `_parse_joint_summary_matrix`) |
 | Optional **joint length (m)** per GWD for labels / checks | **Joint Summary** “joint length” rows → `scatter_data["joint_lengths_by_gwd"]` |
 
-The **3D view** still uses **Feature Summary chainages** for pipe segment boundaries, not Joint Summary lengths, so wrong joint-length extraction does not move rings — but it can affect labels and consistency checks. Wrong **longseam** extraction misplaces coloured seam lines and can mis-associate seam data with spans when GWD matching is positional.
+**3D ring positions** follow **`scatter_data["girth_welds"]`**: when Joint Summary **TGW layout (Step G)** runs, those chainages are synthetic from joint lengths (same list as 2D). If Step G is skipped, rings use **Feature Summary** girth-weld rows. Wrong **longseam** extraction misplaces coloured seam lines; wrong joint lengths (when Step G applies) move both 2D lines and 3D rings.
 
 ---
 
@@ -128,7 +140,7 @@ Each data row is classified using the **first non-empty** of column 0 and column
 | Condition | Action |
 |-----------|--------|
 | Label contains **“girth weld”** or **“joint”** + **“no”** | Skip (header/noise). |
-| Label contains **“joint length”** (column A or B) | For **every** column index in `gwd_to_cols[gwd]`, read a float; if **0.5 < m < 200**, append to `joint_lengths_raw[gwd]`. **No orientation** from this row. |
+| Label contains **“joint length”** (column A or B) | For **every** column index in `gwd_to_cols[gwd]`, read a float; if **0.5 < m < 200**, append to `joint_lengths_raw[gwd]`. **No orientation** from this row. The value under **GWD *N*** is treated as the length of the joint **from weld *N* toward the next weld** (upstream column convention). |
 | Otherwise | Candidate **longseam** row (see Step D). |
 
 ### Step D — Longseam values (stacked vs interleaved)
@@ -192,9 +204,9 @@ For **each** Joint Summary source that has a value for that GWD, append one `sea
 When the matrix parse succeeds (`use_gwd_lookup`) **and** `joint_lengths` has usable values, this path **replaces** Feature Summary girth welds for plotting with **four** welds on the **Distance from TGW** axis:
 
 1. Sort Joint Summary GWD ids (`gwd_order`).
-2. Choose **target index** `it`: `target_gwd_from_header` if present in `gwd_order`, else **middle** index.
+2. Choose **target index** `it`: `target_gwd_from_header` if present in `gwd_order`, else **`(len(gwd_order) - 1) // 2`** so four consecutive welds exist (e.g. for four GWD columns this is index **1**, not `len // 2`).
 3. Require **four consecutive GWDs**: `g0 = order[it−1] … g3 = order[it+2]` (needs `it ≥ 1` and `it + 2 < len(order)`).
-4. **Segment lengths** (metres) between neighbours: `_segment_joint_length_m(joint_lengths, g_left, g_right)` — prefers the **downstream** GWD’s column, then the upstream.
+4. **Segment lengths** (metres) between neighbours: `_segment_joint_length_m(joint_lengths, g_left, g_right)` — prefers the **upstream** GWD’s column (same as longseam: value under `GWD_i` applies to span toward `GWD_{i+1}`), then the downstream column as fallback.
 5. Chainages (target GWD at **0**):
 
    - `ch(g1) = 0`
@@ -231,17 +243,17 @@ If any segment length is missing or fewer than four GWDs are available, this ste
 | Visual element     | Source                    | Notes                                                |
 |--------------------|---------------------------|------------------------------------------------------|
 | Cylinder surface   | Feature Summary features  | Depth % WT heatmap                                   |
-| Red rings          | Feature Summary girth welds | One ring per selected boundary                     |
+| Red rings          | `girth_welds` in `scatter_data` (TGW from Joint Summary when Step G applies, else Feature Summary) | One ring per boundary in that list |
 | Coloured lines     | `seam_welds`              | One line per (span, Joint Summary source)           |
 | Clock labels       | Fixed                     | 12 o’clock = top of pipe                             |
 
-**Joint window:** `max_joints + 1` consecutive **girth-weld** chainages are chosen around the weld whose chainage is closest to **0** (target). That requires **enough** girth-weld rows in the Feature Summary; Joint Summary alone cannot add rings.
+**Joint window:** `max_joints + 1` consecutive **girth-weld** chainages are chosen around the weld closest to **0**. With TGW layout, those chainages already include Joint Summary–derived welds; otherwise they come from Feature Summary rows.
 
 ---
 
-## 5. Joint Lengths
+## 5. Joint lengths (summary)
 
-Joint lengths come from **“joint length”** rows: every numeric cell under each GWD’s column list (all interleaved columns) in **(0.5, 200)** m is collected; **`joint_lengths_by_gwd[gwd]`** is the **mean** per GWD.
+Same rule as **Step C**: **“joint length”** row(s) → numeric cells per GWD column → **`joint_lengths_by_gwd[gwd]`** = **mean** per GWD in **(0.5, 200)** m. Segment use in TGW layout: **upstream GWD** of each span (see Step G).
 
 ---
 

@@ -691,8 +691,13 @@ def _get_seam_hours_for_gwd(seam_map: Dict[int, float], gwd_number: Optional[int
 
 
 def _segment_joint_length_m(joint_lengths: Dict[int, float], g_left: int, g_right: int) -> Optional[float]:
-    """Metres for the pipe joint between g_left and g_right (TGW layout). Prefer downstream GWD column."""
-    for key in (g_right, g_left):
+    """Metres for the pipe joint between g_left and g_right (TGW layout).
+
+    Same convention as longseam columns: the **upstream** GWD (g_left) column carries the
+    value for the span to the next weld. Prefer g_left, then g_right for odd templates that
+    key lengths on the downstream weld only.
+    """
+    for key in (g_left, g_right):
         v = joint_lengths.get(key)
         if v is not None:
             try:
@@ -730,7 +735,8 @@ def _build_tgw_layout_from_joint_summary(
     if target_h is not None and target_h in gwd_order:
         it = gwd_order.index(target_h)
     else:
-        it = len(gwd_order) // 2
+        # Centre target so four consecutive GWDs fit: for len=4 need it=1, not len//2 (=2).
+        it = (len(gwd_order) - 1) // 2
     if it < 1 or it + 2 >= len(gwd_order):
         return None
 

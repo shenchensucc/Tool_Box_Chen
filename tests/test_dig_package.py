@@ -384,10 +384,11 @@ def test_build_feature_map_tgw_layout_uses_joint_lengths_for_four_red_lines():
     assert scatter_data.get("joint_summary_tgw_layout") is True
     gws = sorted(scatter_data["girth_welds"], key=lambda g: g["chainage"])
     assert len(gws) == 4
-    assert abs(gws[0]["chainage"] - (-17.5)) < 0.01
+    # Joint length under upstream GWD of each span: L(4560–4570)=12, L(4570–4580)=17.5, L(4580–4590)=19
+    assert abs(gws[0]["chainage"] - (-12.0)) < 0.01
     assert abs(gws[1]["chainage"] - 0.0) < 0.01
-    assert abs(gws[2]["chainage"] - 19.0) < 0.01
-    assert abs(gws[3]["chainage"] - 37.5) < 0.01
+    assert abs(gws[2]["chainage"] - 17.5) < 0.01
+    assert abs(gws[3]["chainage"] - 36.5) < 0.01
     seams = scatter_data.get("seam_welds", [])
     assert len(seams) >= 3
     tol = 0.02
@@ -397,8 +398,8 @@ def test_build_feature_map_tgw_layout_uses_joint_lengths_for_four_red_lines():
             abs(s["chainage_start"] - a) < tol and abs(s["chainage_end"] - b) < tol for s in seams
         )
 
-    assert _has_span(-17.5, 0.0)
-    assert _has_span(0.0, 19.0)
+    assert _has_span(-12.0, 0.0)
+    assert _has_span(0.0, 17.5)
 
 
 def test_find_header_row_after_skips_repeated_merged_section_title():
