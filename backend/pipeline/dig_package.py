@@ -14,7 +14,7 @@ import json
 import tempfile
 import zipfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import pandas as pd
 from openpyxl import load_workbook
@@ -37,7 +37,9 @@ logger = get_logger("backend.pipeline.dig_package")
 
 # MDL columns use a different schema from source ILI files.
 MDL_COLUMN_KEYWORDS = {
-    "dig_id": ["Dig ID", "Dig Name", "DigName", "NEW Dig Name", "Excavation ID"],
+    # Prefer "Dig ID" (numeric Integrity IDs like 6000); "Dig Name" is the long package label for filenames.
+    "dig_id": ["Dig ID", "NEW Dig Name", "Excavation ID"],
+    "dig_name": ["Dig Name", "DigName", "Dig Package Name"],
     "feature_id": ["Feature ID", "ILI Feature ID", "ID#", "Feature Identifier", "Target ID"],
     "pipeline_name": ["Pipeline Name", "Pipeline_Name", "PipelineName", "Line Name"],
     "pipe_od": ["Pipe OD", "Pipe_OD", "PipeOD", "OD (mm)", "Pipe Diameter"],
@@ -59,7 +61,7 @@ MDL_COLUMN_KEYWORDS = {
     "exposure_length": ["Exposure Length", "Expose Length"],
     "start_exposure": ["Start Exposure", "Exposure Start", "US Exposure"],
     "end_exposure": ["End Exposure", "Exposure End", "DS Exposure"],
-    "target_girth_weld": ["Target Girth Weld", "Target GW", "TGW", "Target Joint"],
+    "target_girth_weld": ["Target Girth Weld (TGW)", "Target Girth Weld", "Target GW", "TGW", "Target Joint"],
     "length": ["Feature Length", "Length", "Length (mm)", "Length (in)"],
     "width": ["Feature Width", "Width", "Width (mm)", "Width (in)"],
 }
@@ -112,7 +114,12 @@ ILI_VENDOR_KEYWORD_OVERRIDES = {
 }
 
 # Worksheet name keywords
-MDL_WORKSHEET_KEYWORDS = ["Features&Dig", "Features", "Dig"]
+MDL_WORKSHEET_KEYWORDS = [
+    "Dig Notification Log",
+    "Features&Dig",
+    "Features",
+    "Dig",
+]
 ILI_WORKSHEET_KEYWORDS = ["Pipetally", "Pipe Tally", "Tally", "True", "Page-1", "PNG ILI Pipeline Tally"]
 ANOMALIES_WORKSHEET_KEYWORDS = ["Anomalies", "Anomaly", "Anomaly Listing"]
 
@@ -151,19 +158,54 @@ def get_cell_from_named_range(workbook, range_name: str):
         return None
 
 
-def is_valid_dig_id(dig_id: str) -> bool:
+def is_valid_dig_id(dig_id: Union[str, int, float, None]) -> bool:
     """
-    Check if dig ID is valid (must contain 'GW').
-    
-    Args:
-        dig_id: Dig ID string
-        
-    Returns:
-        True if valid, False otherwise
+    Accept Integrity-style numeric dig IDs (e.g. 6000) or legacy IDs containing 'GW'.
     """
-    if not dig_id or pd.isna(dig_id):
+    if dig_id is None or (isinstance(dig_id, float) and pd.isna(dig_id)):
         return False
-    return "GW" in str(dig_id).upper()
+    s = str(dig_id).strip()
+    if not s or s.lower() in {"-", "nan", "none"}:
+        return False
+    if "GW" in s.upper():
+        return True
+    # PNG Integrity program: short numeric Dig ID (column "Dig ID")
+    try:
+        n = float(s.replace(",", ""))
+        if n.is_integer() and 1000 <= abs(n) <= 999999:
+            return True
+    except (ValueError, TypeError, AttributeError):
+        pass
+    return False
+
+
+def _sanitize_package_filename_base(name: str) -> str:
+    """Safe single segment for Excel/PDF output stem (PNG-style dig package names)."""
+    out = "".join(c if c not in '<>:"/\\|?*' else "_" for c in str(name).strip())
+    return out.strip(" ._") or "dig_package"
+
+
+def _mdl_rows_for_dig_id(mdl_df: pd.DataFrame, dig_id_col: str, dig_id: Any) -> pd.DataFrame:
+    """Match MDL rows where Dig ID may be int, float, or string (e.g. 6000 vs 6000.0)."""
+    col = mdl_df[dig_id_col]
+    tnum = pd.to_numeric(pd.Series([dig_id]), errors="coerce").iloc[0]
+    cnum = pd.to_numeric(col, errors="coerce")
+    if pd.notna(tnum):
+        mask = cnum == tnum
+        if bool(mask.any()):
+            return mdl_df[mask]
+    ds = col.astype(str).str.strip()
+    return mdl_df[ds == str(dig_id).strip()]
+
+
+def package_output_stem(mdl_row: pd.Series, mdl_col_map: Dict[str, str], dig_id: Any) -> str:
+    """Excel/PDF base name: prefer **Dig Name** (e.g. ID6000_R1R2_..._ML), else dig id."""
+    name_col = mdl_col_map.get("dig_name")
+    if name_col and name_col in mdl_row.index:
+        val = mdl_row[name_col]
+        if pd.notna(val) and str(val).strip() not in ("", "-"):
+            return _sanitize_package_filename_base(str(val).strip())
+    return _sanitize_package_filename_base(dig_id)
 
 
 def _normalize_match_value(value: Any) -> str:
@@ -405,9 +447,18 @@ def populate_single_value_fields(wb, mdl_row: pd.Series, mdl_col_map: Dict[str, 
             return val if pd.notna(val) else "-"
         return "-"
     
+    def get_dig_display_for_template() -> str:
+        """PNG-style packages label the dig using **Dig Name** (e.g. ID6000_…_ML), not the numeric Dig ID."""
+        name_col = mdl_col_map.get("dig_name")
+        if name_col and name_col in mdl_row.index:
+            val = mdl_row[name_col]
+            if pd.notna(val) and str(val).strip() not in ("", "-"):
+                return str(val).strip()
+        return get_value("dig_id")
+
     # Populate fields
     field_mapping = {
-        "tmp_DigID_": get_value("dig_id"),
+        "tmp_DigID_": get_dig_display_for_template(),
         "tmp_revNum": revision,
         "tmp_pipNme": get_value("pipeline_name"),
         "tmp_pipeOD": get_value("pipe_od"),
@@ -782,7 +833,7 @@ def generate_dig_packages(mdl_content: bytes, ili_contents: List[bytes], templat
         for excavation_num, dig_id in enumerate(dig_ids, start=1):
             # Filter MDL for current dig ID
             dig_id_col = mdl_col_map.get("dig_id")
-            mdl_features = mdl_df[mdl_df[dig_id_col] == dig_id]
+            mdl_features = _mdl_rows_for_dig_id(mdl_df, dig_id_col, dig_id)
             if mdl_features.empty:
                 summary["skipped"].append({"dig_id": dig_id, "reason": "No MDL rows matched dig ID after parsing"})
                 continue
@@ -831,14 +882,15 @@ def generate_dig_packages(mdl_content: bytes, ili_contents: List[bytes], templat
             populate_single_value_fields(wb, mdl_first_row, mdl_col_map, revision, excavation_num)
             populate_excavation_summary(wb, mdl_first_row, mdl_col_map, excavation_num)
             populate_feature_table(wb, ili_datasets_for_dig, excavation_num)
-            
+
+            out_stem = package_output_stem(mdl_first_row, mdl_col_map, dig_id)
             # Save Excel
-            excel_filename = f"{dig_id}_DP_R{revision}.xlsx"
+            excel_filename = f"{out_stem}_DP_R{revision}.xlsx"
             excel_path = temp_path / excel_filename
             wb.save(str(excel_path))
             
             # Convert to PDF
-            pdf_filename = f"{dig_id}_DP_R{revision}.pdf"
+            pdf_filename = f"{out_stem}_DP_R{revision}.pdf"
             pdf_path = temp_path / pdf_filename
             pdf_generated = convert_excel_to_pdf(str(excel_path), str(pdf_path))
             summary["generated"].append({

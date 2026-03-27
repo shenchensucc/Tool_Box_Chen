@@ -149,7 +149,10 @@ with main:
 
     with col2:
         st.markdown("**Naming Convention:**")
-        st.caption(f"Output files will be named: `{{DigID}}_DP_R{revision}.xlsx` and `{{DigID}}_DP_R{revision}.pdf`")
+        st.caption(
+            f"Output files: `{{Dig Name or Dig ID}}_DP_R{revision}.xlsx` / `.pdf` "
+            "(matches PNG Integrity naming when **Dig Name** is present in the MDL)."
+        )
 
     # Generate button
     st.markdown("---")
@@ -286,8 +289,8 @@ with main:
             ### Output Structure
         
             For each dig ID in the MDL, two files will be generated:
-            - `{DigID}_DP_R{revision}.xlsx` - Excel dig package
-            - `{DigID}_DP_R{revision}.pdf` - PDF version (if available)
+            - `{{Dig Name or Dig ID}}_DP_R{revision}.xlsx` - Excel dig package
+            - Same stem `.pdf` - PDF version (if available)
         
             All files are packaged in a single ZIP file for download.
         

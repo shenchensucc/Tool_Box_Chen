@@ -6,7 +6,9 @@ from openpyxl.workbook.defined_name import DefinedName
 from backend.pipeline.dig_package import (
     extract_dig_ids,
     get_target_gw_chainage,
+    is_valid_dig_id,
     match_features_by_dimensions,
+    package_output_stem,
     parse_ili_file,
     parse_mdl_file,
     populate_excavation_summary,
@@ -51,6 +53,40 @@ def test_parse_mdl_file_detects_header_after_title_rows():
     assert column_mapping["dig_id"] == "Dig ID"
     assert column_mapping["target_girth_weld"] == "Target Girth Weld"
     assert extract_dig_ids(df, column_mapping) == ["GW-100"]
+
+
+def test_extract_dig_ids_accepts_png_integrity_numeric_dig_ids():
+    df = pd.DataFrame(
+        {
+            "Dig ID": [6000, 6001],
+            "Dig Name": ["ID6000_R1R2_MP3_NPS10_GW3180_ML", "ID6001_R1R2_MP4_NPS10_GW4580_ML"],
+            "Target Girth Weld (TGW)": [3180, 4580],
+        }
+    )
+    column_mapping = {
+        "dig_id": "Dig ID",
+        "dig_name": "Dig Name",
+        "target_girth_weld": "Target Girth Weld (TGW)",
+    }
+    got = extract_dig_ids(df, column_mapping)
+    assert [int(x) for x in got] == [6000, 6001]
+
+
+def test_package_output_stem_prefers_dig_name():
+    row = pd.Series(
+        {
+            "Dig Name": "ID6000_R1R2_MP3_NPS10_GW3180_ML",
+            "Dig ID": 6000,
+        }
+    )
+    col_map = {"dig_name": "Dig Name", "dig_id": "Dig ID"}
+    assert package_output_stem(row, col_map, 6000) == "ID6000_R1R2_MP3_NPS10_GW3180_ML"
+
+
+def test_is_valid_dig_id_numeric_and_legacy_gw():
+    assert is_valid_dig_id(6000) is True
+    assert is_valid_dig_id("GW-100") is True
+    assert is_valid_dig_id("") is False
 
 
 def test_parse_ili_file_uses_shared_detection_for_rosen_anomalies_sheet():
