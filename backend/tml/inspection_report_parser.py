@@ -30,9 +30,14 @@ _EASYOCR_INIT_FAILED = False
 _PADDLEOCR_READER = None
 _PADDLEOCR_INIT_FAILED = False
 
+# Protect singleton initialization: two threads must not race to create the same reader.
+_EASYOCR_INIT_LOCK = threading.Lock()
+_PADDLEOCR_INIT_LOCK = threading.Lock()
+
 # In-process cache for OCR results: {(pdf_path_str, mtime_ns) -> List[ExtractedReading]}
 # Avoids re-running expensive EasyOCR on a file that hasn't changed.
 _STRUCT_OCR_CACHE: dict = {}
+_STRUCT_OCR_CACHE_LOCK = threading.Lock()
 
 # Limit simultaneous OCR (CPU-bound) threads to 1 so they don't thrash each other.
 # pdfplumber threads are not gated by this semaphore and run truly in parallel.
@@ -534,7 +539,8 @@ def _parse_acuren_results_table(
 
     summary_page_indices = _get_summary_page_indices(pdf_path)
     with pdfplumber.open(pdf_path) as pdf:
-        for page_idx, page in enumerate(pdf.pages):
+        # Iterate last-to-first: CML summary tables are typically near the end of the report.
+        for page_idx, page in reversed(list(enumerate(pdf.pages))):
             page_text = page.extract_text() or ""
             if not _should_process_page(page_text, summary_page_indices, page_idx):
                 continue
@@ -635,7 +641,8 @@ def _parse_single_cml_permissive(
     results = []
     summary_page_indices = _get_summary_page_indices(pdf_path)
     with pdfplumber.open(pdf_path) as pdf:
-        for page_idx, page in enumerate(pdf.pages):
+        # Iterate last-to-first: CML summary tables are typically near the end of the report.
+        for page_idx, page in reversed(list(enumerate(pdf.pages))):
             page_text = page.extract_text() or ""
             if not _should_process_page(page_text, summary_page_indices, page_idx):
                 continue
@@ -856,10 +863,11 @@ def _parse_generic_zone_table(
 
 
 def _extract_readings_from_tables(pdf_path: Path) -> List[float]:
-    """Extract numeric readings from PDF tables using pdfplumber."""
+    """Extract numeric readings from PDF tables using pdfplumber. Iterates last-to-first
+    so CML summary tables (typically near the end) are encountered first."""
     all_readings = []
     with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
+        for page in reversed(pdf.pages):
             tables = page.extract_tables()
             for table in tables or []:
                 for row in table:
@@ -883,10 +891,11 @@ def _extract_readings_from_tables(pdf_path: Path) -> List[float]:
 
 
 def _extract_readings_from_text(pdf_path: Path) -> List[float]:
-    """Extract readings from text using pdfplumber."""
+    """Extract readings from text using pdfplumber. Iterates last-to-first
+    so CML summary data (typically near the end) is encountered first."""
     all_readings = []
     with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
+        for page in reversed(pdf.pages):
             text = page.extract_text()
             if text:
                 all_readings.extend(_extract_numeric_readings(text))
@@ -962,25 +971,38 @@ _OCR_GRID_PAGE = re.compile(
 
 
 def _extract_with_ocr(pdf_path: Path) -> Tuple[str, List[float], List[str], str]:
-    """Fallback: render PDF pages to images and run OCR. Returns (date, readings, cml_ids, circuit).
-    Prefers summary table pages (UT REPORT - Connections/Elbow); skips grid pages (detailed scans).
-    Summary tables may be image-based, so OCR with high sensitivity is used."""
+    """Fallback: render PDF pages to images and run Tesseract OCR.
+    Skips grid-scan pages *before* rendering to avoid wasting time on large detailed-scan pages.
+    Only runs dual-PSM when explicitly enabled via INSPECTION_REPORT_OCR_MULTI_PSM=1."""
     doc = pymupdf.open(pdf_path)
     full_text = ""
     all_readings = []
-    summary_page_readings: List[float] = []  # Readings from pages that look like summary tables
+    summary_page_readings: List[float] = []
 
     ocr_dpi = 400 if os.getenv("INSPECTION_REPORT_OCR_HIGH_DPI") else 300
+    dual_psm = os.getenv("INSPECTION_REPORT_OCR_MULTI_PSM") == "1"
+
     for page_idx, page in enumerate(doc):
-        # 300-400 DPI recommended for Tesseract; higher helps decimal digits
+        # Quick native-text check (< 1 ms) before expensive pixmap + OCR.
+        # Grid/detailed-scan pages can be skipped entirely once we have summary readings.
+        if page_idx > 0:
+            quick_text = page.get_text() or ""
+            is_grid_prelim = bool(
+                _OCR_GRID_PAGE.search(quick_text) or _UT_GRID_SECTION.search(quick_text)
+            )
+            is_summary_prelim = bool(_UT_REPORT_SUMMARY.search(quick_text))
+            # Skip grid-only pages as soon as we have at least one summary-table reading.
+            if is_grid_prelim and not is_summary_prelim and summary_page_readings:
+                continue
+
         pix = page.get_pixmap(dpi=ocr_dpi)
         img_bytes = pix.tobytes(output="png")
         text = _run_ocr_on_page(img_bytes, psm=6)
         full_text += text + "\n"
-        # Skip page 0 for readings - header has phone/fax/date noise
+
         if page_idx == 0:
-            continue
-        # Prefer summary pages; skip grid-only pages when we have summary or other non-grid readings
+            continue  # header page: use for metadata only
+
         is_summary = _UT_REPORT_SUMMARY.search(text)
         is_grid_only = (_OCR_GRID_PAGE.search(text) or _UT_GRID_SECTION.search(text)) and not is_summary
         readings = _extract_numeric_readings(text)
@@ -989,7 +1011,8 @@ def _extract_with_ocr(pdf_path: Path) -> Tuple[str, List[float], List[str], str]
         if is_grid_only and summary_page_readings:
             continue
         all_readings.extend(readings)
-        if len(readings) < 3 and len(doc) <= 5 and not os.getenv("INSPECTION_REPORT_OCR_MULTI_PSM"):
+        # Dual-PSM second pass: opt-in only (off by default to avoid doubling OCR time)
+        if dual_psm and len(readings) < 3:
             text2 = _run_ocr_on_page(img_bytes, psm=11)
             extra = _extract_numeric_readings(text2)
             all_readings.extend(extra)
@@ -1010,7 +1033,7 @@ def _extract_with_ocr(pdf_path: Path) -> Tuple[str, List[float], List[str], str]
 
 
 def _extract_with_easyocr(pdf_path: Path) -> Tuple[str, List[float], List[str], str]:
-    """EasyOCR extraction - often better than Tesseract on tables. No external binary."""
+    """EasyOCR extraction — skips grid-scan pages before rendering to cut CPU time significantly."""
     try:
         import io
         import numpy as np
@@ -1028,10 +1051,20 @@ def _extract_with_easyocr(pdf_path: Path) -> Tuple[str, List[float], List[str], 
     ocr_dpi = 250 if os.getenv("INSPECTION_REPORT_OCR_HIGH_DPI") else 200
 
     for page_idx, page in enumerate(doc):
+        # Quick native-text check before expensive rendering + neural OCR.
+        # EasyOCR is ~3-5 s/page on CPU; skipping grid pages saves substantial time.
+        if page_idx > 0:
+            quick_text = page.get_text() or ""
+            is_grid_prelim = bool(
+                _OCR_GRID_PAGE.search(quick_text) or _UT_GRID_SECTION.search(quick_text)
+            )
+            is_summary_prelim = bool(_UT_REPORT_SUMMARY.search(quick_text))
+            if is_grid_prelim and not is_summary_prelim and summary_page_readings:
+                continue
+
         pix = page.get_pixmap(dpi=ocr_dpi)
         img_bytes = pix.tobytes(output="png")
         img = Image.open(io.BytesIO(img_bytes))
-        # Preprocessing is on by default; set INSPECTION_REPORT_OCR_PREPROCESS=0 to disable.
         if os.getenv("INSPECTION_REPORT_OCR_PREPROCESS", "1") != "0":
             img = _preprocess_for_ocr(img)
         img = np.array(img)
@@ -1041,7 +1074,7 @@ def _extract_with_easyocr(pdf_path: Path) -> Tuple[str, List[float], List[str], 
             page_text += text + "\n"
             full_text += text + "\n"
         readings = _extract_numeric_readings(page_text)
-        if page_idx > 0:  # Skip header page
+        if page_idx > 0:
             is_summary = _UT_REPORT_SUMMARY.search(page_text)
             is_grid_only = (_OCR_GRID_PAGE.search(page_text) or _UT_GRID_SECTION.search(page_text)) and not is_summary
             if is_summary:
@@ -1059,7 +1092,7 @@ def _extract_with_easyocr(pdf_path: Path) -> Tuple[str, List[float], List[str], 
 
 
 def _is_image_heavy_report(pdf_path: Path, full_text: str) -> bool:
-    """Heuristic: scanned/image-heavy reports need vision more than text parsing."""
+    """Heuristic: scanned/image-heavy reports need structured OCR more than text parsing."""
     if len(full_text.strip()) < 400:
         return True
     try:
@@ -1084,7 +1117,7 @@ def _is_image_heavy_report(pdf_path: Path, full_text: str) -> bool:
 
 def _get_candidate_vision_pages(pdf_path: Path, max_pages: int = 5) -> List[int]:
     """
-    Pick likely result-table pages for vision parsing.
+    Pick likely result-table pages for structured local OCR.
     Prefer pages with large embedded images and CML/result markers, while skipping grid pages.
     """
     try:
@@ -1182,101 +1215,6 @@ def _iter_candidate_page_segments(doc, candidate_pages: List[int], dpi: int = 30
             continue
 
 
-def _extract_json_object(text: str) -> Optional[dict]:
-    """Parse JSON from an LLM response that may include fences or prose."""
-    if not text:
-        return None
-
-    candidates = []
-    fenced = re.findall(r"```(?:json)?\s*([\[{][\s\S]*?[\]}])\s*```", text, re.I)
-    candidates.extend(fenced)
-
-    obj_start = text.find("{")
-    obj_end = text.rfind("}")
-    if obj_start != -1 and obj_end != -1 and obj_end > obj_start:
-        candidates.append(text[obj_start : obj_end + 1])
-    arr_start = text.find("[")
-    arr_end = text.rfind("]")
-    if arr_start != -1 and arr_end != -1 and arr_end > arr_start:
-        candidates.append(text[arr_start : arr_end + 1])
-
-    for candidate in candidates:
-        try:
-            payload = json.loads(candidate)
-            if isinstance(payload, list):
-                return {"readings": payload}
-            if isinstance(payload, dict):
-                return payload
-        except json.JSONDecodeError:
-            continue
-    return None
-
-
-def _build_structured_llm_results(
-    payload: dict,
-    source_filename: str,
-    fallback_circuit: str,
-    fallback_date: str,
-) -> List[ExtractedReading]:
-    """Normalize JSON returned by the structured vision prompt."""
-    circuit_id = str(payload.get("circuit_id") or fallback_circuit or "Unknown").strip() or "Unknown"
-    measurement_date = str(payload.get("measurement_date") or fallback_date or "").strip()
-
-    results: List[ExtractedReading] = []
-    for item in payload.get("readings", []) or []:
-        if not isinstance(item, dict):
-            continue
-
-        cml_id = str(item.get("cml_id") or item.get("CML_ID") or "").strip()
-        if not cml_id:
-            cml_base = str(item.get("cml_base") or item.get("cml") or item.get("CML") or "").strip()
-            zone = str(item.get("zone") or item.get("section") or item.get("SECTION") or "").strip()
-            if zone and not re.fullmatch(r"\d+", zone):
-                continue
-            if cml_base and zone:
-                cml_id = f"{cml_base}-{zone}"
-        if not cml_id:
-            continue
-        if "-" in cml_id:
-            cml_base, zone = cml_id.rsplit("-", 1)
-            if not re.fullmatch(r"\d+(?:\.\d+)?", cml_base) or not re.fullmatch(r"\d+", zone):
-                continue
-        elif not re.fullmatch(r"\d+(?:\.\d+)?", cml_id):
-            continue
-
-        reading_raw = item.get("min_reading", item.get("reading"))
-        if reading_raw is None:
-            reading_raw = (
-                item.get("minimum_reading")
-                or item.get("MINIMUM_READING")
-                or item.get("MIN_READING")
-                or item.get("READING")
-                or item.get("NORTH")
-                or item.get("THICKNESS")
-                or item.get("MIN")
-            )
-        try:
-            min_reading = float(reading_raw)
-        except (TypeError, ValueError):
-            continue
-        if not (0.05 <= min_reading <= 3.0):
-            continue
-
-        results.append(
-            ExtractedReading(
-                circuit_id=circuit_id,
-                cml_id=cml_id,
-                measurement_date=measurement_date,
-                min_reading=min_reading,
-                all_readings=[min_reading],
-                source_file=source_filename,
-                extraction_method="llm_vision",
-            )
-        )
-
-    return results
-
-
 def _normalize_easyocr_tokens(ocr_result) -> List[dict]:
     """Convert EasyOCR output into simple positioned tokens."""
     tokens = []
@@ -1355,50 +1293,89 @@ def _normalize_paddleocr_tokens(ocr_result) -> List[dict]:
     return tokens
 
 
+def _easyocr_use_gpu() -> bool:
+    """Use GPU on the backend host when INSPECTION_REPORT_OCR_GPU=1 (requires CUDA + torch with CUDA)."""
+    flag = os.getenv("INSPECTION_REPORT_OCR_GPU", "").strip().lower()
+    if flag in ("0", "false", "no", "off"):
+        return False
+    if flag in ("1", "true", "yes", "on"):
+        try:
+            import torch
+
+            return bool(torch.cuda.is_available())
+        except ImportError:
+            return False
+    return False
+
+
 def _get_easyocr_reader():
-    """Reuse a singleton EasyOCR reader to avoid heavy re-initialization."""
+    """Reuse a singleton EasyOCR reader. Thread-safe: initialization is guarded by a lock."""
     global _EASYOCR_READER, _EASYOCR_INIT_FAILED
+    # Fast path: already initialized (no lock needed — reads are safe under CPython GIL)
     if _EASYOCR_INIT_FAILED:
         return None
     if _EASYOCR_READER is not None:
         return _EASYOCR_READER
-    try:
-        import easyocr
-    except ImportError:
-        _EASYOCR_INIT_FAILED = True
-        return None
-    try:
-        _EASYOCR_READER = easyocr.Reader(["en"], gpu=False, verbose=False)
-    except Exception:
-        _EASYOCR_INIT_FAILED = True
-        return None
+    # Slow path: first-time init, serialize with a lock so two threads never race here
+    with _EASYOCR_INIT_LOCK:
+        # Re-check inside the lock in case another thread just finished initializing
+        if _EASYOCR_INIT_FAILED:
+            return None
+        if _EASYOCR_READER is not None:
+            return _EASYOCR_READER
+        try:
+            import easyocr
+        except ImportError:
+            _EASYOCR_INIT_FAILED = True
+            return None
+        try:
+            _EASYOCR_READER = easyocr.Reader(["en"], gpu=_easyocr_use_gpu(), verbose=False)
+        except Exception as exc:
+            msg = str(exc).lower()
+            _logger.warning("EasyOCR init failed: %s", exc)
+            if "not enough memory" in msg or "alloc" in msg and "fail" in msg:
+                _logger.warning(
+                    "EasyOCR needs hundreds of MB of free RAM. Close other apps, or use "
+                    "Tesseract-only (install Tesseract, set INSPECTION_REPORT_OCR_ENGINE=tesseract), "
+                    "or avoid INSPECTION_REPORT_PRELOAD_OCR=1 on this machine."
+                )
+            _EASYOCR_INIT_FAILED = True
+            return None
     return _EASYOCR_READER
 
 
 def _get_paddleocr_reader():
-    """Reuse a singleton PaddleOCR reader. Better for grid/table text in many reports."""
+    """Reuse a singleton PaddleOCR reader. Thread-safe: initialization is guarded by a lock."""
     global _PADDLEOCR_READER, _PADDLEOCR_INIT_FAILED
+    # Fast path
     if _PADDLEOCR_INIT_FAILED:
         return None
     if _PADDLEOCR_READER is not None:
         return _PADDLEOCR_READER
-    try:
-        from paddleocr import PaddleOCR
-    except Exception:
-        # Catches ImportError but also DLL/binary errors (FileNotFoundError on Windows
-        # when paddle's native libs are missing or incompatible). Mark as failed so we
-        # never retry — the failed import is slow and prints noisy warnings.
-        _PADDLEOCR_INIT_FAILED = True
-        return None
-    try:
-        _PADDLEOCR_READER = PaddleOCR(
-            use_angle_cls=True,
-            lang="en",
-            show_log=False,
-        )
-    except Exception:
-        _PADDLEOCR_INIT_FAILED = True
-        return None
+    # Slow path: serialize init
+    with _PADDLEOCR_INIT_LOCK:
+        if _PADDLEOCR_INIT_FAILED:
+            return None
+        if _PADDLEOCR_READER is not None:
+            return _PADDLEOCR_READER
+        try:
+            from paddleocr import PaddleOCR
+        except Exception:
+            # Catches ImportError but also DLL/binary errors (FileNotFoundError on Windows
+            # when paddle's native libs are missing or incompatible). Mark as failed so we
+            # never retry — the failed import is slow and prints noisy warnings.
+            _PADDLEOCR_INIT_FAILED = True
+            return None
+        try:
+            _PADDLEOCR_READER = PaddleOCR(
+                use_angle_cls=True,
+                lang="en",
+                show_log=False,
+            )
+        except Exception as exc:
+            _logger.warning("PaddleOCR init failed: %s", exc)
+            _PADDLEOCR_INIT_FAILED = True
+            return None
     return _PADDLEOCR_READER
 
 
@@ -1769,165 +1746,6 @@ def _supplement_with_pdfplumber(
     return _validate_and_dedupe_before_export(supplemented)
 
 
-def _extract_structured_with_llm_vision(
-    pdf_path: Path,
-    source_filename: str = "",
-    fallback_circuit: str = "",
-    fallback_date: str = "",
-    fallback_cml_ids: Optional[List[str]] = None,
-) -> List[ExtractedReading]:
-    """
-    Vision fallback for image-heavy reports.
-    Unlike OCR-as-text, this asks the model for structured result rows directly.
-    """
-    try:
-        from openai import OpenAI
-
-        from backend.llm_config import get_api_key, get_chat_base_url
-    except ImportError:
-        return []
-
-    api_key = get_api_key()
-    if not api_key:
-        return []
-    if not (os.getenv("INSPECTION_REPORT_LLM_VISION") or os.getenv("INSPECTION_REPORT_LLM_ONLY")):
-        return []
-
-    vision_model = os.getenv("INSPECTION_REPORT_VISION_MODEL", "gemini-3-flash-preview")
-    max_pages = int(os.getenv("INSPECTION_REPORT_LLM_STRUCTURED_MAX_PAGES", "5"))
-    dpi = int(os.getenv("INSPECTION_REPORT_LLM_STRUCTURED_DPI", os.getenv("INSPECTION_REPORT_LLM_DPI", "170")))
-    candidate_pages = _get_candidate_vision_pages(pdf_path, max_pages=max_pages)
-    if not candidate_pages:
-        return []
-
-    client = OpenAI(base_url=get_chat_base_url(), api_key=api_key)
-    doc = pymupdf.open(pdf_path)
-    results: List[ExtractedReading] = []
-
-    try:
-        import io
-
-        for page_idx, xref, segment_name, segment in _iter_candidate_image_segments(doc, candidate_pages):
-            buf = io.BytesIO()
-            segment.save(buf, format="PNG")
-            b64 = f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode()}"
-            prompt = (
-                "Extract only final summary-table result rows visible in this UT inspection image segment.\n"
-                "Return JSON only as an array of rows. Each row should include circuit, cml, section, and the minimum reading.\n"
-                "Ignore diagrams, grid instructions, headers, filenames, and rows with N/A or FLANGE.\n"
-                f"Fallback circuit_id: {fallback_circuit}\n"
-                f"Fallback measurement_date: {fallback_date}\n"
-                f"Expected CML bases when visible: {', '.join(fallback_cml_ids or [])}"
-            )
-            content = [
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": b64}},
-            ]
-            try:
-                resp = client.chat.completions.create(
-                    model=vision_model,
-                    messages=[{"role": "user", "content": content}],
-                    max_tokens=3000,
-                )
-            except Exception as exc:
-                _logger.warning(
-                    "Structured LLM vision failed on page %s image %s (%s): %s",
-                    page_idx + 1,
-                    xref,
-                    segment_name,
-                    exc,
-                    exc_info=False,
-                )
-                continue
-
-            payload = _extract_json_object((resp.choices[0].message.content or "").strip())
-            if not payload:
-                continue
-
-            page_results = _build_structured_llm_results(
-                payload,
-                source_filename=source_filename or pdf_path.name,
-                fallback_circuit=fallback_circuit,
-                fallback_date=fallback_date,
-            )
-            if page_results:
-                results.extend(page_results)
-                expected_bases = {cml_id for cml_id in (fallback_cml_ids or []) if cml_id}
-                found_bases = {r.cml_id.split("-", 1)[0] for r in results if "-" in r.cml_id}
-                if expected_bases and expected_bases.issubset(found_bases) and len(results) >= len(expected_bases) + 1:
-                    return _validate_and_dedupe_before_export(results)
-    finally:
-        doc.close()
-
-    return _validate_and_dedupe_before_export(results) if results else []
-
-
-def _extract_with_llm_vision(pdf_path: Path) -> Tuple[str, List[float], List[str], str]:
-    """
-    LLM as OCR: transcribe page images to text, then use existing parser logic.
-    Returns (date, readings, cml_ids, circuit) - same format as _extract_with_ocr.
-    Enable with INSPECTION_REPORT_LLM_VISION=1 and AI_BUILDER_TOKEN.
-    """
-    if not os.getenv("INSPECTION_REPORT_LLM_VISION"):
-        return "", [], [], ""
-    try:
-        from openai import OpenAI
-
-        from backend.llm_config import get_api_key, get_chat_base_url
-    except ImportError:
-        return "", [], [], ""
-    api_key = get_api_key()
-    if not api_key:
-        return "", [], [], ""
-
-    vision_model = os.getenv("INSPECTION_REPORT_VISION_MODEL", "gemini-3-flash-preview")
-    max_pages = int(os.getenv("INSPECTION_REPORT_LLM_MAX_PAGES", "6"))
-    dpi = int(os.getenv("INSPECTION_REPORT_LLM_DPI", "150"))
-
-    prompt = """Transcribe all text from this page. Include every number, table cell, label, and header.
-Output plain text only. Preserve numbers exactly as shown (e.g. 0.358, 0.365)."""
-
-    client = OpenAI(base_url=get_chat_base_url(), api_key=api_key)
-    full_text = ""
-    all_readings: List[float] = []
-    summary_page_readings: List[float] = []
-
-    doc = pymupdf.open(pdf_path)
-    for page_idx in range(min(len(doc), max_pages)):
-        page = doc[page_idx]
-        pix = page.get_pixmap(dpi=dpi)
-        b64 = f"data:image/png;base64,{base64.b64encode(pix.tobytes(output='png')).decode()}"
-        content = [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": b64}}]
-        try:
-            resp = client.chat.completions.create(
-                model=vision_model,
-                messages=[{"role": "user", "content": content}],
-                max_tokens=4000,
-            )
-        except Exception:
-            continue
-        page_text = (resp.choices[0].message.content or "").strip()
-        full_text += page_text + "\n"
-        if page_idx == 0:
-            continue
-        is_summary = _UT_REPORT_SUMMARY.search(page_text)
-        is_grid_only = (_OCR_GRID_PAGE.search(page_text) or _UT_GRID_SECTION.search(page_text)) and not is_summary
-        readings = _extract_numeric_readings(page_text)
-        if is_summary:
-            summary_page_readings.extend(readings)
-        if not (is_grid_only and summary_page_readings):
-            all_readings.extend(readings)
-    doc.close()
-
-    if summary_page_readings:
-        all_readings = summary_page_readings
-
-    date = _extract_date_from_text(full_text)
-    circuit = _extract_circuit_from_text(full_text)
-    cml_ids = _extract_cml_ids_from_text(full_text)
-    return date or "", all_readings, cml_ids, circuit or ""
-
-
 def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> List[ExtractedReading]:
     """
     Parse a single UT inspection report PDF.
@@ -2030,7 +1848,6 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
     _suspicious_readings = all_readings and all(r == 0.0 for r in all_readings)
     _try_ocr = not all_readings or len(full_text) < 100 or _suspicious_readings
     _image_heavy_report = _is_image_heavy_report(pdf_path, full_text)
-    _used_llm_vision = False
     if _try_ocr:
         if _image_heavy_report:
             structured_local_results = _extract_structured_with_local_ocr(
@@ -2045,87 +1862,36 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
                     pdf_path, source_filename, [replace(r, source_file=source_filename) for r in structured_local_results]
                 )
 
-            structured_llm_results = _extract_structured_with_llm_vision(
-                pdf_path,
-                source_filename=source_filename,
-                fallback_circuit=_extract_circuit_base(circuit or "Unknown"),
-                fallback_date=date or "",
-                fallback_cml_ids=cml_ids,
-            )
-            if structured_llm_results:
-                return _finalize_results(
-                    pdf_path, source_filename, [replace(r, source_file=source_filename) for r in structured_llm_results]
-                )
-
+        # OCR fallback order: EasyOCR first (usually more accurate on tables, no external install),
+        # then Tesseract. Each engine is called at most once to avoid doubling the OCR time.
         ocr_date, ocr_readings, ocr_cml_ids, ocr_circuit = "", [], [], ""
-        # INSPECTION_REPORT_LLM_ONLY=1: skip OCR, use LLM Vision directly (for comparison/testing)
-        if os.getenv("INSPECTION_REPORT_LLM_ONLY"):
+        if os.getenv("INSPECTION_REPORT_OCR_ENGINE") != "tesseract":
             try:
-                llm_date, llm_readings, llm_cml_ids, llm_circuit = _extract_with_llm_vision(pdf_path)
-                if llm_readings:
-                    all_readings = llm_readings
-                    _used_llm_vision = True
-                if llm_date:
-                    date = llm_date
-                if llm_cml_ids:
-                    cml_ids = llm_cml_ids
-                if llm_circuit:
-                    circuit = llm_circuit
+                e_date, e_readings, e_cmls, e_circuit = _extract_with_easyocr(pdf_path)
+                if e_readings:
+                    ocr_date, ocr_readings, ocr_cml_ids, ocr_circuit = e_date, e_readings, e_cmls, e_circuit
+            except Exception:
+                pass
+        # Try Tesseract only when EasyOCR found nothing or insufficient readings
+        if len(ocr_readings) < 4:
+            try:
+                t_date, t_readings, t_cmls, t_circuit = _extract_with_ocr(pdf_path)
+                if len(t_readings) > len(ocr_readings):
+                    ocr_date, ocr_readings, ocr_cml_ids, ocr_circuit = t_date, t_readings, t_cmls, t_circuit
             except Exception as e:
-                _logger.warning("LLM Vision (LLM-only mode) failed: %s", e, exc_info=False)
-        else:
-            # Normal: OCR first, LLM as fallback
-            if os.getenv("INSPECTION_REPORT_OCR_ENGINE") != "tesseract":
-                try:
-                    e_date, e_readings, e_cmls, e_circuit = _extract_with_easyocr(pdf_path)
-                    if e_readings and len(e_readings) >= 4:
-                        ocr_date, ocr_readings, ocr_cml_ids, ocr_circuit = e_date, e_readings, e_cmls, e_circuit
-                except Exception:
-                    pass
-            if not ocr_readings:
-                try:
-                    ocr_date, ocr_readings, ocr_cml_ids, ocr_circuit = _extract_with_ocr(pdf_path)
-                    if len(ocr_readings) < 4:
-                        try:
-                            e_date, e_readings, e_cmls, e_circuit = _extract_with_easyocr(pdf_path)
-                            if e_readings and len(e_readings) > len(ocr_readings):
-                                ocr_date, ocr_readings, ocr_cml_ids, ocr_circuit = e_date, e_readings, e_cmls, e_circuit
-                        except Exception:
-                            pass
-                except Exception as e:
-                    import logging
-                    logging.getLogger(__name__).debug(
-                        "OCR fallback failed (install Tesseract for image-based reports): %s", e
-                    )
-            if ocr_readings:
-                all_readings = ocr_readings
-            if ocr_date:
-                date = ocr_date
-            if ocr_cml_ids:
-                cml_ids = ocr_cml_ids
-            if ocr_circuit:
-                circuit = ocr_circuit
-            # Optional: LLM as OCR-like fallback when OCR fails or is suspicious
-            if not all_readings or (_suspicious_readings and len(all_readings) < 4):
-                try:
-                    llm_date, llm_readings, llm_cml_ids, llm_circuit = _extract_with_llm_vision(pdf_path)
-                    if llm_readings:
-                        all_readings = llm_readings
-                        _used_llm_vision = True
-                    if llm_date:
-                        date = llm_date
-                    if llm_cml_ids:
-                        cml_ids = llm_cml_ids
-                    if llm_circuit:
-                        circuit = llm_circuit
-                except Exception as e:
-                    _logger.warning(
-                        "LLM Vision (OCR-like) failed: %s",
-                        e,
-                        exc_info=False,
-                    )
+                _logger.debug(
+                    "Tesseract OCR fallback failed (install Tesseract for image-based reports): %s", e
+                )
+        if ocr_readings:
+            all_readings = ocr_readings
+        if ocr_date:
+            date = ocr_date
+        if ocr_cml_ids:
+            cml_ids = ocr_cml_ids
+        if ocr_circuit:
+            circuit = ocr_circuit
 
-    # Use pdfplumber/full_text only when OCR/LLM didn't provide values
+    # Use pdfplumber/full_text only when OCR didn't provide values
     date = date or _extract_date_from_text(full_text)
     circuit = circuit or _extract_circuit_from_text(full_text)
     cml_ids = cml_ids or _extract_cml_ids_from_text(full_text)
@@ -2190,8 +1956,7 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
             generic_results = _validate_and_dedupe_before_export(generic_results)
             return _finalize_results(pdf_path, source_filename, generic_results)
 
-    # Image-based reports often lose table structure with OCR.
-    # Try local structured OCR first, then vision if needed.
+    # Image-based reports often lose table structure with OCR — retry structured local OCR.
     if _image_heavy_report:
         structured_local_results = _extract_structured_with_local_ocr(
             pdf_path,
@@ -2203,18 +1968,6 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
         if structured_local_results:
             return _finalize_results(
                 pdf_path, source_filename, [replace(r, source_file=source_filename) for r in structured_local_results]
-            )
-
-        structured_llm_results = _extract_structured_with_llm_vision(
-            pdf_path,
-            source_filename=source_filename,
-            fallback_circuit=circuit_base,
-            fallback_date=date_str,
-            fallback_cml_ids=cml_ids,
-        )
-        if structured_llm_results:
-            return _finalize_results(
-                pdf_path, source_filename, [replace(r, source_file=source_filename) for r in structured_llm_results]
             )
 
     results = []
@@ -2279,7 +2032,7 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
                             min_reading=_valid_readings[idx],
                             all_readings=[_valid_readings[idx]],
                             source_file=source_filename,
-                            extraction_method="llm_vision" if _used_llm_vision else "ocr",
+                            extraction_method="ocr",
                         )
                     )
                     idx += 1

@@ -7,6 +7,8 @@ A Python-based web application providing tools for facility and pipeline enginee
 - **📊 Dashboard**: Project overview and activity tracking
 - **🏭 Facility Tools**:
   - **TML Data Loader**: Process Thickness Monitoring Location (TML) data with 20 customizable workflows
+  - **Deactivate CML**: Bulk-deactivate CMLs in APM dataloader format
+  - **Inspection Report Loader**: Upload UT inspection report PDFs; extract readings via pdfplumber + OCR and generate APM measurement datalaoders
 - **🛢️ Pipeline Tools**:
   - **ILI Visual Tool**: Upload or paste In-Line Inspection (ILI) data for the unwrapped pipe feature map
   - **Dig Package Visual Tool**: Visualize ILI features and longseam lines from dig package Excel (Feature summary + Joint Summary)
@@ -17,9 +19,10 @@ A Python-based web application providing tools for facility and pipeline enginee
 ## 🏗️ Architecture
 
 - **Frontend**: Streamlit (pure Python UI)
-- **Backend**: FastAPI (RESTful API)
+- **Backend**: FastAPI + Uvicorn (multi-worker, non-blocking async)
 - **Visualization**: Plotly (interactive charts)
-- **Data Processing**: pandas, openpyxl
+- **Data Processing**: pandas, openpyxl, pdfplumber
+- **OCR**: EasyOCR / PaddleOCR / Tesseract — isolated in a subprocess worker
 - **Validation**: Pydantic
 - **Tooling**: uv (package management), ruff (linting), black (formatting)
 
@@ -40,14 +43,17 @@ Tool_Box_Chen/
 │   │   └── 6_Metal_Loss_Mass_Assessment.py  # Metal loss mass assessment tool
 │   └── __init__.py
 ├── backend/                       # Backend API (FastAPI)
-│   ├── main.py                    # FastAPI application and endpoints
+│   ├── main.py                    # FastAPI application, endpoints, startup/shutdown
 │   ├── models.py                   # Pydantic models for API validation
 │   ├── pipeline/                  # Pipeline engineering tools
+│   │   ├── ocr_subprocess.py      # OCR worker (runs in isolated subprocess)
 │   │   ├── ili_reader.py          # ILI data reading and processing
 │   │   ├── dig_package.py         # Dig package generation
 │   │   ├── metal_loss.py          # Metal loss assessment calculations
 │   │   └── report_generator.py    # Word report generation
 │   ├── tml/                       # Thickness Monitoring Location tools
+│   │   ├── inspection_report_parser.py  # PDF parsing + OCR integration
+│   │   ├── inspection_dataloader.py     # APM dataloader generation
 │   │   ├── file_handler.py        # Excel file handling utilities
 │   │   ├── data_processor.py      # Data processing utilities
 │   │   └── workflows/             # TML workflow modules (20 workflows)
@@ -199,6 +205,9 @@ The frontend will open automatically in your browser at `http://localhost:8501`
 
 **TML (Thickness Monitoring Location) Tools:**
 - **POST** `/api/tml/process` - Process TML data with selected workflows and return ZIP file with outputs
+- **POST** `/api/tml/deactivate-cml` - Generate deactivation dataloader from source Excel
+- **POST** `/api/tml/inspection-report/read` - Parse PDF inspection reports (OCR-backed); returns reading summary
+- **POST** `/api/tml/inspection-report` - Parse PDFs + generate APM measurement dataloader Excel
 
 **Pipeline Metal Loss Assessment:**
 - **POST** `/api/pipeline/metal-loss/assess` - Assess metal loss feature and return calculated results
@@ -388,14 +397,16 @@ DEBUG=true
 - ✅ Generate dig packages for pipeline excavation planning
 - ✅ Excel-to-PDF conversion (Windows)
 
-## 🔒 Security
+## 🔒 Security & Privacy
 
+- **Session-only data**: No user information is stored on the server — all uploads and results stay in the current browser session only
 - File size validation (100 MB limit per file)
-- Excel file type validation (extension checking)
+- Excel/PDF file type validation (extension checking)
 - Temporary file cleanup after processing
+- Download tokens stored on filesystem (short-lived, auto-cleaned)
 - CORS configured for local development
 - Input validation via Pydantic models
-- Secure temporary file handling
+- OCR runs in an isolated subprocess — crashes cannot affect the main server
 
 ## 🚧 Roadmap
 
@@ -460,7 +471,7 @@ This project is licensed under the MIT License.
 
 ---
 
-**Version**: 0.1.0  
+**Version**: 0.2.0  
 **Built with**: Streamlit + FastAPI + Python 3.11
 
 For questions or support, please open an issue on GitHub. 

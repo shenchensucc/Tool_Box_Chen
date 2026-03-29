@@ -28,7 +28,7 @@ import streamlit as st
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-# Load .env for AI_BUILDER_TOKEN (LLM Vision) and INSPECTION_REPORT_LLM_VISION
+# Load .env for optional parser env overrides (e.g. OCR tuning)
 try:
     from dotenv import load_dotenv
     load_dotenv(ROOT / ".env")
@@ -61,25 +61,9 @@ def _temporary_env(overrides: dict[str, str | None]):
                 os.environ[key] = old_value
 
 
-def _parse_pdf_variant(tmp_path: Path, source_filename: str, mode: str) -> list[ExtractedReading]:
-    """Run parser in a specific mode for comparison in the dev tool."""
-    if mode == "local":
-        overrides = {
-            "INSPECTION_REPORT_LLM_VISION": None,
-            "INSPECTION_REPORT_LLM_ONLY": None,
-            "INSPECTION_REPORT_OCR_ENGINE": "tesseract",
-            "INSPECTION_REPORT_VISION_MODEL": None,
-        }
-    elif mode == "llm":
-        overrides = {
-            "INSPECTION_REPORT_LLM_VISION": "1",
-            "INSPECTION_REPORT_LLM_ONLY": "1",
-            "INSPECTION_REPORT_OCR_ENGINE": "tesseract",
-            "INSPECTION_REPORT_VISION_MODEL": "gpt-5",
-        }
-    else:
-        overrides = {}
-
+def _parse_pdf_for_ground_truth(tmp_path: Path, source_filename: str) -> list[ExtractedReading]:
+    """Run parser with reproducible Tesseract-first OCR for dev comparison."""
+    overrides = {"INSPECTION_REPORT_OCR_ENGINE": "tesseract"}
     with _temporary_env(overrides):
         return parse_inspection_report_pdf(tmp_path, source_filename)
 
@@ -458,31 +442,28 @@ def main():
 
     # --- Parse (cache by filename; Reparse button clears cache) ---
     key_prefix = f"gt_{hash(source_filename) % 10**8}"
-    local_cache_key = f"{key_prefix}_parsed_results_local"
-    llm_cache_key = f"{key_prefix}_parsed_results_llm"
+    parse_cache_key = f"{key_prefix}_parsed_results"
     pdf_text_cache_key = f"{key_prefix}_pdf_text"
     pages_cache_key = f"{key_prefix}_pages"
 
     col_parse_info, col_reparse = st.columns([4, 1])
     with col_reparse:
         if st.button("🔄 Reparse", key=f"{key_prefix}_reparse", help="Clear cache and re-run the parser"):
-            for k in [local_cache_key, llm_cache_key, pdf_text_cache_key, pages_cache_key,
+            for k in [parse_cache_key, pdf_text_cache_key, pages_cache_key,
                       f"{key_prefix}_rows", f"{key_prefix}_additions"]:
                 st.session_state.pop(k, None)
             st.rerun()
 
-    if local_cache_key not in st.session_state or llm_cache_key not in st.session_state:
+    if parse_cache_key not in st.session_state:
         with st.spinner("Parsing PDF…"):
             with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
                 tmp.write(pdf_bytes)
                 tmp_path = Path(tmp.name)
             try:
-                local_results = _parse_pdf_variant(tmp_path, source_filename, "local")
-                llm_results = _parse_pdf_variant(tmp_path, source_filename, "llm") if os.getenv("AI_BUILDER_TOKEN") else []
+                parsed_results = _parse_pdf_for_ground_truth(tmp_path, source_filename)
             finally:
                 tmp_path.unlink(missing_ok=True)
-            st.session_state[local_cache_key] = local_results
-            st.session_state[llm_cache_key] = llm_results
+            st.session_state[parse_cache_key] = parsed_results
         with st.spinner("Extracting PDF text…"):
             st.session_state[pdf_text_cache_key] = _extract_pdf_text(pdf_bytes)
         with st.spinner("Rendering PDF pages…"):
@@ -491,9 +472,7 @@ def main():
     with col_parse_info:
         st.caption(f"Loaded: **{source_filename}**")
 
-    local_results = st.session_state[local_cache_key]
-    llm_results = st.session_state[llm_cache_key]
-    results = local_results
+    results = st.session_state[parse_cache_key]
     pdf_text = st.session_state[pdf_text_cache_key]
     pdf_pages = st.session_state.get(pages_cache_key, [])
 
@@ -517,25 +496,9 @@ def main():
             st.text(text or "(empty)")
             st.divider()
 
-    st.subheader("2. Compare Parser Results")
-    st.caption("The dev tool always shows both local and LLM parser outputs. Ground-truth editing starts from the local results by default.")
-    compare_local, compare_llm = st.tabs(["Local parser", "LLM parser"])
-    with compare_local:
-        st.caption(f"{len(local_results)} rows")
-        st.dataframe(_results_to_dataframe(local_results), width="stretch", hide_index=True)
-    with compare_llm:
-        if os.getenv("AI_BUILDER_TOKEN"):
-            st.caption("Model: `gpt-5`")
-            st.caption(f"{len(llm_results)} rows")
-            st.dataframe(_results_to_dataframe(llm_results), width="stretch", hide_index=True)
-        else:
-            st.info("Set `AI_BUILDER_TOKEN` in `.env` to display LLM parser results.")
-
-    if os.getenv("AI_BUILDER_TOKEN") and llm_results:
-        if st.button("Use LLM results as editable baseline", key=f"{key_prefix}_use_llm"):
-            st.session_state[f"{key_prefix}_rows"] = [reading_to_row(r, i) for i, r in enumerate(llm_results)]
-            st.session_state[f"{key_prefix}_additions"] = []
-            st.rerun()
+    st.subheader("2. Parser output")
+    st.caption(f"{len(results)} row(s) — ground-truth editing below uses this as the starting baseline.")
+    st.dataframe(_results_to_dataframe(results), width="stretch", hide_index=True)
 
     st.subheader("3. Review Editable Readings")
     st.caption("Edit the table, then click **Apply readings edits** to save. (Workaround for Streamlit data_editor bug.)")

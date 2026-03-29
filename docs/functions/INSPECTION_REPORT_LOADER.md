@@ -69,21 +69,12 @@ Reports with both summary and detailed UT Grid readings: parser prefers pages wi
 
 If table parsing returns no rows, falls back to aggregate logic (min reading per CML). OCR used when pdfplumber extracts little or suspicious values.
 
-### LLM Vision (OCR-like)
-
-When `INSPECTION_REPORT_LLM_VISION=1` and `AI_BUILDER_TOKEN` are set, the parser can use an LLM as an OCR-like step:
-
-1. **PDF pages → LLM**: One vision call per page; LLM transcribes all text (plain text, not JSON).
-2. **Text → existing parser**: Same `_extract_numeric_readings`, `_extract_date_from_text`, `_extract_cml_ids_from_text`, zone assignment, etc.
-3. **Output**: `ExtractedReading[]` with `extraction_method="llm_vision"`.
-
-LLM is used as fallback when OCR fails or returns suspicious results. For comparison/testing, set `INSPECTION_REPORT_LLM_ONLY=1` to skip OCR and use LLM directly.
-
 ### OCR Tuning
 
 | Env var | Effect |
 |---------|--------|
 | `INSPECTION_REPORT_OCR_ENGINE=tesseract` | Use Tesseract only (skip EasyOCR; faster) |
+| `INSPECTION_REPORT_OCR_GPU=1` | Use CUDA GPU for EasyOCR on the **backend host** (requires PyTorch with CUDA) |
 | `INSPECTION_REPORT_OCR_HIGH_DPI=1` | 400 DPI for both EasyOCR and Tesseract (better decimal digits) |
 | `INSPECTION_REPORT_OCR_PREPROCESS=1` | Contrast + sharpen before OCR |
 
@@ -99,10 +90,34 @@ LLM is used as fallback when OCR fails or returns suspicious results. For compar
 
 ---
 
+## OCR Process Isolation
+
+OCR (EasyOCR, PaddleOCR) runs inside a dedicated **subprocess** managed by a `ProcessPoolExecutor` with `max_workers=1`. This provides hard isolation from the FastAPI server:
+
+- **Crash safety**: A segfault or OOM inside the OCR worker cannot crash the API server. The main process catches `BrokenProcessPool`, recreates the executor, and returns a retryable error to the user.
+- **Busy rejection**: If an OCR job is already running, new OCR requests are rejected immediately with **HTTP 503** (Service Unavailable) instead of silently queuing. This prevents memory pile-up when users refresh mid-parse.
+- **Startup warmup**: At server startup, a warmup job is submitted to the executor so OCR models are pre-loaded in the background (takes 30–60 s). The first real OCR request does not pay this cost.
+- **Clean shutdown**: On server shutdown, the executor sends a terminate signal to the worker process so it does not become an orphan.
+
+### Worker module: `backend/pipeline/ocr_subprocess.py`
+
+Functions that run inside the worker subprocess:
+
+| Function | Purpose |
+|----------|---------|
+| `init_ocr_worker()` | Executor initializer — pre-loads OCR models once per worker |
+| `warmup_ocr_worker()` | Dummy job submitted at startup to trigger model loading |
+| `run_ocr_parse(pdf_paths, filenames)` | Actual OCR parse; calls `parse_inspection_report_pdfs` |
+
+**Rule**: All functions must be top-level (not closures/lambdas) and all arguments/return values must be picklable.
+
+---
+
 ## Error Handling & Debugging
 
 - **Frontend**: On non-200 response, expandable "Error details" shows URL, status, response body, and 404 tip (restart backend)
 - **Backend**: Logs full traceback on exception; returns `{type}: {message}` in detail
+- **HTTP 503**: Returned when an OCR job is already running; user should wait and retry
 - **Startup**: Logs inspection-report routes at startup so you can verify endpoints are registered
 
 ---
@@ -114,9 +129,9 @@ LLM is used as fallback when OCR fails or returns suspicious results. For compar
 
 ---
 
-## OCR vs LLM
+## OCR (image-based reports)
 
-Python (pdfplumber + OCR) is used for deterministic, fast extraction. An optional **LLM Vision API** path can validate or replace OCR when enabled.
+Python (pdfplumber + local OCR) is used for extraction on the **backend server** (CPU by default; GPU optional via `INSPECTION_REPORT_OCR_GPU=1`).
 
 ### Image-based results tables
 
@@ -133,13 +148,6 @@ Some reports (e.g. 52-010B) have "Readings, Grids & Photos on attached pages" �
 | **Tesseract** (fallback) | `winget install UB-Mannheim.TesseractOCR` | 300 DPI, PSM 6/11 for tables |
 
 EasyOCR runs first when 4+ readings expected; Tesseract used otherwise. Both prefer summary table pages (UT REPORT - Connections/Elbow) over grid pages.
-
-**LLM Vision API (optional):** Set `INSPECTION_REPORT_LLM_VISION=1` and `AI_BUILDER_TOKEN` to use vision models (e.g. kimi-k2.5) via AI Builders Space API. PDF pages are sent as images; the model extracts readings from summary tables. Use as validation or fallback when OCR underperforms.
-
-- **Same token as Chat with Chen:** `AI_BUILDER_TOKEN` in `.env` (see `.env.example`).
-- **When it runs:** LLM Vision is only invoked when pdfplumber/OCR return no readings, or when all readings are 0.0 (suspicious) and fewer than 4. For PDFs that extract successfully via text/OCR, the LLM path is skipped.
-- **Speed:** Use `INSPECTION_REPORT_VISION_MODEL=gemini-3-flash-preview` (default, ~20s) for faster photo-like response. `kimi-k2.5` is slower but may extract better. `INSPECTION_REPORT_LLM_MAX_PAGES=3` and `INSPECTION_REPORT_LLM_DPI=150` reduce payload for speed.
-- **To test:** Run `python dev_tools/test_llm_vision_quick.py` (requires PDF in `ground_truth_data/`).
 
 **Deployment:** The Dockerfile installs `tesseract-ocr` via apt. On Linux, Tesseract is in PATH (`/usr/bin/tesseract`). On Windows dev, the parser uses `C:/Program Files/Tesseract-OCR/tesseract.exe` when present.
 

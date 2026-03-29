@@ -12,6 +12,7 @@ from frontend_utils import (
     apply_custom_styling,
     check_backend_health,
     display_header,
+    display_session_privacy_banner,
     display_sidebar_navigation,
     get_layout_main,
     set_page_config,
@@ -56,8 +57,7 @@ with main:
         show_backend_unavailable_and_retry()
         st.stop()
 
-    # Privacy notice
-    st.info("🔒 **Privacy Notice:** Your files are processed in memory only and are not stored on the server after processing.")
+    display_session_privacy_banner()
 
     # Template download section
     st.subheader("📥 Download Blank Templates")

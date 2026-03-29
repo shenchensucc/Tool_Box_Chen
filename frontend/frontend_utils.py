@@ -180,25 +180,27 @@ def display_header(title: str, description: Optional[str] = None):
 def display_session_privacy_banner() -> None:
     """
     High-visibility reminder that uploads/results are not persisted server-side
-    (session-only in the browser).
+    (session-only in the browser).  Colour matches the dig-package primary blue
+    (rgb(0, 100, 220)) used throughout the ILI visualisation tools.
     """
     st.markdown(
         """
         <div style="
-            background: linear-gradient(135deg, #fef08a 0%, #fde047 50%, #facc15 100%);
-            border: 2px solid #ca8a04;
+            background: linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%);
+            border: 2px solid #0064dc;
+            border-left: 5px solid #0064dc;
             border-radius: 10px;
             padding: 14px 18px;
             margin: 0 0 1rem 0;
             font-size: 1.05rem;
             line-height: 1.45;
             font-weight: 600;
-            color: #713f12;
-            box-shadow: 0 3px 10px rgba(180, 83, 9, 0.35);
+            color: #1e3a6e;
+            box-shadow: 0 3px 10px rgba(0, 100, 220, 0.25);
         ">
             <span style="font-size: 1.2rem;">🔒</span>
-            <strong>Reminder:</strong>
-            This app does not save your uploads or results on the server —
+            <strong>Privacy Notice:</strong>
+            This app does not keep any user information on the server —
             everything stays in your current browser session only.
         </div>
         """,

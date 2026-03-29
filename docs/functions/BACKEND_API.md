@@ -4,6 +4,8 @@
 
 - **Main API**: `backend/main.py`
 - **Data Models**: `backend/models.py`
+- **OCR Worker**: `backend/pipeline/ocr_subprocess.py`
+- **Inspection Parser**: `backend/tml/inspection_report_parser.py`
 - **Tests**: `tests/test_backend.py`
 
 ---
@@ -24,16 +26,25 @@ The Backend API provides RESTful endpoints for:
 ### FastAPI Application Structure
 
 ```python
-app = FastAPI(title="Chen's Engineer Toolbox API", version="0.1.0")
+app = FastAPI(title="Chen's Engineer Toolbox API", version="0.2.0")
 
 # Middleware
 app.add_middleware(CORSMiddleware, ...)
 
-# Endpoints
-@app.get("/health")                  # Health check
-@app.post("/api/ili/preview")        # Preview Excel file
-@app.post("/api/ili/process")        # Process ILI data (visualization)
-@app.post("/api/ili/parse-paste")    # Parse pasted tabular data for visualization
+# Lifecycle
+@app.on_event("startup")   # Pre-warms OCR worker process
+@app.on_event("shutdown")  # Terminates OCR worker process cleanly
+
+# Endpoints (selected)
+@app.get("/health")                          # Health check
+@app.post("/api/ili/preview")                # Preview Excel file
+@app.post("/api/ili/process")                # Process ILI data (visualization)
+@app.post("/api/tml/process")                # TML data processing → ZIP
+@app.post("/api/tml/deactivate-cml")         # Deactivate CML dataloader
+@app.post("/api/tml/inspection-report/read") # Parse PDF reports (OCR)
+@app.post("/api/tml/inspection-report")      # Parse PDFs + generate dataloader
+@app.post("/api/pipeline/metal-loss/assess") # Metal loss assessment
+@app.post("/api/pipeline/dig-package/generate") # Dig package generation
 ```
 
 ### Request/Response Flow
@@ -41,15 +52,34 @@ app.add_middleware(CORSMiddleware, ...)
 ```
 Client Request
     ↓
-FastAPI Route Handler
+FastAPI Route Handler (async)
     ↓
 Pydantic Validation (automatic)
     ↓
+await asyncio.to_thread(blocking_work)   ← I/O & CPU work runs in thread pool
+    ↓                                        (event loop stays free)
 Business Logic (helper functions)
     ↓
 Pydantic Response Model
     ↓
-JSON Response to Client
+JSON / FileResponse to Client
+```
+
+### OCR Request Flow
+
+```
+POST /api/tml/inspection-report/read
+    ↓
+Check _ocr_busy flag → if True: return HTTP 503 immediately
+    ↓
+Set _ocr_busy = True
+    ↓
+await asyncio.to_thread → executor.submit(run_ocr_parse, ...)
+    ↓ (runs in OCR subprocess)
+    ├─ Success → return readings JSON
+    └─ BrokenProcessPool → _reset_ocr_executor() → return HTTP 503 (retry)
+    ↓
+Set _ocr_busy = False
 ```
 
 ---
@@ -502,6 +532,64 @@ def create_histogram(series: pd.Series, column_name: str, bins: int = 30) -> His
 
 ---
 
+---
+
+## ⚡ Async Pattern
+
+All CPU-bound and I/O-bound work **must not** block the async event loop. Use `asyncio.to_thread()`:
+
+```python
+# ✅ Correct — blocking work runs in thread pool
+result = await asyncio.to_thread(pd.read_excel, temp_path, sheet_name=sheet)
+
+# ❌ Wrong — blocks the event loop; other requests stall
+df = pd.read_excel(temp_path, sheet_name=sheet)
+```
+
+This applies to: `pd.read_excel`, `load_workbook`, file I/O, ZIP creation, and any other synchronous call that takes > ~1 ms.
+
+---
+
+## 📡 Inspection Report Endpoints
+
+### Read Reports
+
+**Endpoint**: `POST /api/tml/inspection-report/read`
+
+**Purpose**: Parse one or more PDF inspection reports and return a reading summary.
+
+**Request**: `multipart/form-data` — one or more `files` (PDF)
+
+**Response**: JSON list of `ExtractedReading` objects (circuit, CML, reading, date)
+
+**Status Codes**:
+- `200`: Success
+- `503`: OCR worker is busy — retry after current job finishes
+- `500`: Parse error
+
+**OCR isolation**: The actual parsing runs in a `ProcessPoolExecutor` subprocess. If the worker crashes (segfault, OOM), the endpoint returns HTTP 503 and the executor is re-created automatically.
+
+---
+
+### Generate Dataloader
+
+**Endpoint**: `POST /api/tml/inspection-report`
+
+**Purpose**: Parse PDFs + optionally match with source Excel → generate APM measurement dataloader Excel.
+
+**Request**: `multipart/form-data`
+- `files`: PDFs (required)
+- `source_file`: Source Excel with `Source_Data` sheet (optional)
+
+**Response**: `FileResponse` — `Inspection_Report_Dataloader.xlsx`
+
+**Status Codes**:
+- `200`: Excel file download
+- `503`: OCR worker busy
+- `500`: Parse or generation error
+
+---
+
 ## 🧪 Testing Guidelines
 
 ### Test File: `tests/test_backend.py`
@@ -760,5 +848,5 @@ Before modifying Backend API:
 
 ---
 
-**Last Updated**: October 2025  
-**API Version**: 0.1.0
+**Last Updated**: March 2026  
+**API Version**: 0.2.0

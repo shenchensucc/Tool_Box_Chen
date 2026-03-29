@@ -1,6 +1,9 @@
 import asyncio
 import os
 import shutil
+import threading
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 
 # Load .env from project root (secrets stay out of git)
@@ -117,9 +120,64 @@ async def log_404_middleware(request, call_next):
 
 MAX_FILE_SIZE = 200 * 1024 * 1024  # 200 MB
 
-# Temporary file storage for TML processing (token -> file_path)
-# In production, use Redis or similar
-TML_FILE_STORAGE: Dict[str, str] = {}
+# Filesystem-based token store: files live in a dedicated temp dir named by their UUID token.
+# This works across multiple uvicorn workers (no shared in-process dict needed).
+_TOKEN_DIR = Path(tempfile.gettempdir()) / "toolbox_tokens"
+_TOKEN_DIR.mkdir(exist_ok=True)
+
+_TOKEN_TTL_SECONDS = 3600  # clean up tokens older than 1 hour
+
+
+def _token_path(token: str, suffix: str) -> Path:
+    """Return the file path for a given download token."""
+    return _TOKEN_DIR / f"{token}{suffix}"
+
+
+def _store_token(file_path: str) -> str:
+    """Register a file for download and return a UUID token.
+    The file is moved (or hard-linked) into the token directory so it survives
+    even if the caller's temp dir is cleaned up.
+    """
+    token = str(uuid.uuid4())
+    src = Path(file_path)
+    dest = _TOKEN_DIR / f"{token}{src.suffix}"
+    try:
+        src.rename(dest)  # atomic on same filesystem
+    except OSError:
+        import shutil as _shutil
+        _shutil.copy2(src, dest)
+    return token
+
+
+def _resolve_token(token: str) -> Optional[Path]:
+    """Return the file path for a token, or None if not found / expired."""
+    # Scan for any file whose stem matches the token
+    matches = list(_TOKEN_DIR.glob(f"{token}.*"))
+    if not matches:
+        return None
+    p = matches[0]
+    if not p.exists():
+        return None
+    # Honour TTL
+    import time
+    if time.time() - p.stat().st_mtime > _TOKEN_TTL_SECONDS:
+        try:
+            p.unlink()
+        except OSError:
+            pass
+        return None
+    return p
+
+
+def _cleanup_old_tokens() -> None:
+    """Remove token files older than TTL. Call occasionally from background tasks."""
+    import time
+    for p in _TOKEN_DIR.iterdir():
+        try:
+            if time.time() - p.stat().st_mtime > _TOKEN_TTL_SECONDS:
+                p.unlink()
+        except OSError:
+            pass
 
 
 def validate_excel_file(file: UploadFile) -> None:
@@ -198,27 +256,43 @@ def create_histogram(series: pd.Series, column_name: str, bins: int = 30) -> His
 
 @app.on_event("startup")
 async def startup_log_routes():
-    """Log key routes at startup and pre-warm OCR readers in the background."""
+    """Log key routes at startup and pre-warm the OCR worker process."""
     ili_routes = [r for r in app.routes if hasattr(r, "path") and "ili" in r.path]
     insp_routes = [r for r in app.routes if hasattr(r, "path") and "inspection-report" in r.path]
     logger.info(f"[startup] ILI routes: {[(r.path, getattr(r, 'methods', '')) for r in ili_routes]}")
     logger.info(f"[startup] Inspection report routes: {[(r.path, getattr(r, 'methods', '')) for r in insp_routes]}")
 
-    # Pre-warm OCR readers in a daemon thread so the first OCR fallback request
-    # doesn't block.  IMAGE_FIRST is off by default; this only matters when OCR
-    # is needed (image-heavy / scanned PDFs).
-    import threading
-
-    def _warmup_ocr():
+    # Spawn the OCR worker process now and let it load models in the background.
+    # This avoids a 30-60 s stall on the first real OCR request.
+    # The warmup runs in a daemon thread so it doesn't block server startup.
+    def _warmup_ocr_worker():
         try:
-            from backend.tml.inspection_report_parser import _get_easyocr_reader, _get_paddleocr_reader
-            _get_paddleocr_reader()
-            _get_easyocr_reader()
-            logger.info("[startup] OCR readers pre-warmed.")
+            from backend.pipeline.ocr_subprocess import warmup_ocr_worker
+            executor = _get_ocr_executor()
+            future = executor.submit(warmup_ocr_worker)
+            future.result(timeout=180)  # wait up to 3 min for model loading
+            logger.info("[startup] OCR worker process pre-warmed (pid ready).")
         except Exception as exc:
-            logger.debug(f"[startup] OCR pre-warm skipped: {exc}")
+            logger.debug(f"[startup] OCR worker pre-warm skipped: {exc}")
 
-    threading.Thread(target=_warmup_ocr, daemon=True).start()
+    threading.Thread(target=_warmup_ocr_worker, daemon=True).start()
+    logger.info(
+        "[startup] HTTP API is ready (/health, /docs). "
+        "Inspection-report OCR runs in a worker process; neural OCR models are not loaded at "
+        "startup by default (avoids ~400MB RAM spike). Set INSPECTION_REPORT_PRELOAD_OCR=1 to "
+        "preload when you have enough memory."
+    )
+
+
+@app.on_event("shutdown")
+async def shutdown_ocr_worker():
+    """Cleanly terminate the OCR worker process when the server stops.
+
+    Without this, the ProcessPoolExecutor subprocess becomes an orphan —
+    it keeps running after uvicorn exits, wasting memory until the OS kills it.
+    """
+    _reset_ocr_executor()
+    logger.info("[shutdown] OCR worker process terminated.")
 
 
 @app.get("/")
@@ -441,39 +515,42 @@ async def preview_excel(file: UploadFile = File(...)):
     """
     log_params(logger, "ili/preview", {"filename": file.filename, "content_type": file.content_type})
     validate_excel_file(file)
+    content = await file.read()
+    filename = file.filename
 
-    temp_path = save_temp_file(file)
+    def _do_preview() -> PreviewResponse:
+        suffix = Path(filename).suffix
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(content)
+            tmp_path = Path(tmp.name)
+        try:
+            wb = load_workbook(tmp_path, read_only=True, data_only=True)
+            sheet_names = wb.sheetnames
+            columns: Dict[str, List[str]] = {}
+            row_counts: Dict[str, int] = {}
+            for sheet_name in sheet_names:
+                df = pd.read_excel(tmp_path, sheet_name=sheet_name)
+                columns[sheet_name] = df.columns.tolist()
+                row_counts[sheet_name] = len(df)
+            wb.close()
+            logger.info(f"[ili/preview] Processed: {len(sheet_names)} sheets, row_counts={row_counts}")
+            return PreviewResponse(
+                filename=filename,
+                sheet_names=sheet_names,
+                columns=columns,
+                row_counts=row_counts,
+            )
+        finally:
+            if tmp_path.exists():
+                os.unlink(tmp_path)
 
     try:
-        # Use openpyxl for validation and preview
-        wb = load_workbook(temp_path, read_only=True, data_only=True)
-        sheet_names = wb.sheetnames
-
-        columns: Dict[str, List[str]] = {}
-        row_counts: Dict[str, int] = {}
-
-        for sheet_name in sheet_names:
-            df = pd.read_excel(temp_path, sheet_name=sheet_name)
-            columns[sheet_name] = df.columns.tolist()
-            row_counts[sheet_name] = len(df)
-
-        wb.close()
-
-        logger.info(f"[ili/preview] Processed: {len(sheet_names)} sheets, row_counts={row_counts}")
-        return PreviewResponse(
-            filename=file.filename,
-            sheet_names=sheet_names,
-            columns=columns,
-            row_counts=row_counts,
-        )
-
+        return await asyncio.to_thread(_do_preview)
+    except HTTPException:
+        raise
     except Exception as e:
         log_error(logger, "ili/preview", e)
         raise HTTPException(status_code=400, detail=f"Error reading Excel file: {str(e)}")
-    finally:
-        # Clean up temp file
-        if temp_path.exists():
-            os.unlink(temp_path)
 
 
 @app.post("/api/ili/process", response_model=ProcessResponse)
@@ -495,86 +572,70 @@ async def process_ili_data(
         "metal_loss_column": metal_loss_column,
     })
     validate_excel_file(file)
+    content = await file.read()
+    filename = file.filename
 
-    temp_path = save_temp_file(file)
+    def _do_process() -> ProcessResponse:
+        suffix = Path(filename).suffix
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(content)
+            tmp_path = Path(tmp.name)
+        try:
+            df = pd.read_excel(tmp_path, sheet_name=sheet_name)
+            if df.empty:
+                raise HTTPException(status_code=400, detail="Sheet is empty")
+
+            ili_cols = identify_ili_columns(df)
+            dist_col = distance_column or ili_cols.get("distance")
+            dep_col = depth_column or ili_cols.get("depth")
+            ml_col = metal_loss_column or ili_cols.get("depth")
+
+            columns_to_analyze = [
+                c for c in [dist_col, dep_col, ml_col] if c and c in df.columns
+            ] or df.select_dtypes(include=[np.number]).columns.tolist()
+
+            stats: Dict[str, ColumnStats] = {}
+            histograms: List[HistogramData] = []
+            for col in columns_to_analyze:
+                if col in df.columns and pd.api.types.is_numeric_dtype(df[col]):
+                    series = df[col].dropna()
+                    if len(series) > 0:
+                        stats[col] = calculate_stats(series)
+                        histograms.append(create_histogram(series, col))
+
+            scatter_data = None
+            if dist_col and dist_col in df.columns:
+                scatter_data = {"x_column": dist_col, "x_values": df[dist_col].tolist()}
+                y_data = {}
+                if dep_col and dep_col in df.columns:
+                    y_data["depth"] = df[dep_col].tolist()
+                if ml_col and ml_col in df.columns:
+                    y_data["metal_loss"] = df[ml_col].tolist()
+                scatter_data["y_data"] = y_data
+
+            logger.info(
+                f"[ili/process] Processed: sheet={sheet_name}, total_rows={len(df)}, "
+                f"stats_columns={list(stats.keys())}, histograms={len(histograms)}"
+            )
+            return ProcessResponse(
+                filename=filename,
+                sheet_name=sheet_name,
+                total_rows=len(df),
+                stats=stats,
+                histograms=histograms,
+                scatter_data=scatter_data,
+            )
+        finally:
+            if tmp_path.exists():
+                os.unlink(tmp_path)
 
     try:
-        # Read the specified sheet
-        df = pd.read_excel(temp_path, sheet_name=sheet_name)
-
-        if df.empty:
-            raise HTTPException(status_code=400, detail="Sheet is empty")
-
-        # Auto-identify columns if not provided
-        ili_cols = identify_ili_columns(df)
-        if not distance_column:
-            distance_column = ili_cols.get("distance")
-        if not depth_column:
-            depth_column = ili_cols.get("depth")
-        if not metal_loss_column:
-            # Try "depth" as fallback for metal loss if explicit metal loss column not found
-            metal_loss_column = ili_cols.get("depth")
-
-        # Collect columns to analyze
-        columns_to_analyze = []
-        if distance_column and distance_column in df.columns:
-            columns_to_analyze.append(distance_column)
-        if depth_column and depth_column in df.columns:
-            columns_to_analyze.append(depth_column)
-        if metal_loss_column and metal_loss_column in df.columns:
-            columns_to_analyze.append(metal_loss_column)
-
-        # If no columns specified, use all numeric columns
-        if not columns_to_analyze:
-            columns_to_analyze = df.select_dtypes(include=[np.number]).columns.tolist()
-
-        # Calculate statistics
-        stats: Dict[str, ColumnStats] = {}
-        histograms: List[HistogramData] = []
-
-        for col in columns_to_analyze:
-            if col in df.columns and pd.api.types.is_numeric_dtype(df[col]):
-                series = df[col].dropna()
-                if len(series) > 0:
-                    stats[col] = calculate_stats(series)
-                    histograms.append(create_histogram(series, col))
-
-        # Prepare scatter data if distance column is available
-        scatter_data = None
-        if distance_column and distance_column in df.columns:
-            scatter_data = {"x_column": distance_column, "x_values": df[distance_column].tolist()}
-
-            # Add y-axis data for depth and metal loss
-            y_data = {}
-            if depth_column and depth_column in df.columns:
-                y_data["depth"] = df[depth_column].tolist()
-            if metal_loss_column and metal_loss_column in df.columns:
-                y_data["metal_loss"] = df[metal_loss_column].tolist()
-
-            scatter_data["y_data"] = y_data
-
-        logger.info(
-            f"[ili/process] Processed: sheet={sheet_name}, total_rows={len(df)}, "
-            f"stats_columns={list(stats.keys())}, histograms={len(histograms)}"
-        )
-        return ProcessResponse(
-            filename=file.filename,
-            sheet_name=sheet_name,
-            total_rows=len(df),
-            stats=stats,
-            histograms=histograms,
-            scatter_data=scatter_data,
-        )
-
+        return await asyncio.to_thread(_do_process)
     except HTTPException:
         raise
     except Exception as e:
         log_error(logger, "ili/process", e)
         raise HTTPException(status_code=400, detail=f"Error processing Excel file: {str(e)}")
-    finally:
-        # Clean up temp file
-        if temp_path.exists():
-            os.unlink(temp_path)
 
 
 def _apply_gwd_filter(
@@ -708,48 +769,52 @@ async def process_ili_feature_map(
         "gwd_center": gwd_center,
     })
     validate_excel_file(file)
-    temp_path = save_temp_file(file)
+    content = await file.read()
+    filename = file.filename
+
+    def _do_work() -> FeatureMapResponse:
+        suffix = Path(filename).suffix
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(content)
+            tmp_path = Path(tmp.name)
+        try:
+            df = pd.read_excel(tmp_path, sheet_name=sheet_name)
+            if df.empty:
+                return FeatureMapResponse(success=False, error="Sheet is empty")
+            ili_cols = identify_ili_columns(df)
+            dist_col = ili_cols.get("distance")
+            if not dist_col:
+                return FeatureMapResponse(
+                    success=False,
+                    error="No distance/chainage column detected. Ensure your data has a column like 'ILI Chainage (m)' or 'Distance'.",
+                )
+            features, scatter_data, sources = build_feature_map_from_df(df, ili_cols)
+            gwd_numbers = sorted({int(f["gwd_number"]) for f in features if isinstance(f.get("gwd_number"), (int, float))})
+            if gwd_start is not None or gwd_end is not None or gwd_center is not None:
+                features, scatter_data = _apply_gwd_filter(
+                    features, scatter_data, gwd_start, gwd_end, gwd_center
+                )
+            logger.info(f"[ili/process-feature-map] Processed {len(features)} features from sheet '{sheet_name}'")
+            return FeatureMapResponse(
+                success=True,
+                total_rows=len(features),
+                column_mapping={k: v for k, v in ili_cols.items() if v},
+                features=features,
+                scatter_data=scatter_data,
+                sources=sources,
+                gwd_numbers=gwd_numbers,
+            )
+        finally:
+            if tmp_path.exists():
+                os.unlink(tmp_path)
 
     try:
-        df = pd.read_excel(temp_path, sheet_name=sheet_name)
-        if df.empty:
-            return FeatureMapResponse(success=False, error="Sheet is empty")
-
-        ili_cols = identify_ili_columns(df)
-        dist_col = ili_cols.get("distance")
-        if not dist_col:
-            return FeatureMapResponse(
-                success=False,
-                error="No distance/chainage column detected. Ensure your data has a column like 'ILI Chainage (m)' or 'Distance'.",
-            )
-
-        features, scatter_data, sources = build_feature_map_from_df(df, ili_cols)
-        gwd_numbers = sorted({int(f["gwd_number"]) for f in features if isinstance(f.get("gwd_number"), (int, float))})
-
-        # Apply GWD filter if requested
-        if gwd_start is not None or gwd_end is not None or gwd_center is not None:
-            features, scatter_data = _apply_gwd_filter(
-                features, scatter_data, gwd_start, gwd_end, gwd_center
-            )
-
-        logger.info(f"[ili/process-feature-map] Processed {len(features)} features from sheet '{sheet_name}'")
-        return FeatureMapResponse(
-            success=True,
-            total_rows=len(features),
-            column_mapping={k: v for k, v in ili_cols.items() if v},
-            features=features,
-            scatter_data=scatter_data,
-            sources=sources,
-            gwd_numbers=gwd_numbers,
-        )
+        return await asyncio.to_thread(_do_work)
     except HTTPException:
         raise
     except Exception as e:
         log_error(logger, "ili/process-feature-map", e)
         return FeatureMapResponse(success=False, error=f"{type(e).__name__}: {str(e)}")
-    finally:
-        if temp_path.exists():
-            os.unlink(temp_path)
 
 
 @app.post("/api/ili/process-dig-package", response_model=FeatureMapResponse)
@@ -764,7 +829,10 @@ async def process_dig_package(file: UploadFile = File(...)):
     content = await file.read()
 
     try:
-        features, scatter_data, sources, column_mapping, joint_summary_parsed, feature_summary_raw = build_feature_map_from_dig_package(content)
+        (features, scatter_data, sources, column_mapping,
+         joint_summary_parsed, feature_summary_raw) = await asyncio.to_thread(
+            build_feature_map_from_dig_package, content
+        )
         gwd_numbers = sorted({int(f["gwd_number"]) for f in features if isinstance(f.get("gwd_number"), (int, float))})
         logger.info(f"[ili/process-dig-package] Parsed {len(features)} features from dig package")
         return FeatureMapResponse(
@@ -882,177 +950,176 @@ async def process_tml_data(
     # Validate file types and sizes
     validate_excel_file(source_file)
     validate_excel_file(template_file)
-    
-    # Parse workflow IDs
+
+    # Parse workflow IDs (fast, do before offloading)
     try:
         workflow_ids = [int(w.strip()) for w in workflows.split(",") if w.strip()]
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid workflow IDs format")
-    
+
     if not workflow_ids:
         raise HTTPException(status_code=400, detail="No workflows selected")
-    
-    # Create temporary directory for processing (persistent across requests)
-    temp_dir = tempfile.mkdtemp()
-    temp_source = None
-    temp_template = None
-    temp_output_dir = None
-    zip_path = None
-    combined_path = None
-    
-    try:
-        # Save uploaded files
-        temp_source = save_temp_file(source_file)
-        temp_template = save_temp_file(template_file)
-        temp_output_dir = Path(temp_dir) / "output"
-        temp_output_dir.mkdir(exist_ok=True)
-        
-        # Initialize file handler
-        file_handler = FileHandler(
-            source_path=str(temp_source),
-            template_path=str(temp_template),
-            output_dir=str(temp_output_dir)
-        )
-        
-        # Read source data and filter
+
+    # Read file bytes async so the upload stream is consumed before handing off to a thread
+    source_content = await source_file.read()
+    template_content = await template_file.read()
+    source_filename = source_file.filename
+    template_filename = template_file.filename
+
+    def _do_tml_process() -> TMLProcessResponse:
+        temp_dir = tempfile.mkdtemp()
+        temp_source: Optional[Path] = None
+        temp_template: Optional[Path] = None
+
         try:
-            source = file_handler.read_excel("source", "Source_Data")
-            logger.info(f"[tml/process] Source data shape: {source.shape}")
-        except Exception as e:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Error reading source file. Ensure it has a sheet named 'Source_Data'. Error: {str(e)}"
+            # Write file bytes to temp files inside the thread
+            with tempfile.NamedTemporaryFile(delete=False, suffix=Path(source_filename).suffix) as f:
+                f.write(source_content)
+                temp_source = Path(f.name)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=Path(template_filename).suffix) as f:
+                f.write(template_content)
+                temp_template = Path(f.name)
+
+            temp_output_dir = Path(temp_dir) / "output"
+            temp_output_dir.mkdir(exist_ok=True)
+
+            file_handler = FileHandler(
+                source_path=str(temp_source),
+                template_path=str(temp_template),
+                output_dir=str(temp_output_dir)
             )
-        
-        # Check for required column
-        if "AER_Status_CML" not in source.columns:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Source file missing required column 'AER_Status_CML'. Found columns: {', '.join(source.columns.tolist())}"
-            )
-        
-        # Filter source data for AER_Status_CML with value "Yes"
-        source = source[source["AER_Status_CML"].str.contains("Yes", na=False)].copy()
-        logger.info(f"[tml/process] Filtered source data shape: {source.shape}")
-        
-        if source.empty:
-            raise HTTPException(
-                status_code=400,
-                detail="No records found with AER_Status_CML containing 'Yes'. Please check your source data."
-            )
-        
-        # Read template data
-        try:
-            loader_Assets = file_handler.read_excel("template", "Assets")
-            loader_TML = file_handler.read_excel("template", "TML")
-        except Exception as e:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Error reading template file. Ensure it has sheets named 'Assets' and 'TML'. Error: {str(e)}"
-            )
-        
-        # Copy template file to output directory as base for all workflows
-        for file_key in file_handler.output_files.keys():
-            shutil.copy(temp_template, file_handler.output_files[file_key])
-        
-        # Define workflow mapping
-        workflow_map = {
-            1: (process_status_indicator, "Status"),
-            2: (process_follow_up_cml, "FollowUp"),
-            3: (process_code_year_tmin, "CodeYearTmin"),
-            4: (process_design_code, "DesignCode"),
-            5: (process_material_specification, "MaterialSpec"),
-            6: (process_material_grade, "MaterialGrade"),
-            7: (process_design_temperature, "T"),
-            8: (process_piping_formula, "PF"),
-            9: (process_od, "OD"),
-            10: (process_nps, "NPS"),
-            11: (process_schedule, "Schedule"),
-            12: (process_design_pressure, "P"),
-            13: (process_temperature_coefficient, "TempCoef"),
-            14: (process_tnom, "Tnom"),
-            15: (process_tmin, "Tmin"),
-            16: (process_override_allowable_stress, "OAS"),
-            17: (process_allowable_stress, "AS"),
-            18: (process_design_factor, "DF"),
-            19: (process_joint_factor, "JF"),
-            20: (process_location_factor, "LF"),
-        }
-        
-        # Process selected workflows
-        processed_files = []
-        workflow_summary = {}
-        
-        for workflow_id in workflow_ids:
-            if workflow_id not in workflow_map:
-                logger.warning(f"[tml/process] Invalid workflow ID {workflow_id}, skipping")
-                workflow_summary[workflow_id] = 0
-                continue
-            
-            process_func, file_key = workflow_map[workflow_id]
-            output_file = file_handler.output_files[file_key]
-            
+
+            # Read source data and filter
             try:
-                logger.info(f"[tml/process] Processing workflow {workflow_id}...")
-                records_count, result_file = process_func(source, loader_Assets, loader_TML, output_file)
-                workflow_summary[workflow_id] = records_count
-                
-                # Only add to processed_files if records were actually added
-                if result_file and records_count > 0:
-                    processed_files.append(result_file)
-                    logger.info(f"[tml/process] Workflow {workflow_id}: Added {records_count} records")
-                else:
-                    logger.info(f"[tml/process] Workflow {workflow_id}: No records to add, skipping file creation")
+                source = file_handler.read_excel("source", "Source_Data")
+                logger.info(f"[tml/process] Source data shape: {source.shape}")
             except Exception as e:
-                log_error(logger, f"tml/process workflow {workflow_id}", e)
-                workflow_summary[workflow_id] = 0
-                # Continue with other workflows even if one fails
-        
-        if not processed_files:
-            raise HTTPException(status_code=400, detail="No workflows were successfully processed. All workflows returned 0 records.")
-        
-        # Create ZIP file with all processed outputs
-        zip_path = Path(temp_dir) / "TML_Output.zip"
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            for file_path in processed_files:
-                if os.path.exists(file_path):
-                    zipf.write(file_path, os.path.basename(file_path))
-        
-        # Create combined output file
-        from backend.tml.data_processor import DataProcessor
-        combined_path = Path(temp_dir) / "TML_Combined_Output.xlsx"
-        DataProcessor.create_combined_output(
-            processed_files=processed_files,
-            output_file=str(combined_path),
-            template_assets=loader_Assets,
-            template_tml=loader_TML,
-            asset_sheet_name="Assets",
-            tml_sheet_name="TML"
-        )
-        
-        # Generate unique tokens for both files
-        zip_token = str(uuid.uuid4())
-        combined_token = str(uuid.uuid4())
-        
-        # Store file paths with tokens
-        TML_FILE_STORAGE[zip_token] = str(zip_path)
-        TML_FILE_STORAGE[combined_token] = str(combined_path)
-        
-        logger.info(
-            f"[tml/process] Completed: {len(processed_files)} workflows, "
-            f"workflow_summary={workflow_summary}"
-        )
-        # Return tokens and metadata
-        return TMLProcessResponse(
-            success=True,
-            message="TML data processed successfully",
-            zip_token=zip_token,
-            combined_token=combined_token,
-            workflows_processed=len(processed_files),
-            workflow_summary=workflow_summary,
-            timestamp=datetime.now().isoformat()
-        )
-    
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Error reading source file. Ensure it has a sheet named 'Source_Data'. Error: {str(e)}"
+                )
+
+            if "AER_Status_CML" not in source.columns:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Source file missing required column 'AER_Status_CML'. Found columns: {', '.join(source.columns.tolist())}"
+                )
+
+            source = source[source["AER_Status_CML"].str.contains("Yes", na=False)].copy()
+            logger.info(f"[tml/process] Filtered source data shape: {source.shape}")
+
+            if source.empty:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No records found with AER_Status_CML containing 'Yes'. Please check your source data."
+                )
+
+            try:
+                loader_Assets = file_handler.read_excel("template", "Assets")
+                loader_TML = file_handler.read_excel("template", "TML")
+            except Exception as e:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Error reading template file. Ensure it has sheets named 'Assets' and 'TML'. Error: {str(e)}"
+                )
+
+            for file_key in file_handler.output_files.keys():
+                shutil.copy(temp_template, file_handler.output_files[file_key])
+
+            workflow_map = {
+                1: (process_status_indicator, "Status"),
+                2: (process_follow_up_cml, "FollowUp"),
+                3: (process_code_year_tmin, "CodeYearTmin"),
+                4: (process_design_code, "DesignCode"),
+                5: (process_material_specification, "MaterialSpec"),
+                6: (process_material_grade, "MaterialGrade"),
+                7: (process_design_temperature, "T"),
+                8: (process_piping_formula, "PF"),
+                9: (process_od, "OD"),
+                10: (process_nps, "NPS"),
+                11: (process_schedule, "Schedule"),
+                12: (process_design_pressure, "P"),
+                13: (process_temperature_coefficient, "TempCoef"),
+                14: (process_tnom, "Tnom"),
+                15: (process_tmin, "Tmin"),
+                16: (process_override_allowable_stress, "OAS"),
+                17: (process_allowable_stress, "AS"),
+                18: (process_design_factor, "DF"),
+                19: (process_joint_factor, "JF"),
+                20: (process_location_factor, "LF"),
+            }
+
+            processed_files = []
+            workflow_summary = {}
+
+            for workflow_id in workflow_ids:
+                if workflow_id not in workflow_map:
+                    logger.warning(f"[tml/process] Invalid workflow ID {workflow_id}, skipping")
+                    workflow_summary[workflow_id] = 0
+                    continue
+
+                process_func, file_key = workflow_map[workflow_id]
+                output_file = file_handler.output_files[file_key]
+
+                try:
+                    logger.info(f"[tml/process] Processing workflow {workflow_id}...")
+                    records_count, result_file = process_func(source, loader_Assets, loader_TML, output_file)
+                    workflow_summary[workflow_id] = records_count
+                    if result_file and records_count > 0:
+                        processed_files.append(result_file)
+                        logger.info(f"[tml/process] Workflow {workflow_id}: Added {records_count} records")
+                    else:
+                        logger.info(f"[tml/process] Workflow {workflow_id}: No records to add, skipping file creation")
+                except Exception as e:
+                    log_error(logger, f"tml/process workflow {workflow_id}", e)
+                    workflow_summary[workflow_id] = 0
+
+            if not processed_files:
+                raise HTTPException(status_code=400, detail="No workflows were successfully processed. All workflows returned 0 records.")
+
+            zip_path = Path(temp_dir) / "TML_Output.zip"
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+                for file_path in processed_files:
+                    if os.path.exists(file_path):
+                        zipf.write(file_path, os.path.basename(file_path))
+
+            from backend.tml.data_processor import DataProcessor
+            combined_path = Path(temp_dir) / "TML_Combined_Output.xlsx"
+            DataProcessor.create_combined_output(
+                processed_files=processed_files,
+                output_file=str(combined_path),
+                template_assets=loader_Assets,
+                template_tml=loader_TML,
+                asset_sheet_name="Assets",
+                tml_sheet_name="TML"
+            )
+
+            zip_token = _store_token(str(zip_path))
+            combined_token = _store_token(str(combined_path))
+
+            logger.info(
+                f"[tml/process] Completed: {len(processed_files)} workflows, "
+                f"workflow_summary={workflow_summary}"
+            )
+            return TMLProcessResponse(
+                success=True,
+                message="TML data processed successfully",
+                zip_token=zip_token,
+                combined_token=combined_token,
+                workflows_processed=len(processed_files),
+                workflow_summary=workflow_summary,
+                timestamp=datetime.now().isoformat()
+            )
+
+        finally:
+            if temp_source and temp_source.exists():
+                try:
+                    os.unlink(temp_source)
+                except OSError:
+                    pass
+
+    try:
+        return await asyncio.to_thread(_do_tml_process)
     except HTTPException:
         raise
     except Exception as e:
@@ -1077,62 +1144,81 @@ async def deactivate_cml(
     logger.info(f"[tml/deactivate-cml] Request received: source={source_file.filename}, template={tpl_name}")
     log_params(logger, "tml/deactivate-cml", {"source_filename": source_file.filename})
     validate_excel_file(source_file)
-    
-    temp_dir = tempfile.mkdtemp()
-    temp_source = None
-    temp_template = None
-    
+
+    # Read file bytes async before handing off to thread
+    source_content = await source_file.read()
+    source_filename = source_file.filename
+
+    template_content: Optional[bytes] = None
+    template_filename: Optional[str] = None
+    if template_file is not None and template_file.filename:
+        validate_excel_file(template_file)
+        template_content = await template_file.read()
+        template_filename = template_file.filename
+
+    default_template = Path(__file__).parent / "static" / "templates" / "tml" / "TM_Loader_Template.xlsx"
+
+    if template_content is None and not default_template.exists():
+        raise HTTPException(
+            status_code=400,
+            detail="No template file provided and default TM_Loader_Template.xlsx not found in backend/static/templates/tml/"
+        )
+
+    def _do_deactivate() -> DeactivateCMLResponse:
+        temp_dir = tempfile.mkdtemp()
+        temp_source_path: Optional[Path] = None
+
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=Path(source_filename).suffix) as f:
+                f.write(source_content)
+                temp_source_path = Path(f.name)
+
+            if template_content is not None:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=Path(template_filename).suffix) as f:
+                    f.write(template_content)
+                    temp_template_path: Path = Path(f.name)
+            else:
+                temp_template_path = default_template
+
+            source_stem = Path(source_filename).stem
+            output_filename = f"{source_stem}_deactive.xlsx"
+            output_path = Path(temp_dir) / output_filename
+
+            records_count, result_path, sheet_used = process_deactivate_cml(
+                source_path=str(temp_source_path),
+                template_path=str(temp_template_path),
+                output_path=str(output_path),
+            )
+
+            if records_count == 0 or result_path is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No records to process. Ensure source file has a sheet with Equipment ID, CML Group ID, sub-CML ID columns (or their aliases)."
+                )
+
+            download_token = _store_token(str(result_path))
+
+            logger.info(
+                f"[tml/deactivate-cml] Deactivated {records_count} CMLs, sheet='{sheet_used}', output={output_filename}"
+            )
+
+            return DeactivateCMLResponse(
+                success=True,
+                message=f"Successfully deactivated {records_count} CML(s)",
+                download_token=download_token,
+                records_count=records_count,
+                output_filename=output_filename,
+                sheet_used=sheet_used,
+            )
+        finally:
+            if temp_source_path and temp_source_path.exists():
+                try:
+                    os.unlink(temp_source_path)
+                except OSError:
+                    pass
+
     try:
-        temp_source = save_temp_file(source_file)
-        
-        # Use uploaded template or default
-        template_dir = Path(__file__).parent / "static" / "templates" / "tml"
-        default_template = template_dir / "TM_Loader_Template.xlsx"
-        
-        if template_file is not None and template_file.filename:
-            validate_excel_file(template_file)
-            temp_template = save_temp_file(template_file)
-        elif default_template.exists():
-            temp_template = default_template
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail="No template file provided and default TM_Loader_Template.xlsx not found in backend/static/templates/tml/"
-            )
-        
-        # Output: {upload_filename}_deactive.xlsx
-        source_stem = Path(source_file.filename).stem
-        output_filename = f"{source_stem}_deactive.xlsx"
-        output_path = Path(temp_dir) / output_filename
-        
-        records_count, result_path, sheet_used = process_deactivate_cml(
-            source_path=str(temp_source),
-            template_path=str(temp_template),
-            output_path=str(output_path),
-        )
-        
-        if records_count == 0 or result_path is None:
-            raise HTTPException(
-                status_code=400,
-                detail="No records to process. Ensure source file has a sheet with Equipment ID, CML Group ID, sub-CML ID columns (or their aliases)."
-            )
-        
-        # Store for download
-        download_token = str(uuid.uuid4())
-        TML_FILE_STORAGE[download_token] = str(result_path)
-        
-        logger.info(
-            f"[tml/deactivate-cml] Deactivated {records_count} CMLs, sheet='{sheet_used}', output={output_filename}"
-        )
-        
-        return DeactivateCMLResponse(
-            success=True,
-            message=f"Successfully deactivated {records_count} CML(s)",
-            download_token=download_token,
-            records_count=records_count,
-            output_filename=output_filename,
-            sheet_used=sheet_used,
-        )
+        return await asyncio.to_thread(_do_deactivate)
     except HTTPException:
         raise
     except ValueError as e:
@@ -1150,33 +1236,85 @@ async def deactivate_cml(
             status_code=500,
             detail=f"Error: {type(e).__name__}: {str(e)}. Check server logs for full traceback."
         )
-    finally:
-        if temp_source and os.path.exists(temp_source):
+
+
+# ---------------------------------------------------------------------------
+# OCR process pool — true process isolation for EasyOCR / PaddleOCR
+# ---------------------------------------------------------------------------
+# Each OCR request runs in a separate OS process so that any crash, segfault,
+# or OOM-kill inside the OCR libraries cannot bring down the FastAPI server.
+#
+# max_workers=1: OCR is CPU-bound; running two workers in parallel does not
+# double throughput and doubles memory pressure (each worker holds ~1-2 GB of
+# model weights).  A second request while one is running gets a 503 instantly.
+#
+# If the worker process crashes, BrokenProcessPool is raised on await.
+# _run_ocr_in_process() catches this, resets the executor, and re-raises so
+# the endpoint can return a clean 500 to the user without restarting the server.
+
+_ocr_executor: Optional[ProcessPoolExecutor] = None
+_ocr_executor_lock = threading.Lock()
+_ocr_busy = False   # single-flag guard; set True while a parse is in-flight
+
+
+def _get_ocr_executor() -> ProcessPoolExecutor:
+    """Return (creating if necessary) the long-lived OCR worker process."""
+    global _ocr_executor
+    with _ocr_executor_lock:
+        if _ocr_executor is None:
+            from backend.pipeline.ocr_subprocess import init_ocr_worker
+            _ocr_executor = ProcessPoolExecutor(
+                max_workers=1,
+                initializer=init_ocr_worker,
+            )
+    return _ocr_executor
+
+
+def _reset_ocr_executor() -> None:
+    """Shut down the broken executor and clear it so the next call rebuilds it."""
+    global _ocr_executor
+    with _ocr_executor_lock:
+        if _ocr_executor is not None:
             try:
-                os.unlink(temp_source)
-            except OSError:
+                _ocr_executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
                 pass
+            _ocr_executor = None
+    logger.warning("[ocr] Executor reset — worker will restart on next request")
 
 
-# Serialises concurrent /read calls so OCR/pdfplumber work never overlaps.
-_inspection_read_sem = asyncio.Semaphore(1)
+async def _run_ocr_in_process(temp_pdfs: List[Path], source_filenames: List[str]):
+    """
+    Submit an OCR job to the isolated worker process and await the result.
 
+    - Runs parse_inspection_report_pdfs() inside the worker, fully isolated.
+    - If the worker crashes (BrokenProcessPool), resets the executor and raises
+      RuntimeError so the endpoint can return HTTP 500 without dying itself.
+    - Returns List[ExtractedReading].
+    """
+    from backend.pipeline.ocr_subprocess import run_ocr_parse
 
-def _run_inspection_parse(temp_pdfs: List[Path], source_filenames: List[str]):
-    """Blocking parse + summarise — runs in a thread-pool executor."""
-    from backend.tml.inspection_report_parser import parse_inspection_report_pdfs
-    from backend.tml.inspection_dataloader import generate_measurements_dataloader
+    pdf_strs = [str(p) for p in temp_pdfs]
+    loop = asyncio.get_event_loop()
 
-    readings = parse_inspection_report_pdfs(temp_pdfs, source_filenames)
-    if not readings:
-        return None, None
-    records_count, summary = generate_measurements_dataloader(
-        readings,
-        circuit_to_equipment={},
-        output_path="",
-        use_placeholder_when_missing=True,
-    )
-    return records_count, summary
+    for attempt in range(2):
+        executor = _get_ocr_executor()
+        try:
+            return await loop.run_in_executor(
+                executor, run_ocr_parse, pdf_strs, source_filenames
+            )
+        except BrokenProcessPool:
+            logger.error(
+                "[ocr] Worker process crashed (attempt %d/2) — resetting executor",
+                attempt + 1,
+            )
+            _reset_ocr_executor()
+            if attempt == 1:
+                raise RuntimeError(
+                    "OCR worker crashed twice in a row. "
+                    "The backend is still running — please try again."
+                )
+    return []
 
 
 @app.post("/api/tml/inspection-report/read", response_model=InspectionReportResponse)
@@ -1187,31 +1325,52 @@ async def read_inspection_reports(
     Read and summarize UT inspection report PDFs. No source Excel or dataloader.
     Returns extracted Circuit, CML, Min Reading, Date for user verification.
     """
+    global _ocr_busy
     logger.info(f"[inspection-report/read] Request received, pdf_count={len(pdf_files)}")
     log_params(logger, "tml/inspection-report/read", {"pdf_count": len(pdf_files)})
+
+    if _ocr_busy:
+        raise HTTPException(
+            status_code=503,
+            detail="PDF parsing is already in progress. Please wait for it to finish and try again.",
+        )
+
     for pf in pdf_files:
         validate_pdf_file(pf)
 
+    pdf_data = [(await pf.read(), pf.filename) for pf in pdf_files]
+
     temp_pdfs: List[Path] = []
+    _ocr_busy = True
     try:
-        for pf in pdf_files:
-            temp_pdfs.append(save_temp_file(pf))
+        for pdf_bytes, _ in pdf_data:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as f:
+                f.write(pdf_bytes)
+                temp_pdfs.append(Path(f.name))
 
-        source_filenames = [f.filename for f in pdf_files]
+        source_filenames = [name for _, name in pdf_data]
 
-        # One parse at a time — prevents concurrent OCR/pdfplumber thrashing.
-        async with _inspection_read_sem:
-            loop = asyncio.get_event_loop()
-            records_count, summary = await loop.run_in_executor(
-                None, _run_inspection_parse, temp_pdfs, source_filenames
-            )
+        # OCR runs in an isolated worker process — a crash there cannot kill this server.
+        readings = await _run_ocr_in_process(temp_pdfs, source_filenames)
 
-        if summary is None:
+        if not readings:
             return InspectionReportResponse(
                 success=False,
                 message="No data extracted from PDFs. Check report format or try OCR.",
                 error="No Circuit, CML, or readings found in uploaded PDFs.",
             )
+
+        # Dataloader summary generation is lightweight; run in thread pool.
+        def _make_summary():
+            from backend.tml.inspection_dataloader import generate_measurements_dataloader
+            return generate_measurements_dataloader(
+                readings,
+                circuit_to_equipment={},
+                output_path="",
+                use_placeholder_when_missing=True,
+            )
+
+        records_count, summary = await asyncio.to_thread(_make_summary)
 
         logger.info(f"[tml/inspection-report/read] Read {len(pdf_files)} PDFs, {len(summary)} CML(s)")
 
@@ -1221,16 +1380,22 @@ async def read_inspection_reports(
             records_count=records_count,
             summary=summary,
         )
+    except HTTPException:
+        raise
+    except RuntimeError as e:
+        # OCR worker crashed — backend is still alive
+        logger.error(f"[inspection-report/read] OCR worker error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         log_error(logger, "tml/inspection-report/read", e)
         import traceback
-        tb = traceback.format_exc()
-        logger.error(f"[inspection-report/read] Traceback: {tb}")
+        logger.error(f"[inspection-report/read] Traceback: {traceback.format_exc()}")
         raise HTTPException(
             status_code=500,
             detail=f"{type(e).__name__}: {str(e)}. Check backend logs for full traceback.",
         )
     finally:
+        _ocr_busy = False
         for p in temp_pdfs:
             if p.exists():
                 try:
@@ -1249,33 +1414,63 @@ async def process_inspection_reports(
     Parse PDFs and generate APM Measurements dataloader. Source Excel optional;
     when missing, Equipment ID = "Need Add Equipment ID" (incomplete dataloader).
     """
+    global _ocr_busy
     log_params(logger, "tml/inspection-report", {
         "source_filename": source_file.filename if source_file else None,
         "pdf_count": len(pdf_files),
     })
+
+    if _ocr_busy:
+        raise HTTPException(
+            status_code=503,
+            detail="PDF parsing is already in progress. Please wait for it to finish and try again.",
+        )
+
     for pf in pdf_files:
         validate_pdf_file(pf)
     if source_file:
         validate_excel_file(source_file)
 
-    temp_dir = tempfile.mkdtemp()
-    temp_source = None
+    # Read all file bytes async before spawning any threads/processes
+    pdf_bytes_list: List[tuple[bytes, str]] = [
+        (await pf.read(), pf.filename) for pf in pdf_files
+    ]
+    source_content: Optional[bytes] = await source_file.read() if source_file else None
+    source_filename_str: Optional[str] = source_file.filename if source_file else None
+
+    template_content: Optional[bytes] = None
+    template_filename_str: Optional[str] = None
+    if template_file and template_file.filename:
+        validate_excel_file(template_file)
+        template_content = await template_file.read()
+        template_filename_str = template_file.filename
+
+    # Write PDFs to temp files (quick — stays in the async handler)
     temp_pdfs: List[Path] = []
-    template_path = None
+    temp_source_path: Optional[Path] = None
+    template_path_str: Optional[str] = None
 
+    for pdf_bytes, _ in pdf_bytes_list:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as f:
+            f.write(pdf_bytes)
+            temp_pdfs.append(Path(f.name))
+
+    if source_content is not None:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(source_filename_str).suffix) as f:
+            f.write(source_content)
+            temp_source_path = Path(f.name)
+
+    if template_content is not None:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(template_filename_str).suffix) as f:
+            f.write(template_content)
+            template_path_str = f.name
+
+    source_filenames = [name for _, name in pdf_bytes_list]
+    _ocr_busy = True
     try:
-        if source_file:
-            temp_source = save_temp_file(source_file)
-        for pf in pdf_files:
-            temp_pdfs.append(save_temp_file(pf))
-        if template_file and template_file.filename:
-            validate_excel_file(template_file)
-            template_path = str(save_temp_file(template_file))
+        # ── Phase 1: OCR — runs in an isolated worker process ──────────────
+        readings = await _run_ocr_in_process(temp_pdfs, source_filenames)
 
-        from backend.tml.inspection_report_parser import parse_inspection_report_pdfs
-        from backend.tml.inspection_dataloader import build_circuit_to_equipment_map, generate_measurements_dataloader
-
-        readings = parse_inspection_report_pdfs(temp_pdfs, [f.filename for f in pdf_files])
         if not readings:
             return InspectionReportResponse(
                 success=False,
@@ -1283,44 +1478,60 @@ async def process_inspection_reports(
                 error="No Circuit, CML, or readings found in uploaded PDFs.",
             )
 
-        circuit_to_equipment = {}
-        if temp_source:
-            circuit_to_equipment = build_circuit_to_equipment_map(str(temp_source))
-
-        output_path = Path(temp_dir) / "Inspection_Report_Dataloader.xlsx"
-        records_count, summary = generate_measurements_dataloader(
-            readings,
-            circuit_to_equipment,
-            str(output_path),
-            template_path=template_path,
-            use_placeholder_when_missing=True,
-        )
-        if records_count == 0:
-            return InspectionReportResponse(
-                success=True,
-                message="No records to write.",
-                summary=summary,
-                records_count=0,
+        # ── Phase 2: Dataloader generation — lightweight; runs in thread ───
+        def _generate_dataloader() -> InspectionReportResponse:
+            from backend.tml.inspection_dataloader import (
+                build_circuit_to_equipment_map,
+                generate_measurements_dataloader,
             )
 
-        download_token = str(uuid.uuid4())
-        TML_FILE_STORAGE[download_token] = str(output_path)
+            circuit_to_equipment = {}
+            if temp_source_path:
+                circuit_to_equipment = build_circuit_to_equipment_map(str(temp_source_path))
 
-        has_placeholder = any(s.get("Equipment ID") == "Need Add Equipment ID" for s in summary)
-        msg = f"Processed {len(pdf_files)} PDF(s), {records_count} record(s)."
-        if has_placeholder:
-            msg += " Some Equipment IDs are placeholders—edit in Excel before upload to APM."
+            temp_dir = tempfile.mkdtemp()
+            output_path = Path(temp_dir) / "Inspection_Report_Dataloader.xlsx"
+            records_count, summary = generate_measurements_dataloader(
+                readings,
+                circuit_to_equipment,
+                str(output_path),
+                template_path=template_path_str,
+                use_placeholder_when_missing=True,
+            )
+            if records_count == 0:
+                return InspectionReportResponse(
+                    success=True,
+                    message="No records to write.",
+                    summary=summary,
+                    records_count=0,
+                )
 
-        logger.info(f"[tml/inspection-report] Processed {len(pdf_files)} PDFs, {records_count} records")
+            download_token = _store_token(str(output_path))
+            has_placeholder = any(
+                s.get("Equipment ID") == "Need Add Equipment ID" for s in summary
+            )
+            msg = f"Processed {len(pdf_bytes_list)} PDF(s), {records_count} record(s)."
+            if has_placeholder:
+                msg += " Some Equipment IDs are placeholders—edit in Excel before upload to APM."
+            logger.info(
+                f"[tml/inspection-report] Processed {len(pdf_bytes_list)} PDFs, {records_count} records"
+            )
+            return InspectionReportResponse(
+                success=True,
+                message=msg,
+                download_token=download_token,
+                output_filename="Inspection_Report_Dataloader.xlsx",
+                records_count=records_count,
+                summary=summary,
+            )
 
-        return InspectionReportResponse(
-            success=True,
-            message=msg,
-            download_token=download_token,
-            output_filename="Inspection_Report_Dataloader.xlsx",
-            records_count=records_count,
-            summary=summary,
-        )
+        return await asyncio.to_thread(_generate_dataloader)
+
+    except HTTPException:
+        raise
+    except RuntimeError as e:
+        logger.error(f"[inspection-report] OCR worker error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -1332,17 +1543,18 @@ async def process_inspection_reports(
             detail=f"{type(e).__name__}: {str(e)}. Check backend logs for full traceback.",
         )
     finally:
-        if temp_source and os.path.exists(temp_source):
-            try:
-                os.unlink(temp_source)
-            except OSError:
-                pass
+        _ocr_busy = False
         for p in temp_pdfs:
             if p.exists():
                 try:
                     os.unlink(p)
                 except OSError:
                     pass
+        if temp_source_path and temp_source_path.exists():
+            try:
+                os.unlink(temp_source_path)
+            except OSError:
+                pass
 
 
 @app.post("/api/tml/inspection-report/generate-from-table", response_model=InspectionReportResponse)
@@ -1378,8 +1590,7 @@ async def generate_inspection_dataloader_from_table(request: GenerateFromTableRe
                 records_count=0,
             )
 
-        download_token = str(uuid.uuid4())
-        TML_FILE_STORAGE[download_token] = str(output_path)
+        download_token = _store_token(str(output_path))
 
         has_placeholder = any(s.get("Equipment ID") == "Need Add Equipment ID" for s in summary)
         msg = f"Generated dataloader with {records_count} record(s) from edited table."
@@ -1411,35 +1622,26 @@ async def download_tml_file(file_token: str):
     Returns:
         ZIP or Excel file based on the token
     """
-    if file_token not in TML_FILE_STORAGE:
-        logger.warning(f"[tml/download] Token not found: {file_token[:8]}... (storage has {len(TML_FILE_STORAGE)} entries)")
+    resolved = _resolve_token(file_token)
+    if resolved is None:
+        logger.warning(f"[tml/download] Token not found or expired: {file_token[:8]}...")
         raise HTTPException(
             status_code=404,
-            detail=f"File not found. Token invalid or expired. (Debug: token prefix={file_token[:8]}..., storage size={len(TML_FILE_STORAGE)})"
+            detail=f"File not found. Token invalid or expired (prefix={file_token[:8]}...)."
         )
-    
-    file_path = TML_FILE_STORAGE[file_token]
-    
-    if not os.path.exists(file_path):
-        # Clean up the token if file doesn't exist
-        del TML_FILE_STORAGE[file_token]
-        raise HTTPException(
-            status_code=404,
-            detail="File not found on server."
-        )
-    
-    # Determine file type and set appropriate media type
-    file_name = os.path.basename(file_path)
-    if file_path.endswith('.zip'):
-        media_type = "application/zip"
-    else:
-        media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    
+
+    file_path = str(resolved)
+    file_name = resolved.name
+    media_type = (
+        "application/zip"
+        if file_path.endswith(".zip")
+        else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
     return FileResponse(
         path=file_path,
         filename=file_name,
         media_type=media_type,
-        headers={"Content-Disposition": f"attachment; filename={file_name}"}
+        headers={"Content-Disposition": f"attachment; filename={file_name}"},
     )
 
 
@@ -1526,45 +1728,43 @@ async def mass_assess_metal_loss_endpoint(
         "depth_cr": depth_cr, "length_cr": length_cr, "start_year": start_year,
     })
     validate_excel_file(file)
-    temp_input = save_temp_file(file)
-    
+    content = await file.read()
+    filename = file.filename
+
+    def _do_mass_assess() -> str:
+        suffix = Path(filename).suffix
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(content)
+            tmp_path = Path(tmp.name)
+        try:
+            df = read_ili_data(tmp_path)
+            logger.info(f"[metal-loss/mass-assess] Read {len(df)} rows from Excel")
+            df_result = mass_assess_metal_loss(
+                df=df, do=do, tp=tp, YS=YS, TS=TS,
+                depth_tolerance=depth_tolerance, length_tolerance=length_tolerance,
+                depth_cr=depth_cr, length_cr=length_cr, start_year=start_year,
+            )
+            logger.info(f"[metal-loss/mass-assess] Processed {len(df_result)} rows, output columns={list(df_result.columns)}")
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as out:
+                df_result.to_excel(out.name, index=False)
+                return out.name
+        finally:
+            if tmp_path.exists():
+                os.unlink(tmp_path)
+
     try:
-        # Read Excel using the centralized ILI reader
-        df = read_ili_data(temp_input)
-        logger.info(f"[metal-loss/mass-assess] Read {len(df)} rows from Excel")
-        
-        # Process
-        df_result = mass_assess_metal_loss(
-            df=df,
-            do=do,
-            tp=tp,
-            YS=YS,
-            TS=TS,
-            depth_tolerance=depth_tolerance,
-            length_tolerance=length_tolerance,
-            depth_cr=depth_cr,
-            length_cr=length_cr,
-            start_year=start_year
-        )
-        
-        logger.info(f"[metal-loss/mass-assess] Processed {len(df_result)} rows, output columns={list(df_result.columns)}")
-        # Save to temporary Excel file
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp:
-            df_result.to_excel(tmp.name, index=False)
-            tmp_path = tmp.name
-            
+        out_path = await asyncio.to_thread(_do_mass_assess)
+        stamp = datetime.now().strftime("%Y%m%d")
         return FileResponse(
-            path=tmp_path,
-            filename=f"Mass_Metal_Loss_Assessment_{datetime.now().strftime('%Y%m%d')}.xlsx",
+            path=out_path,
+            filename=f"Mass_Metal_Loss_Assessment_{stamp}.xlsx",
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": f"attachment; filename=Mass_Metal_Loss_Assessment_{datetime.now().strftime('%Y%m%d')}.xlsx"}
+            headers={"Content-Disposition": f"attachment; filename=Mass_Metal_Loss_Assessment_{stamp}.xlsx"},
         )
-        
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error in mass assessment: {str(e)}")
-    finally:
-        if temp_input.exists():
-            os.unlink(temp_input)
 
 
 @app.post("/api/pipeline/metal-loss/export-word")
@@ -1672,15 +1872,17 @@ async def generate_dig_package_endpoint(
             )
         logger.info(f"[dig-package/generate] Parsed: {len(ili_contents)} ILI files, formats={formats_list}")
 
-        # Generate dig packages
+        # Generate dig packages (offloaded to thread — CPU/I/O-bound work)
         from backend.pipeline.dig_package import generate_dig_packages
-        
-        zip_buffer = generate_dig_packages(
-            mdl_content=mdl_content,
-            ili_contents=ili_contents,
-            template_content=template_content,
-            revision=revision,
-            ili_formats=formats_list
+
+        zip_buffer = await asyncio.to_thread(
+            lambda: generate_dig_packages(
+                mdl_content=mdl_content,
+                ili_contents=ili_contents,
+                template_content=template_content,
+                revision=revision,
+                ili_formats=formats_list,
+            )
         )
         
         logger.info("[dig-package/generate] Dig packages generated successfully")

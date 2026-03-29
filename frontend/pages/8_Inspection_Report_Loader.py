@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import json
 import math
 import sys
 from pathlib import Path
@@ -16,6 +17,7 @@ from frontend_utils import (
     apply_custom_styling,
     check_backend_health,
     display_header,
+    display_session_privacy_banner,
     display_sidebar_navigation,
     get_layout_main,
     set_page_config,
@@ -362,73 +364,205 @@ def _cleanup_pdf_panel() -> None:
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _clear_insp_results():
-    """Called on file-uploader change — clear old results and request auto-read."""
+    """Called on file-uploader change — clear stale results.
+    Auto-read is scheduled only on the very first upload (no prior results).
+    Subsequent adds/changes require the user to click Read Reports manually."""
+    first_upload = "insp_result" not in st.session_state
     st.session_state.pop("insp_result", None)
     st.session_state.pop("insp_gen_from_table_result", None)
-    st.session_state["insp_auto_read_pending"] = True
+    st.session_state.pop("insp_result_id", None)
+    st.session_state.pop("insp_df_ver", None)
+    st.session_state.pop(_LIVE_EDITOR_KEY, None)
+    for k in list(st.session_state.keys()):
+        if k.startswith("insp_working_df_"):
+            st.session_state.pop(k, None)
+    if first_upload:
+        st.session_state["insp_auto_read_pending"] = True
 
 
-def _do_read(pdf_files) -> None:
-    """Call the read endpoint once per PDF in parallel; show live per-file progress."""
+def _pdf_page_count(pdf_bytes: bytes) -> int:
+    try:
+        import pymupdf
+
+        with pymupdf.open(stream=pdf_bytes, filetype="pdf") as doc:
+            return len(doc)
+    except Exception:
+        return 0
+
+
+def _insp_edit_columns(summary: list) -> tuple[list, pd.DataFrame]:
+    EDIT_COLS = ["Circuit", "CML", "Min Reading", "Date", "Equipment ID"]
+    df_full = pd.DataFrame(summary)
+    edit_cols = [c for c in EDIT_COLS if c in df_full.columns]
+    return edit_cols, df_full[edit_cols].copy() if edit_cols else df_full.copy()
+
+
+_LIVE_EDITOR_KEY = "insp_live_editor"
+
+_EDITOR_COL_CONFIG = {
+    "Circuit":      st.column_config.TextColumn("Circuit",            width="medium"),
+    "CML":          st.column_config.TextColumn("CML",                width="small"),
+    "Min Reading":  st.column_config.NumberColumn("Min Reading (in)", format="%.4f", width="small"),
+    "Date":         st.column_config.TextColumn("Date (YYYY-MM-DD)", width="medium"),
+    "Equipment ID": st.column_config.TextColumn("Equipment ID",       width="large"),
+}
+
+
+def _show_live_extracted_table(slot, summary: list, *, caption: str) -> None:
+    """Editable live table during multi-file reading.
+    Uses a stable key so user edits survive between partial updates.
+    The final fragment reads st.session_state[_LIVE_EDITOR_KEY] to carry edits forward."""
+    if not summary:
+        slot.empty()
+        return
+
+    _, df_new = _insp_edit_columns(summary)
+
+    # Merge: keep user edits from the previous partial table for rows that already existed.
+    prev = st.session_state.get(_LIVE_EDITOR_KEY)
+    if isinstance(prev, pd.DataFrame) and not prev.empty and set(prev.columns) == set(df_new.columns):
+        n_prev = len(prev)
+        if n_prev <= len(df_new):
+            # Preserve user edits for already-visible rows; append new rows at the bottom.
+            merged = df_new.copy()
+            merged.iloc[:n_prev] = prev.values
+            df_new = merged
+
+    with slot.container():
+        st.caption(caption)
+        st.data_editor(
+            df_new,
+            use_container_width=True,
+            num_rows="dynamic",
+            key=_LIVE_EDITOR_KEY,
+            column_config=_EDITOR_COL_CONFIG,
+        )
+
+
+def _do_read(
+    pdf_files,
+    status_slots: list,
+    table_ph,
+) -> None:
+    """Per-file progress bars (polling every 2 s); time-estimate fills bar between completions."""
     import concurrent.futures
+    import time
     import traceback as _tb
 
     url = f"{BACKEND_URL}/api/tml/inspection-report/read"
+    n_files = len(pdf_files)
 
-    # Create one status slot per file — updated as each future completes
-    slots = [st.empty() for _ in pdf_files]
+    # Count pages once (fast, ~50 ms) for time estimation
+    page_counts = [_pdf_page_count(pf.getvalue()) for pf in pdf_files]
+
+    def _estimate_secs(pages: int) -> float:
+        # Conservative OCR estimate: ~8 s/page + 6 s overhead.
+        # Text-based PDFs finish much faster and the bar just jumps to 100 %.
+        return max(14.0, 6.0 + max(pages, 1) * 8.0)
+
+    # Initialise per-file progress bars at 0 %
     for i, pf in enumerate(pdf_files):
-        slots[i].markdown(f"⏳ **{pf.name}** — reading…")
+        pages = page_counts[i]
+        pg_str = f" ({pages} pages)" if pages else ""
+        status_slots[i].progress(0.0, text=f"⏳ **{pf.name}**{pg_str}")
 
     def _read_one(idx: int, pf):
         data = pf.getvalue()
-        files = [("pdf_files", (pf.name, data, "application/pdf"))]
+        files_payload = [("pdf_files", (pf.name, data, "application/pdf"))]
         with httpx.Client(timeout=360.0) as client:
-            resp = client.post(url, files=files)
+            resp = client.post(url, files=files_payload)
         return idx, pf.name, resp
 
     per_file_results: dict = {}
-    per_file_errors: dict  = {}
+    per_file_errors: dict = {}
+    files_finished = 0
 
     try:
-        max_w = min(len(pdf_files), 4)
+        max_w = min(n_files, 4)
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_w) as pool:
             future_map = {pool.submit(_read_one, i, pf): i for i, pf in enumerate(pdf_files)}
-            for future in concurrent.futures.as_completed(future_map):
-                orig_idx = future_map[future]
-                try:
-                    idx, name, resp = future.result()
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        n = len(data.get("summary", []))
-                        slots[idx].markdown(f"✅ **{name}** — {n} CML(s) found")
-                        per_file_results[idx] = data
-                    else:
-                        slots[orig_idx].markdown(f"❌ **{pdf_files[orig_idx].name}** — read failed")
-                        per_file_errors[orig_idx] = _format_error(resp, f"{pdf_files[orig_idx].name} failed")
-                except httpx.TimeoutException:
-                    slots[orig_idx].markdown(f"❌ **{pdf_files[orig_idx].name}** — timed out")
-                    per_file_errors[orig_idx] = "Request timed out. Try fewer or smaller PDFs."
-                except httpx.ConnectError:
-                    slots[orig_idx].markdown(f"❌ **{pdf_files[orig_idx].name}** — connection error")
-                    per_file_errors[orig_idx] = f"Could not connect to backend at `{BACKEND_URL}`."
-                except Exception as exc:
-                    slots[orig_idx].markdown(f"❌ **{pdf_files[orig_idx].name}** — error")
-                    per_file_errors[orig_idx] = f"{type(exc).__name__}: {exc}\n\n```\n{_tb.format_exc()}\n```"
+            # Record start time per file index
+            start_times: dict = {idx: time.time() for idx in future_map.values()}
+
+            pending = set(future_map.keys())
+            while pending:
+                now = time.time()
+                done_set, pending = concurrent.futures.wait(pending, timeout=2.0)
+
+                # --- update in-flight bars with time-based estimate ---
+                for fut in pending:
+                    idx = future_map[fut]
+                    elapsed = now - start_times[idx]
+                    est = _estimate_secs(page_counts[idx])
+                    pct = min(0.93, elapsed / est)
+                    pf = pdf_files[idx]
+                    status_slots[idx].progress(
+                        pct,
+                        text=f"⏳ **{pf.name}** — {int(elapsed)}s elapsed",
+                    )
+
+                # --- process newly-completed futures ---
+                for fut in done_set:
+                    orig_idx = future_map[fut]
+                    try:
+                        idx, name, resp = fut.result()
+                        files_finished += 1
+
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            n_cml = len(data.get("summary", []))
+                            elapsed_done = time.time() - start_times[idx]
+                            status_slots[idx].progress(
+                                1.0,
+                                text=f"✅ **{name}** — {n_cml} CML(s) found ({int(elapsed_done)}s)",
+                            )
+                            per_file_results[idx] = data
+
+                            # Live preview table when multiple files
+                            if n_files > 1:
+                                partial: list = []
+                                for j in sorted(per_file_results.keys()):
+                                    partial.extend(per_file_results[j].get("summary", []))
+                                if partial:
+                                    _show_live_extracted_table(
+                                        table_ph,
+                                        partial,
+                                        caption=(
+                                            f"📋 **{len(partial)} CML(s)** from "
+                                            f"{files_finished}/{n_files} files — edit now or wait for all"
+                                        ),
+                                    )
+                        else:
+                            status_slots[orig_idx].progress(
+                                1.0,
+                                text=f"❌ **{pdf_files[orig_idx].name}** — read failed (HTTP {resp.status_code})",
+                            )
+                            per_file_errors[orig_idx] = _format_error(resp, f"{pdf_files[orig_idx].name} failed")
+                    except httpx.TimeoutException:
+                        files_finished += 1
+                        status_slots[orig_idx].progress(1.0, text=f"❌ **{pdf_files[orig_idx].name}** — timed out")
+                        per_file_errors[orig_idx] = "Request timed out. Try fewer or smaller PDFs."
+                    except httpx.ConnectError:
+                        files_finished += 1
+                        status_slots[orig_idx].progress(1.0, text=f"❌ **{pdf_files[orig_idx].name}** — connection error")
+                        per_file_errors[orig_idx] = f"Could not connect to backend at `{BACKEND_URL}`."
+                    except Exception as exc:
+                        files_finished += 1
+                        status_slots[orig_idx].progress(1.0, text=f"❌ **{pdf_files[orig_idx].name}** — error")
+                        per_file_errors[orig_idx] = f"{type(exc).__name__}: {exc}\n\n```\n{_tb.format_exc()}\n```"
+
+
     except Exception as exc:
         st.session_state.insp_read_error = f"{type(exc).__name__}: {exc}\n\n```\n{_tb.format_exc()}\n```"
         return
 
     if per_file_errors and not per_file_results:
-        # All files failed — surface the first error
         st.session_state.insp_read_error = per_file_errors[min(per_file_errors.keys())]
         return
 
-    # Merge results in original upload order
     merged_summary: list = []
     for idx in sorted(per_file_results.keys()):
-        d = per_file_results[idx]
-        merged_summary.extend(d.get("summary", []))
+        merged_summary.extend(per_file_results[idx].get("summary", []))
 
     st.session_state.insp_result = {"success": True, "summary": merged_summary}
     st.session_state.pop("insp_gen_from_table_result", None)
@@ -485,35 +619,100 @@ def _render_results_section() -> None:
             "Edit the table below, then click **Generate Dataloader from Table**."
         )
 
-        EDIT_COLS = ["Circuit", "CML", "Min Reading", "Date", "Equipment ID"]
-        df_full   = pd.DataFrame(summary)
-        edit_cols = [c for c in EDIT_COLS if c in df_full.columns]
-        df_edit   = df_full[edit_cols].copy()
+        result_id = hashlib.md5(
+            json.dumps(summary, sort_keys=True, default=str).encode(),
+            usedforsecurity=False,
+        ).hexdigest()[:14]
+        buf_key = f"insp_working_df_{result_id}"
 
-        result_hash = hashlib.md5(
-            str(summary[:3]).encode(), usedforsecurity=False
-        ).hexdigest()[:8]
+        if st.session_state.get("insp_result_id") != result_id:
+            st.session_state["insp_result_id"] = result_id
+            st.session_state["insp_df_ver"] = 0
+            _, df_seed = _insp_edit_columns(summary)
+
+            # Carry forward any edits the user made in the live preview table.
+            # The live editor (stable key) holds their last cumulative edits.
+            live = st.session_state.get(_LIVE_EDITOR_KEY)
+            if (
+                isinstance(live, pd.DataFrame)
+                and not live.empty
+                and set(live.columns) == set(df_seed.columns)
+            ):
+                if len(live) >= len(df_seed):
+                    # User may have added rows — keep all of them
+                    st.session_state[buf_key] = live.copy()
+                else:
+                    # Append extra rows from the full result that weren't yet visible
+                    extra = df_seed.iloc[len(live):]
+                    st.session_state[buf_key] = pd.concat([live, extra], ignore_index=True)
+            else:
+                st.session_state[buf_key] = df_seed
+
+            # Done with live editor state — clean up
+            st.session_state.pop(_LIVE_EDITOR_KEY, None)
 
         st.markdown("##### Extracted Readings")
-        st.caption(
-            "✏️ Edit any cell to correct OCR errors or fill Equipment IDs. "
-            "Use the ＋ row at the bottom to add new entries. "
-            "Click **Generate Dataloader from Table** to build Excel from this data."
-        )
+
+        # ── Insert-row controls (compact row above the table) ──────────────────
+        # Keep a version counter so bumping it changes editor_key → data_editor
+        # re-initialises from the new buf_key that contains the inserted row.
+        ver = int(st.session_state.get("insp_df_ver", 0))
+        cur = st.session_state[buf_key]
+        n_rows = len(cur)
+
+        ins_c1, ins_c2, ins_c3 = st.columns([3, 1, 4])
+        with ins_c1:
+            ins_before = st.number_input(
+                "Insert blank row before row #",
+                min_value=1,
+                max_value=n_rows + 1,
+                value=1,
+                key=f"insp_ins_pos_{result_id}",
+                label_visibility="collapsed",
+                help="Row number to insert before (1 = very top, last = append at end).",
+            )
+        with ins_c2:
+            ins_btn = st.button(
+                "＋ Insert",
+                key=f"insp_ins_btn_{result_id}",
+                help=f"Insert a blank row before row {ins_before}.",
+                use_container_width=True,
+            )
+        with ins_c3:
+            st.caption(
+                f"↑ Insert blank row at a position (1–{n_rows + 1}). "
+                "Use the **＋** at the table bottom to append."
+            )
+
+        # ── Data editor ────────────────────────────────────────────────────────
+        # KEY FIX (Streamlit issue #7749): pass the stable buf_key base and do NOT
+        # write edited_df back to buf_key on normal reruns.  The data_editor tracks
+        # user edits internally via editor_key.  Only update buf_key on Insert so
+        # the new row is included in the next re-initialisation.
+        editor_key = f"insp_data_editor_{result_id}_v{ver}"
         edited_df = st.data_editor(
-            df_edit,
+            st.session_state[buf_key],   # stable base — never overwritten during normal editing
             use_container_width=True,
             num_rows="dynamic",
-            key=f"insp_data_editor_{result_hash}",
-            column_config={
-                "Circuit":      st.column_config.TextColumn("Circuit",           width="medium"),
-                "CML":          st.column_config.TextColumn("CML",               width="small"),
-                "Min Reading":  st.column_config.NumberColumn(
-                                    "Min Reading (in)", format="%.4f", width="small"),
-                "Date":         st.column_config.TextColumn("Date (YYYY-MM-DD)", width="medium"),
-                "Equipment ID": st.column_config.TextColumn("Equipment ID",      width="large"),
-            },
+            key=editor_key,
+            column_config=_EDITOR_COL_CONFIG,
         )
+
+        if ins_btn:
+            # Capture the current editor state (includes user cell-edits) as the new base,
+            # inject the blank row at the chosen position, bump version → fresh editor.
+            idx = min(max(int(ins_before) - 1, 0), len(edited_df))
+            empty_row = pd.DataFrame([{c: None for c in edited_df.columns}])
+            new_base = pd.concat(
+                [edited_df.iloc[:idx], empty_row, edited_df.iloc[idx:]],
+                ignore_index=True,
+            )
+            st.session_state[buf_key] = new_base
+            st.session_state["insp_df_ver"] = ver + 1
+            try:
+                st.rerun(scope="fragment")
+            except TypeError:
+                st.rerun()
 
         gen_from_table_btn = st.button(
             "📊 Generate Dataloader from Table",
@@ -524,6 +723,8 @@ def _render_results_section() -> None:
         )
 
         if gen_from_table_btn:
+            # Use edited_df (data_editor return value) — it contains all user edits
+            # including any made during this fragment run, even without an explicit sync.
             rows_payload = _sanitize_rows_for_json(edited_df)
             with st.spinner("⏳ Building dataloader from table…"):
                 try:
@@ -585,16 +786,12 @@ with main:
         show_backend_unavailable_and_retry()
         st.stop()
 
-    st.info("🔒 **Privacy Notice:** Files are processed in memory only and are not stored on the server.")
+    display_session_privacy_banner()
     st.markdown("### 📋 Process Flow")
 
     # ── Step 1: Upload ─────────────────────────────────────────────────────────
-    # Lock uploaders when reading is active OR about to start (auto_read pending).
-    # Peek at the flag here without popping — Step 2 pops it when it fires the read.
-    _uploading_locked = (
-        st.session_state.get("insp_reading", False)
-        or bool(st.session_state.get("insp_auto_read_pending", False))
-    )
+    # Lock the uploaders only while a read is actively in progress.
+    _uploading_locked = st.session_state.get("insp_reading", False)
     st.markdown("**Step 1 — Upload Inspection Report PDFs**")
     pdf_files = st.file_uploader(
         "UT Inspection Report PDFs",
@@ -641,11 +838,9 @@ with main:
 
     # ── Step 2: Read ───────────────────────────────────────────────────────────
     st.markdown("**Step 2 — Read Reports**")
-    # Compute BEFORE the button so the label/disabled state is right on upload.
     _is_reading  = st.session_state.get("insp_reading", False)
     _auto_read   = bool(pdf_files and st.session_state.pop("insp_auto_read_pending", False))
-    _will_read   = _auto_read and not _is_reading   # about to auto-start
-    _btn_busy    = _is_reading or _will_read
+    _btn_busy    = _is_reading or (_auto_read and not _is_reading)
 
     col_read, _ = st.columns([2, 5])
     with col_read:
@@ -655,25 +850,42 @@ with main:
             disabled=not pdf_files or _btn_busy,
             key="insp_read",
             use_container_width=True,
-            help="Re-parse PDFs and refresh the table below.",
+            help="Parse the uploaded PDFs and refresh the table below.",
         )
 
+    # Per-file status bars sit above Step 3; live table slot is under the heading
+    status_host = st.empty()
+    st.markdown("**Step 3 — Review, Edit & Generate Dataloader**")
+    table_ph = st.empty()
+
     if (read_btn or _auto_read) and pdf_files and not _is_reading:
+        # Clear previous results so the new read is always fresh
+        st.session_state.pop("insp_result", None)
+        st.session_state.pop("insp_gen_from_table_result", None)
+        st.session_state.pop("insp_result_id", None)
+        st.session_state.pop("insp_df_ver", None)
+        st.session_state.pop(_LIVE_EDITOR_KEY, None)
+        for _k in list(st.session_state.keys()):
+            if _k.startswith("insp_working_df_"):
+                st.session_state.pop(_k, None)
         st.session_state.insp_reading = True
+        status_slots: list = []
+        with status_host.container():
+            status_slots = [st.empty() for _ in pdf_files]
         try:
-            _do_read(pdf_files)
+            _do_read(pdf_files, status_slots, table_ph)
         finally:
             st.session_state.insp_reading = False
+            table_ph.empty()
+            status_host.empty()
         if "insp_read_error" in st.session_state:
             err = st.session_state.pop("insp_read_error")
             st.error(f"❌ {err}")
 
-    # ── Step 3: Results (fragment — reruns independently on table edits) ──────
-    st.markdown("**Step 3 — Review, Edit & Generate Dataloader**")
     _render_results_section()
 
     st.divider()
-    with st.expander("ℹ️ Help & OCR vs LLM"):
+    with st.expander("ℹ️ Help & OCR"):
         st.markdown("""
         ### How It Works
 

@@ -12,6 +12,7 @@ from frontend_utils import (
     apply_custom_styling,
     check_backend_health,
     display_header,
+    display_session_privacy_banner,
     display_sidebar_navigation,
     get_layout_main,
     set_page_config,
@@ -51,8 +52,7 @@ with main:
         show_backend_unavailable_and_retry()
         st.stop()
 
-    # Privacy notice
-    st.info("🔒 **Privacy Notice:** Files are processed in memory only and are not stored on the server.")
+    display_session_privacy_banner()
 
     # Flow-chart style layout
     st.markdown("### 📋 Process Flow")

@@ -69,11 +69,15 @@ Chen's Engineer Toolbox is a modern, Python-based web application built with a *
 | Component | Technology | Purpose | Version |
 |-----------|-----------|---------|---------|
 | **API Framework** | FastAPI | RESTful API server | 0.109+ |
-| **Server** | Uvicorn | ASGI server | 0.27+ |
+| **Server** | Uvicorn | ASGI server (multi-worker) | 0.27+ |
 | **Validation** | Pydantic | Request/response data models | 2.6+ |
 | **Data Processing** | pandas | Data analysis and statistics | 2.2+ |
 | **Excel Parsing** | openpyxl | Read/write Excel files | 3.1+ |
 | **Numeric Computing** | numpy | Statistical calculations | 1.26+ |
+| **PDF Parsing** | pdfplumber | Text and table extraction from PDFs | 0.10+ |
+| **OCR (primary)** | EasyOCR | Neural-network OCR for image-based reports | Latest |
+| **OCR (fallback)** | PaddleOCR / Tesseract | Fallback OCR engines | Latest |
+| **Process Isolation** | ProcessPoolExecutor | Isolate OCR crashes from main server | stdlib |
 
 **Location**: `backend/`
 
@@ -95,19 +99,29 @@ Chen's Engineer Toolbox is a modern, Python-based web application built with a *
 Tool_Box_Chen/
 ├── backend/                    # Backend API
 │   ├── __init__.py
-│   ├── main.py                 # FastAPI app, endpoints
-│   └── models.py               # Pydantic models
+│   ├── main.py                 # FastAPI app, endpoints, startup/shutdown
+│   ├── models.py               # Pydantic models
+│   ├── pipeline/               # Pipeline engineering modules
+│   │   ├── ocr_subprocess.py   # OCR worker functions (isolated process)
+│   │   ├── dig_package.py      # Dig package generation
+│   │   ├── metal_loss.py       # Metal loss calculations
+│   │   └── report_generator.py # Word report generation
+│   └── tml/                    # TML and inspection tools
+│       ├── inspection_report_parser.py  # PDF parsing + OCR
+│       ├── inspection_dataloader.py     # APM dataloader generation
+│       ├── file_handler.py     # Excel file utilities
+│       └── data_processor.py   # TML data processing
 │
 ├── frontend/                   # Frontend UI
 │   ├── __init__.py
 │   ├── Home.py                 # Landing page (entry point)
-│   ├── frontend_utils.py       # Shared utilities, API calls
+│   ├── frontend_utils.py       # Shared utilities, API calls, privacy banner
 │   └── pages/                  # Streamlit pages (auto-discovered)
 │       ├── 1_Dashboard.py      # Dashboard overview
-│       ├── Facility/           # Facility section (expandable)
-│       │   └── TML_Data_Loader.py # TML data processing
-│       └── Pipeline/           # Pipeline section (expandable)
-│           └── ILI_Visual_Tool.py # ILI data analysis
+│       ├── 2_TML_Data_Loader.py
+│       ├── 7_Deactive_CML.py
+│       ├── 8_Inspection_Report_Loader.py
+│       └── ...                 # ILI, metal loss, dig package pages
 │
 ├── tests/                      # Test suite
 │   ├── __init__.py
@@ -153,9 +167,9 @@ Tool_Box_Chen/
 ### 2. Stateless Backend
 
 - Each API request is independent
-- No server-side session storage
+- Download tokens stored on the **filesystem** (not in-memory), so multiple Uvicorn workers can serve them
 - Temporary files cleaned after each request
-- Enables horizontal scaling
+- Enables horizontal scaling with multiple workers
 
 ### 3. Type Safety
 
@@ -171,6 +185,33 @@ User Input → Frontend Validation → API Call → Backend Validation → Proce
                   ↓                               ↓                    ↓
             Client Error              HTTPException (4xx)        Try/Except
             (user feedback)           (structured error)      (log + 500)
+```
+
+### 5. Non-Blocking Async
+
+All CPU-bound and I/O-bound work is offloaded from the async event loop:
+
+```python
+# Pattern used throughout main.py for blocking operations
+result = await asyncio.to_thread(blocking_sync_function, args)
+```
+
+This ensures the event loop stays free to handle concurrent requests (health checks, other uploads) while a long-running task executes in a thread pool.
+
+### 6. OCR Process Isolation
+
+OCR (EasyOCR, PaddleOCR) runs in a separate **subprocess** via `ProcessPoolExecutor`, completely isolated from the FastAPI server process. This means:
+
+- An OCR crash (segfault, OOM) cannot bring down the API server
+- On crash, the executor is automatically re-created and the user gets a retryable error
+- Only one OCR job runs at a time (single worker); concurrent OCR requests are rejected with HTTP 503 instead of silently queuing
+
+```
+FastAPI process
+    └── asyncio event loop (non-blocking)
+            └── asyncio.to_thread → thread pool (I/O: Excel, file ops)
+            └── ProcessPoolExecutor → OCR worker process (EasyOCR / PaddleOCR)
+                    ↑ crash here stays here — server keeps running
 ```
 
 ---
@@ -357,10 +398,10 @@ DEBUG=true
 
 ### Current Architecture Limits
 
-- **Single-threaded backend** (Uvicorn default)
-- **In-memory file processing** (100 MB limit)
+- **OCR bottleneck**: Single OCR worker process; concurrent OCR requests are rejected (HTTP 503)
+- **In-memory file processing**: 100 MB limit per file
 - **No caching layer**
-- **No database** (stateless)
+- **No database** (stateless by design)
 
 ### Scaling Strategies
 
@@ -493,11 +534,19 @@ Technologies:
 
 ```
 backend/main.py
-    ├─> backend/models.py (Pydantic models)
-    ├─> fastapi (Framework)
-    ├─> pandas (Data processing)
-    ├─> openpyxl (Excel parsing)
-    └─> numpy (Statistics)
+    ├─> backend/models.py              (Pydantic models)
+    ├─> backend/pipeline/ocr_subprocess.py  (OCR worker — runs in subprocess)
+    ├─> backend/tml/inspection_report_parser.py  (PDF + OCR parsing)
+    ├─> backend/tml/inspection_dataloader.py     (APM dataloader generation)
+    ├─> backend/pipeline/dig_package.py          (Dig package generation)
+    ├─> backend/pipeline/metal_loss.py           (Metal loss calculations)
+    ├─> fastapi                        (Framework)
+    ├─> pandas                         (Data processing)
+    ├─> openpyxl                       (Excel parsing)
+    └─> numpy                          (Statistics)
+
+backend/pipeline/ocr_subprocess.py    (isolated subprocess)
+    └─> backend/tml/inspection_report_parser.py  (imported inside worker)
 ```
 
 ### Frontend Module Graph
@@ -612,15 +661,29 @@ Future extensibility:
 
 ---
 
-## Known Limitations
+## Server Lifecycle
 
-1. **File size**: Limited to 100 MB (memory constraints)
-2. **Concurrency**: No background task processing
-3. **State**: No persistent storage
-4. **Auth**: No user authentication
-5. **Collaboration**: Single-user only
+### Startup (`@app.on_event("startup")`)
+
+1. Logs registered API routes for verification.
+2. Spawns the OCR worker process via `ProcessPoolExecutor` in a background daemon thread.
+3. Submits a warmup job so OCR models (EasyOCR, PaddleOCR) are pre-loaded before the first real request. This takes 30–60 s on first run; the server is fully responsive during warmup.
+
+### Shutdown (`@app.on_event("shutdown")`)
+
+Calls `_reset_ocr_executor()` which signals the OCR worker process to terminate cleanly. Without this, the subprocess would be orphaned after uvicorn exits.
 
 ---
 
-**Last Updated**: October 2025  
-**Architecture Version**: 0.1.0
+## Known Limitations
+
+1. **File size**: Limited to 100 MB (memory constraints)
+2. **OCR concurrency**: Only one OCR parse at a time (single-worker executor); concurrent requests receive HTTP 503
+3. **State**: No persistent user storage (by design — session-only)
+4. **Auth**: No user authentication
+5. **Collaboration**: Session-isolated per browser tab
+
+---
+
+**Last Updated**: March 2026  
+**Architecture Version**: 0.2.0

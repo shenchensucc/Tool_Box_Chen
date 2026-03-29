@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xargs ls:*)",
+      "Bash(ls -lh dev_tools/ground_truth_data/*.pdf)",
+      "Read(//d/GitHub/Tool_Box_Chen/{printf \"\"\"\"\"\"\"\"%8s  %s/**)",
+      "Bash(ls -lh dev_tools/ground_truth_data/*_ground_truth.json)",
+      "Bash(ls -lh dev_tools/*.py)",
+      "Read(//d/GitHub/Tool_Box_Chen/{printf \"\"\"\"\"\"\"\"%6s  %s/**)",
+      "Bash(ls -lh tests/test_*.py)",
+      "Bash(ls -lh tests/fixtures/*.pdf)",
+      "Bash(python:*)",
+      "Bash(start cmd:*)",
+      "Bash(curl:*)",
+      "Bash(netstat -ano)",
+      "Bash(taskkill /F /IM python.exe)",
+      "Bash(taskkill /F /IM python3.exe)",
+      "Bash(taskkill //F //IM python.exe)",
+      "Bash(taskkill //F //IM python3.exe)",
+      "Bash(xargs -I{} cmd //c \"taskkill //F //PID {}\")",
+      "Bash(powershell -Command \"Stop-Process -Id 12976,30888,31732,51656 -Force -ErrorAction SilentlyContinue; Write-Host 'done'\")",
+      "Bash(powershell -Command \"Stop-Process -Id 12976,24900 -Force -ErrorAction SilentlyContinue; Write-Host 'done'\")",
+      "Bash(powershell -Command \"Get-Process python* -ErrorAction SilentlyContinue | Stop-Process -Force; Write-Host 'done'\")",
+      "Bash(winget upgrade:*)",
+      "Bash(claude --version)",
+      "Bash(npm show:*)",
+      "Bash(npm update:*)",
+      "Skill(update-config)",
+      "Bash(npm install:*)",
+      "Bash(find D:GitHubTool_Box_Chen -maxdepth 1 -name *.txt -o -name *.yml -o -name *.yaml -o -name pyproject.toml -o -name requirements.txt)",
+      "Bash(grep -E \"\\\\.py$|^d\")",
+      "Bash(start open_app.bat)"
+    ]
+  }
+}

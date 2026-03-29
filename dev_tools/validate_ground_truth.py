@@ -18,7 +18,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-# Load .env for AI_BUILDER_TOKEN (LLM Vision) and INSPECTION_REPORT_LLM_VISION
+# Load .env for optional parser env overrides (e.g. OCR tuning)
 try:
     from dotenv import load_dotenv
     load_dotenv(ROOT / ".env")

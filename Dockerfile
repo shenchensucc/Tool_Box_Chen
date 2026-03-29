@@ -30,4 +30,11 @@ EXPOSE 8000
 # Fix WebSocket loading behind reverse proxy (enableWebsocketCompression=false)
 ENV STREAMLIT_SERVER_ENABLEWEBSOCKETCOMPRESSION=false
 ENV STREAMLIT_SERVER_ENABLECORS=false
-CMD sh -c "uvicorn backend.main:app --host 0.0.0.0 --port 8001 & streamlit run frontend/Home.py --server.port ${PORT:-8000} --server.address 0.0.0.0 --server.headless true --server.enableWebsocketCompression false --server.enableCORS false"
+
+# Backend workers: default 2, override with BACKEND_WORKERS env var at runtime.
+# Each worker is an independent uvicorn process — downloads use filesystem tokens
+# so they work correctly across workers (no shared in-process dict).
+# OCR is CPU-bound so >2 workers don't help much there; keep it low to avoid OOM.
+ENV BACKEND_WORKERS=2
+
+CMD sh -c "uvicorn backend.main:app --host 0.0.0.0 --port 8001 --workers ${BACKEND_WORKERS} & streamlit run frontend/Home.py --server.port ${PORT:-8000} --server.address 0.0.0.0 --server.headless true --server.enableWebsocketCompression false --server.enableCORS false"

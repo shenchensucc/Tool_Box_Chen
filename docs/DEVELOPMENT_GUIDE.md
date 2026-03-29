@@ -592,7 +592,8 @@ API_KEY = os.getenv("API_KEY")
 
 ### Backend Performance
 
-- Use `async/await` for I/O operations
+- **Always use `asyncio.to_thread()`** for blocking I/O inside `async def` endpoints — never call `pd.read_excel`, `load_workbook`, or any slow sync function directly on the event loop
+- OCR and CPU-heavy work must go through `ProcessPoolExecutor` (see `backend/pipeline/ocr_subprocess.py`) for crash isolation and true parallelism
 - Use generators for large datasets
 - Cache expensive calculations
 - Use database indexes (when added)
@@ -676,5 +677,5 @@ st.cache_data.clear()
 
 ---
 
-**Last Updated**: October 2025  
-**Project Version**: 0.1.0
+**Last Updated**: March 2026  
+**Project Version**: 0.2.0
