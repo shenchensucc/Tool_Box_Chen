@@ -9,11 +9,14 @@ Circuit format: NN-NNNXX (e.g. 52-021K); "1-2", "2-3" are breakdown drawing numb
 """
 
 import base64
+import functools
 import hashlib
 import json
 import logging
 import os
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -26,6 +29,14 @@ _EASYOCR_READER = None
 _EASYOCR_INIT_FAILED = False
 _PADDLEOCR_READER = None
 _PADDLEOCR_INIT_FAILED = False
+
+# In-process cache for OCR results: {(pdf_path_str, mtime_ns) -> List[ExtractedReading]}
+# Avoids re-running expensive EasyOCR on a file that hasn't changed.
+_STRUCT_OCR_CACHE: dict = {}
+
+# Limit simultaneous OCR (CPU-bound) threads to 1 so they don't thrash each other.
+# pdfplumber threads are not gated by this semaphore and run truly in parallel.
+_OCR_SEMAPHORE = threading.Semaphore(1)
 
 
 @dataclass
@@ -298,6 +309,7 @@ def _should_process_page(page_text: str, summary_page_indices: Optional[List[int
     return True
 
 
+@functools.lru_cache(maxsize=32)
 def _get_summary_page_indices(pdf_path: Path) -> Optional[List[int]]:
     """
     If any page has "UT REPORT - TEE" or "UT REPORT - ELBOW" etc, return those page indices.
@@ -958,9 +970,9 @@ def _extract_with_ocr(pdf_path: Path) -> Tuple[str, List[float], List[str], str]
     all_readings = []
     summary_page_readings: List[float] = []  # Readings from pages that look like summary tables
 
-    ocr_dpi = 400 if os.getenv("INSPECTION_REPORT_OCR_HIGH_DPI") else 350
+    ocr_dpi = 400 if os.getenv("INSPECTION_REPORT_OCR_HIGH_DPI") else 300
     for page_idx, page in enumerate(doc):
-        # 350-400 DPI recommended for Tesseract; higher helps decimal digits
+        # 300-400 DPI recommended for Tesseract; higher helps decimal digits
         pix = page.get_pixmap(dpi=ocr_dpi)
         img_bytes = pix.tobytes(output="png")
         text = _run_ocr_on_page(img_bytes, psm=6)
@@ -1013,7 +1025,7 @@ def _extract_with_easyocr(pdf_path: Path) -> Tuple[str, List[float], List[str], 
     full_text = ""
     all_readings = []
     summary_page_readings: List[float] = []
-    ocr_dpi = 400 if os.getenv("INSPECTION_REPORT_OCR_HIGH_DPI") else 350
+    ocr_dpi = 250 if os.getenv("INSPECTION_REPORT_OCR_HIGH_DPI") else 200
 
     for page_idx, page in enumerate(doc):
         pix = page.get_pixmap(dpi=ocr_dpi)
@@ -1152,12 +1164,12 @@ def _iter_candidate_image_segments(doc, candidate_pages: List[int]):
             segments.append(("full", image))
 
             for segment_name, segment in segments:
-                scale = 3 if max(segment.size) < 2400 else 2
-                resized = segment.resize((segment.width * scale, segment.height * scale))
+                scale = 2 if max(segment.size) < 1600 else 1
+                resized = segment.resize((segment.width * scale, segment.height * scale)) if scale > 1 else segment
                 yield page_idx, xref, segment_name, resized
 
 
-def _iter_candidate_page_segments(doc, candidate_pages: List[int], dpi: int = 320):
+def _iter_candidate_page_segments(doc, candidate_pages: List[int], dpi: int = 300):
     """Yield full-page rendered images for candidate pages (image-first OCR path)."""
     for page_idx in candidate_pages:
         if page_idx < 0 or page_idx >= len(doc):
@@ -1401,31 +1413,34 @@ def _run_structured_ocr_on_image(img_np):
     engine = os.getenv("INSPECTION_REPORT_STRUCTURED_OCR_ENGINE", "auto").strip().lower()
     token_sets: List[List[dict]] = []
 
-    if engine in ("paddle", "auto"):
-        reader = _get_paddleocr_reader()
-        if reader is not None:
-            try:
-                paddle_result = reader.ocr(img_np, cls=True)
-                paddle_tokens = _normalize_paddleocr_tokens(paddle_result)
-                if paddle_tokens:
-                    token_sets.append(paddle_tokens)
-                    if engine == "paddle":
-                        return paddle_tokens
-            except Exception:
-                pass
+    # Serialize CPU-bound OCR calls so parallel threads don't thrash each other.
+    # pdfplumber threads never reach this point and remain truly parallel.
+    with _OCR_SEMAPHORE:
+        if engine in ("paddle", "auto"):
+            reader = _get_paddleocr_reader()
+            if reader is not None:
+                try:
+                    paddle_result = reader.ocr(img_np, cls=True)
+                    paddle_tokens = _normalize_paddleocr_tokens(paddle_result)
+                    if paddle_tokens:
+                        token_sets.append(paddle_tokens)
+                        if engine == "paddle":
+                            return paddle_tokens
+                except Exception:
+                    pass
 
-    if engine in ("easyocr", "auto"):
-        reader = _get_easyocr_reader()
-        if reader is not None:
-            try:
-                easy_result = reader.readtext(img_np, detail=1)
-                easy_tokens = _normalize_easyocr_tokens(easy_result)
-                if easy_tokens:
-                    token_sets.append(easy_tokens)
-                    if engine == "easyocr":
-                        return easy_tokens
-            except Exception:
-                pass
+        if engine in ("easyocr", "auto"):
+            reader = _get_easyocr_reader()
+            if reader is not None:
+                try:
+                    easy_result = reader.readtext(img_np, detail=1)
+                    easy_tokens = _normalize_easyocr_tokens(easy_result)
+                    if easy_tokens:
+                        token_sets.append(easy_tokens)
+                        if engine == "easyocr":
+                            return easy_tokens
+                except Exception:
+                    pass
 
     # In auto mode, prefer richer token output (usually better row reconstruction).
     if token_sets:
@@ -1635,6 +1650,15 @@ def _extract_structured_with_local_ocr(
     fallback_cml_ids: Optional[List[str]] = None,
 ) -> List[ExtractedReading]:
     """Local structured OCR for image-heavy reports using embedded summary images."""
+    # ── Cache check ────────────────────────────────────────────────────────────
+    try:
+        _cache_key = (str(pdf_path), pdf_path.stat().st_mtime_ns)
+        if _cache_key in _STRUCT_OCR_CACHE:
+            _logger.debug("OCR cache hit for %s", pdf_path.name)
+            return _STRUCT_OCR_CACHE[_cache_key]
+    except Exception:
+        _cache_key = None
+
     try:
         import io
         import numpy as np
@@ -1677,29 +1701,33 @@ def _extract_structured_with_local_ocr(
                     return _validate_and_dedupe_before_export(results)
 
         # Pass 2: full page rendered as image (helps when table is vector PDF text and not embedded image).
-        for page_idx, xref, segment_name, pix in _iter_candidate_page_segments(doc, candidate_pages):
-            try:
-                segment = Image.open(io.BytesIO(pix.tobytes(output="png"))).convert("RGB")
-                tokens = _run_structured_ocr_on_image(np.array(segment))
-            except Exception:
-                continue
-            page_results = _extract_structured_rows_from_easyocr_tokens(
-                tokens,
-                source_filename=source_filename or pdf_path.name,
-                fallback_circuit=fallback_circuit,
-                fallback_date=fallback_date,
-                fallback_cml_ids=fallback_cml_ids,
-            )
-            if page_results:
-                results.extend(page_results)
+        # Skip if Pass 1 already returned structured rows — pdfplumber can fill gaps.
+        if not results:
+            for page_idx, xref, segment_name, pix in _iter_candidate_page_segments(doc, candidate_pages):
+                try:
+                    segment = Image.open(io.BytesIO(pix.tobytes(output="png"))).convert("RGB")
+                    tokens = _run_structured_ocr_on_image(np.array(segment))
+                except Exception:
+                    continue
+                page_results = _extract_structured_rows_from_easyocr_tokens(
+                    tokens,
+                    source_filename=source_filename or pdf_path.name,
+                    fallback_circuit=fallback_circuit,
+                    fallback_date=fallback_date,
+                    fallback_cml_ids=fallback_cml_ids,
+                )
+                if page_results:
+                    results.extend(page_results)
+                    break  # First successful page is sufficient; pdfplumber supplements gaps
     finally:
         doc.close()
 
     finalized = _validate_and_dedupe_before_export(results) if results else []
     # Guard against weak OCR matches: require at least a few row-level readings.
-    if finalized and len(finalized) < 3:
-        return []
-    return finalized
+    out = [] if (finalized and len(finalized) < 3) else finalized
+    if _cache_key:
+        _STRUCT_OCR_CACHE[_cache_key] = out
+    return out
 
 
 def _supplement_with_pdfplumber(
@@ -1918,21 +1946,39 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
     circuit = ""
     cml_ids: List[str] = []
 
-    # First pass: pdfplumber
+    # First pass: pdfplumber — three independent operations run in parallel
     full_text = ""
     readings_from_tables = []
     readings_from_text = []
 
-    try:
-        with pdfplumber.open(pdf_path) as pdf:
-            for page in pdf.pages:
-                t = page.extract_text()
-                if t:
-                    full_text += t + "\n"
-            readings_from_tables = _extract_readings_from_tables(pdf_path)
-            readings_from_text = _extract_readings_from_text(pdf_path)
-    except Exception:
-        pass
+    def _extract_full_text_local(path: Path) -> str:
+        text = ""
+        try:
+            with pdfplumber.open(path) as _pdf:
+                for _page in _pdf.pages:
+                    _t = _page.extract_text()
+                    if _t:
+                        text += _t + "\n"
+        except Exception:
+            pass
+        return text
+
+    with ThreadPoolExecutor(max_workers=3) as _pp_pool:
+        _f_text   = _pp_pool.submit(_extract_full_text_local, pdf_path)
+        _f_tables = _pp_pool.submit(_extract_readings_from_tables, pdf_path)
+        _f_txtrd  = _pp_pool.submit(_extract_readings_from_text, pdf_path)
+        try:
+            full_text = _f_text.result()
+        except Exception:
+            full_text = ""
+        try:
+            readings_from_tables = _f_tables.result()
+        except Exception:
+            readings_from_tables = []
+        try:
+            readings_from_text = _f_txtrd.result()
+        except Exception:
+            readings_from_text = []
 
     # Combine readings (prefer table extraction, fallback to text)
     all_readings = readings_from_tables if readings_from_tables else readings_from_text
@@ -1953,8 +1999,9 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
         cml_ids = _extract_cml_ids_from_filename(source_filename)
 
     # Image-first strategy: try structured OCR from page images before PDF table parsing.
-    # This improves accuracy for mixed/vector/scanned reports where PDF table text is fragmented.
-    if os.getenv("INSPECTION_REPORT_IMAGE_FIRST", "1") != "0":
+    # Default OFF — pdfplumber is tried first (fast, works for text-based PDFs).
+    # Set INSPECTION_REPORT_IMAGE_FIRST=1 to enable for scanned/image-heavy reports.
+    if os.getenv("INSPECTION_REPORT_IMAGE_FIRST", "0") == "1":
         image_first_results = _extract_structured_with_local_ocr(
             pdf_path,
             source_filename=source_filename,
@@ -2282,10 +2329,39 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
     return _finalize_results(pdf_path, source_filename, results)
 
 
-def parse_inspection_report_pdfs(pdf_paths: List[Path], source_filenames: Optional[List[str]] = None) -> List[ExtractedReading]:
-    """Parse multiple PDFs and return combined list of ExtractedReading."""
-    all_results = []
-    for i, path in enumerate(pdf_paths):
-        fn = (source_filenames[i] if source_filenames and i < len(source_filenames) else "") or str(path)
-        all_results.extend(parse_inspection_report_pdf(path, fn))
-    return all_results
+def parse_inspection_report_pdfs(
+    pdf_paths: List[Path],
+    source_filenames: Optional[List[str]] = None,
+) -> List[ExtractedReading]:
+    """Parse multiple PDFs in parallel and return combined results in original order.
+
+    Text-based PDFs (pdfplumber path) run truly in parallel.
+    OCR-heavy PDFs are serialized through _OCR_SEMAPHORE to avoid CPU thrashing,
+    but their pdfplumber pre-pass and post-processing still overlap with other threads.
+    """
+    if not pdf_paths:
+        return []
+    if len(pdf_paths) == 1:
+        fn = (source_filenames[0] if source_filenames else "") or str(pdf_paths[0])
+        return parse_inspection_report_pdf(pdf_paths[0], fn)
+
+    # Cap workers: no benefit beyond number of PDFs; also avoid spawning too many threads
+    # on machines where EasyOCR already saturates all cores.
+    max_workers = min(len(pdf_paths), (os.cpu_count() or 4))
+
+    def _parse_one(idx: int) -> List[ExtractedReading]:
+        path = pdf_paths[idx]
+        fn = (source_filenames[idx] if source_filenames and idx < len(source_filenames) else "") or str(path)
+        try:
+            return parse_inspection_report_pdf(path, fn)
+        except Exception as exc:
+            _logger.error("Error parsing %s: %s", path.name, exc)
+            return []
+
+    results: List[Optional[List[ExtractedReading]]] = [None] * len(pdf_paths)
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        future_to_idx = {pool.submit(_parse_one, i): i for i in range(len(pdf_paths))}
+        for future in as_completed(future_to_idx):
+            results[future_to_idx[future]] = future.result()
+
+    return [r for sublist in results if sublist for r in sublist]

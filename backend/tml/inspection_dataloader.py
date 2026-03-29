@@ -169,3 +169,69 @@ def generate_measurements_dataloader(
         wb.save(output_path)
 
     return len(rows), summary_rows
+
+
+def generate_measurements_dataloader_from_rows(
+    rows: List[Dict],
+    output_path: str = "",
+    cmms_system: str = "P1R-100",
+) -> Tuple[int, List[Dict]]:
+    """
+    Generate APM Measurements dataloader from pre-parsed / user-edited table rows.
+
+    Each row should have: Circuit, CML, Min Reading, Date, Equipment ID.
+    Rows missing Circuit or CML are skipped.
+    """
+    dl_rows: List[Dict] = []
+    summary_rows: List[Dict] = []
+
+    for row in rows:
+        circuit = str(row.get("Circuit") or "").strip()
+        cml = str(row.get("CML") or "").strip()
+        if not circuit or not cml:
+            continue
+
+        min_reading = row.get("Min Reading")
+        if min_reading is None:
+            min_reading = ""
+        date_val = str(row.get("Date") or "").strip()
+        equip_id = str(row.get("Equipment ID") or "").strip() or PLACEHOLDER_EQUIPMENT_ID
+
+        measurement_date = date_val
+        if measurement_date and len(measurement_date) == 10:
+            measurement_date = f"{measurement_date} 00:00:00"
+
+        dl_rows.append({
+            "Equipment ID": equip_id,
+            "CMMS System": cmms_system,
+            "TML Group ID": circuit,
+            "TML ID": cml,
+            "Readings": str(min_reading),
+            "Measurement Date": measurement_date or "",
+        })
+        status = "OK" if equip_id != PLACEHOLDER_EQUIPMENT_ID else "Incomplete - add Equipment ID in Excel"
+        summary_rows.append({
+            "Circuit": circuit,
+            "CML": cml,
+            "Min Reading": min_reading,
+            "Date": date_val,
+            "Equipment ID": equip_id,
+            "Status": status,
+        })
+
+    if not dl_rows:
+        return 0, summary_rows
+
+    if output_path:
+        df = pd.DataFrame(dl_rows)
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+            df.to_excel(writer, sheet_name="Measurements", index=False)
+        wb = load_workbook(output_path)
+        if "Measurements" in wb.sheetnames:
+            sheet = wb["Measurements"]
+            for col in sheet.columns:
+                sheet.column_dimensions[col[0].column_letter].width = 20
+        wb.save(output_path)
+
+    return len(dl_rows), summary_rows

@@ -130,11 +130,14 @@ class InspectionReportResponse(BaseModel):
         default_factory=list,
         description="Summary table: Circuit, CML, Min Reading, Date, Equipment ID, Status",
     )
-    table_evidence: List[Dict[str, Any]] = Field(
-        default_factory=list,
-        description="Unique source table screenshots keyed by Table Image ID for validation",
-    )
     error: Optional[str] = None
+
+
+class GenerateFromTableRequest(BaseModel):
+    """Request body for /api/tml/inspection-report/generate-from-table"""
+
+    rows: List[Dict[str, Any]]
+    cmms_system: str = "P1R-100"
 
 
 class ChatMessage(BaseModel):
