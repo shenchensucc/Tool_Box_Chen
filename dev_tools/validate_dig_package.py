@@ -18,7 +18,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from backend.pipeline.dig_package import parse_mdl_file, extract_dig_ids, parse_ili_file
+from backend.pipeline.dig_package import extract_dig_ids, parse_mdl_file
+from backend.pipeline.ili_parse import parse_ili_file
 
 GROUND_TRUTH_DIR = ROOT / "dev_tools" / "ground_truth_data" / "dig_package"
 

@@ -19,6 +19,7 @@ from frontend_utils import (
     display_header,
     display_session_privacy_banner,
     display_sidebar_navigation,
+    fu_key,
     get_layout_main,
     set_page_config,
     show_backend_unavailable_and_retry,
@@ -798,7 +799,7 @@ with main:
         type=["pdf"],
         accept_multiple_files=True,
         help="One or more UT thickness inspection report PDFs (e.g. Acuren format)",
-        key="insp_pdfs",
+        key=fu_key("insp", "pdfs"),
         on_change=_clear_insp_results,
         disabled=_uploading_locked,
     )
@@ -812,7 +813,7 @@ with main:
             "Source Excel File",
             type=["xlsx", "xls"],
             help="Sheet 'Source_Data' with Circuit ID and Equipment ID columns",
-            key="insp_source",
+            key=fu_key("insp", "source"),
             on_change=_clear_insp_results,
             disabled=_uploading_locked,
         )

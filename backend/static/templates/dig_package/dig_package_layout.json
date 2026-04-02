@@ -1,0 +1,184 @@
+{
+  "version": "1.0",
+  "description": "Anchor + offset layout for PNG-style Dig Package sheet. During generation, each field also tries the MDL dig-notification column header (from the uploaded MDL) as a contains match, then JSON anchor_fallbacks. Static anchors here are defaults when MDL wording differs from the template.",
+  "sheet_names": ["Dig Package", "Cover"],
+  "match_default": "equals",
+  "fields": {
+    "dig_display": {
+      "anchor": { "text": "Dig Name", "match": "equals" },
+      "offset": { "row": 0, "col": 1 }
+    },
+    "revision": {
+      "anchor": { "text": "Rev #", "match": "contains" },
+      "offset": { "row": 0, "col": 1 }
+    },
+    "pipeline_name": {
+      "anchor": { "text": "Pipeline Name", "match": "equals" },
+      "offset": { "row": 0, "col": 1 }
+    },
+    "target_girth_weld": {
+      "anchor": { "text": "Target Girth Weld", "match": "contains" },
+      "anchor_fallbacks": [
+        { "text": "TGW", "match": "contains" },
+        { "text": "Girth Weld", "match": "contains" }
+      ],
+      "offset": { "row": 0, "col": 1 }
+    },
+    "pipe_od": {
+      "anchor": { "text": "Pipe Outside Diameter", "match": "contains" },
+      "anchor_fallbacks": [
+        { "text": "Pipe NPS", "match": "contains" },
+        { "text": "Nominal Pipe Size", "match": "contains" },
+        { "text": "Pipe Size", "match": "contains" },
+        { "text": "Pipe OD", "match": "contains" },
+        { "text": "Line Pipe Size", "match": "contains" }
+      ],
+      "offset": { "row": 0, "col": 1 }
+    },
+    "pipe_nwt": {
+      "anchor": { "text": "Pipe NWT", "match": "contains" },
+      "anchor_fallbacks": [
+        { "text": "Wall Thickness", "match": "contains" },
+        { "text": "Nominal Wall Thickness", "match": "contains" },
+        { "text": "Pipe Wall", "match": "contains" },
+        { "text": "Pipe WT", "match": "contains" },
+        { "text": "NWT", "match": "contains" },
+        { "text": "WT (mm)", "match": "contains" }
+      ],
+      "offset": { "row": 0, "col": 1 }
+    },
+    "mop": {
+      "anchor": { "text": "MOP", "match": "contains" },
+      "offset": { "row": 0, "col": 1 }
+    },
+    "sep": {
+      "anchor": { "text": "SEP", "match": "contains" },
+      "anchor_fallbacks": [
+        { "text": "Specified External Pressure", "match": "contains" },
+        { "text": "Specified External", "match": "contains" },
+        { "text": "External Pressure", "match": "contains" },
+        { "text": "SEP (", "match": "contains" },
+        { "text": "S.E.P", "match": "contains" }
+      ],
+      "offset": { "row": 0, "col": 1 }
+    },
+    "latitude": {
+      "anchor": { "text": "Lat", "match": "contains" },
+      "offset": { "row": 0, "col": 1 }
+    },
+    "longitude": {
+      "anchor": { "text": "Long", "match": "contains" },
+      "offset": { "row": 0, "col": 1 }
+    },
+    "milepost": {
+      "anchor": { "text": "Milepost", "match": "contains" },
+      "anchor_fallbacks": [
+        { "text": "Nearest ROW MP", "match": "contains" },
+        { "text": "ROW MP", "match": "contains" },
+        { "text": "Station", "match": "contains" },
+        { "text": "Chainage", "match": "contains" },
+        { "text": "KP", "match": "contains" },
+        { "text": "Distance", "match": "contains" },
+        { "text": "Mile Post", "match": "contains" }
+      ],
+      "offset": { "row": 0, "col": 1 }
+    },
+    "pipe_year": {
+      "anchor": { "text": "Pipe Year", "match": "contains" },
+      "offset": { "row": 0, "col": 1 }
+    },
+    "pipe_grade": {
+      "anchor": { "text": "Pipe Grade", "match": "contains" },
+      "offset": { "row": 0, "col": 1 }
+    },
+    "ili_run_name": {
+      "anchor": { "text": "Originating ILI", "match": "contains" },
+      "anchor_fallbacks": [
+        { "text": "ILI Run", "match": "contains" },
+        { "text": "Inspection Run", "match": "contains" },
+        { "text": "Tool Run", "match": "contains" },
+        { "text": "ILI Tool", "match": "contains" },
+        { "text": "Originating", "match": "contains" }
+      ],
+      "offset": { "row": 0, "col": 1 }
+    },
+    "ili_run_accuracy": {
+      "anchor": { "text": "ILI Time", "match": "contains" },
+      "anchor_fallbacks": [
+        { "text": "ILI Date", "match": "contains" },
+        { "text": "Run Date", "match": "contains" },
+        { "text": "Inspection Date", "match": "contains" },
+        { "text": "Time of ILI", "match": "contains" }
+      ],
+      "offset": { "row": 0, "col": 1 }
+    },
+    "upstream_agm": {
+      "anchor": { "text": "Upstream AGM", "match": "contains" },
+      "anchor_fallbacks": [
+        { "text": "Upstream", "match": "contains" },
+        { "text": "US AGM", "match": "contains" }
+      ],
+      "offset": { "row": 0, "col": 1 }
+    },
+    "downstream_agm": {
+      "anchor": { "text": "Downstream AGM", "match": "contains" },
+      "anchor_fallbacks": [
+        { "text": "Downstream", "match": "contains" },
+        { "text": "DS AGM", "match": "contains" }
+      ],
+      "offset": { "row": 0, "col": 1 }
+    },
+    "excavation_count": {
+      "anchor": { "text": "Number of Excavations", "match": "contains" },
+      "anchor_fallbacks": [
+        { "text": "Excavations", "match": "contains" },
+        { "text": "No. of Excavations", "match": "contains" }
+      ],
+      "offset": { "row": 0, "col": 1 }
+    },
+    "issue_date": {
+      "anchor": { "text": "Issue Date", "match": "contains" },
+      "anchor_fallbacks": [
+        { "text": "Issuance Date", "match": "contains" },
+        { "text": "Dig Issuance", "match": "contains" },
+        { "text": "Date of Issue", "match": "contains" },
+        { "text": "Package Issue Date", "match": "contains" },
+        { "text": "Issuance / Revision", "match": "contains" }
+      ],
+      "offset": { "row": 0, "col": 1 }
+    }
+  },
+  "excavation_summary": {
+    "anchor": { "text": "Excavation", "match": "contains" },
+    "anchor_fallbacks": [
+      { "text": "Assessment", "match": "contains" },
+      { "text": "Excavation #", "match": "contains" }
+    ],
+    "value_column_offset_from_anchor": 1,
+    "rows": [
+      { "row_delta": 0, "kind": "excavation_label" },
+      { "row_delta": 1, "mdl_key": "assessment_length" },
+      { "row_delta": 2, "mdl_key": "start_assessment" },
+      { "row_delta": 3, "mdl_key": "end_assessment" }
+    ]
+  },
+  "exposure_summary": {
+    "anchor": { "text": "Exposure", "match": "contains" },
+    "anchor_fallbacks": [
+      { "text": "Exposure Length", "match": "contains" }
+    ],
+    "value_column_offset_from_anchor": 1,
+    "rows": [
+      { "row_delta": 0, "kind": "excavation_label" },
+      { "row_delta": 1, "mdl_key": "exposure_length" },
+      { "row_delta": 2, "mdl_key": "start_exposure" },
+      { "row_delta": 3, "mdl_key": "end_exposure" }
+    ]
+  },
+  "feature_table": {
+    "anchor": { "text": "Feature ID", "match": "equals" },
+    "data_start_row_offset": 2,
+    "first_column": 1,
+    "last_column": 10
+  }
+}

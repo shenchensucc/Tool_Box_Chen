@@ -11,11 +11,13 @@ import streamlit.components.v1 as st_components
 
 from frontend_utils import (
     BACKEND_URL,
+    DIG_PACKAGE_ILI_FORMAT_OPTIONS,
     call_excel_to_pdf_api,
     call_parse_paste_api,
     call_preview_api,
     call_process_dig_package_api,
     call_process_feature_map_api,
+    fu_key,
 )
 
 # NPS (Nominal Pipe Size) to OD (mm) - ASME/ISO standard
@@ -781,8 +783,11 @@ def render_feature_map_fragment(
     source_filter_layout: Literal["columns", "stack"] = "columns",
 ):
     """
-    Fragment wrapper: when source checkboxes change, only this reruns (not the full app).
-    Avoids slow re-execution of file upload, preview, backend calls, etc.
+    Fragment wrapper: when source checkboxes (or NPS) change, only this reruns—not the full page.
+
+    Important: ``fm`` is already the parsed API result from session state. This path does not
+    call FastAPI (no re-upload, no /process-dig-package, /process-feature-map, etc.); it only
+    filters in Python and rebuilds Plotly figures.
     """
     render_feature_map(
         fm,
@@ -832,6 +837,8 @@ def render_feature_map(
     pipe_od_mm = NPS_TO_OD_MM.get(nps, 273.0)
     pipe_circ_mm = 3.14159 * pipe_od_mm
 
+    # Source checkboxes only filter ``features`` / scatter_data already in memory (``fm``).
+    # No backend request—fragment reruns stay inside ``render_feature_map_fragment``.
     selected_sources = set()
     if all_sources:
         st.markdown("**Filter by ILI Source** — check/uncheck to compare:")
@@ -1364,7 +1371,7 @@ def render_dig_package_visual_tool() -> None:
     dig_file = st.file_uploader(
         "Choose a dig package Excel file (.xlsx)",
         type=["xlsx"],
-        key="dig_package_upload",
+        key=fu_key("ili", "dig_pkg"),
         help="Sectioned Excel with 'Feature summary' and optionally 'Joint Summary'",
     )
 
@@ -1379,7 +1386,8 @@ def render_dig_package_visual_tool() -> None:
         if st.session_state.dig_package_file_bytes is None:
             st.session_state.dig_package_file_bytes = dig_file.getvalue()
 
-        # Auto-process as soon as a file is available (no button required)
+        # One-shot backend parse when a new file is loaded. Checkbox / NPS changes in
+        # ``render_feature_map_fragment`` do not enter this block and do not call the API.
         if st.session_state.dig_package_feature_map_data is None:
             with st.spinner(f"Parsing **{dig_file.name}** (Feature summary, Joint Summary)…"):
                 result = asyncio.run(call_process_dig_package_api(dig_file))
@@ -1516,7 +1524,7 @@ def _render_ili_upload_mode() -> None:
         "Choose an Excel file (.xlsx or .xls)",
         type=["xlsx", "xls"],
         help="Maximum file size: 100 MB",
-        key="ili_upload_excel_file",
+        key=fu_key("ili", "excel"),
     )
 
     if uploaded_file is not None:
@@ -1552,14 +1560,40 @@ def _render_ili_upload_mode() -> None:
 
             st.markdown("---")
             st.markdown("### ⚙️ Step 3: Process and Visualize")
-            st.caption("Columns are auto-identified. Optionally zoom to a section by GWD range or center ±3.")
-
-            selected_sheet = st.selectbox(
-                "Select sheet to process",
-                options=preview["sheet_names"],
-                help="Choose which sheet contains your ILI data",
-                key="ili_selected_sheet",
+            st.caption(
+                "Columns are auto-identified. Use **Choose sheet** for a specific tab, or **Auto-detect** "
+                "to match Dig Package ILI parsing (vendor sheet + header). Optionally zoom by GWD range or center ±3."
             )
+
+            ili_sheet_mode = st.radio(
+                "ILI table source",
+                options=["choose_sheet", "vendor_auto"],
+                format_func=lambda x: (
+                    "Choose sheet from preview"
+                    if x == "choose_sheet"
+                    else "Auto-detect (vendor format — same as Dig Package)"
+                ),
+                horizontal=True,
+                key="ili_sheet_mode",
+            )
+
+            selected_sheet = None
+            selected_vendor = DIG_PACKAGE_ILI_FORMAT_OPTIONS[1]
+            if ili_sheet_mode == "choose_sheet":
+                selected_sheet = st.selectbox(
+                    "Select sheet to process",
+                    options=preview["sheet_names"],
+                    help="Choose which sheet contains your ILI data",
+                    key="ili_selected_sheet",
+                )
+            else:
+                selected_vendor = st.selectbox(
+                    "ILI vendor / layout",
+                    options=list(DIG_PACKAGE_ILI_FORMAT_OPTIONS),
+                    index=1,
+                    help="Uses the same sheet and header detection as Dig Package Generator (Rosen anomalies vs pipetally, etc.).",
+                    key="ili_vendor_format_visual",
+                )
 
             gwd_numbers = (st.session_state.ili_upload_feature_map_data or {}).get("gwd_numbers", [])
             zoom_mode = st.radio(
@@ -1600,15 +1634,26 @@ def _render_ili_upload_mode() -> None:
 
             if st.button("🚀 Process Data", type="primary", key="ili_process_button"):
                 with st.spinner("Processing data (columns auto-identified)..."):
-                    result = asyncio.run(
-                        call_process_feature_map_api(
-                            uploaded_file,
-                            selected_sheet,
-                            gwd_start=gwd_start,
-                            gwd_end=gwd_end,
-                            gwd_center=gwd_center,
+                    if ili_sheet_mode == "vendor_auto":
+                        result = asyncio.run(
+                            call_process_feature_map_api(
+                                uploaded_file,
+                                vendor_format=selected_vendor,
+                                gwd_start=gwd_start,
+                                gwd_end=gwd_end,
+                                gwd_center=gwd_center,
+                            )
                         )
-                    )
+                    else:
+                        result = asyncio.run(
+                            call_process_feature_map_api(
+                                uploaded_file,
+                                sheet_name=selected_sheet,
+                                gwd_start=gwd_start,
+                                gwd_end=gwd_end,
+                                gwd_center=gwd_center,
+                            )
+                        )
                     if result and result.get("success"):
                         st.session_state.ili_upload_feature_map_data = result
                         st.success(f"✅ Parsed {result.get('total_rows', 0)} features!")

@@ -303,7 +303,6 @@ with main:
                     config['name'],
                     key=config['key'],
                     type=button_type,
-                    width="stretch"
                 ):
                     # Handle test case selection
                     if config['type'] == 'test':
@@ -578,7 +577,6 @@ with main:
     process_button = st.button(
         "🚀 Run Assessment",
         type="primary",
-        width="stretch"
     )
 
     if process_button:
@@ -913,7 +911,7 @@ with main:
         feature_ID = st.session_state['feature_ID']
     
         # Generate Word report button
-        if st.button("📄 Generate Word Report", key="generate_word", type="primary", width="stretch"):
+        if st.button("📄 Generate Word Report", key="generate_word", type="primary"):
             with st.spinner("⏳ Generating Word document..."):
                 try:
                     # Save Plotly charts as PNG images (800x400 is sufficient for Word report, faster than 1200x600)
@@ -968,7 +966,6 @@ with main:
                 data=st.session_state['word_doc'],
                 file_name=st.session_state['doc_filename'],
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                width="stretch",
                 key="download_word"
             )
             st.caption("Click the button above to download your report")

@@ -63,7 +63,10 @@ def parse_orientation_to_hours(val) -> Optional[float]:
 def format_orientation_hours(hours: float) -> str:
     """Format hours (e.g. 8.37) as hh:mm for display."""
     h = int(hours)
-    m = int((hours - h) * 60)
+    m = int(round((hours - h) * 60))
+    if m >= 60:
+        h += 1
+        m -= 60
     return f"{h:02d}:{m:02d}"
 
 

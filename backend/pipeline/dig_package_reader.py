@@ -167,7 +167,8 @@ def _is_unit_like_parenthetical(text: str) -> bool:
         return True
     if norm in {"hh:mm", "m", "mm", "in", "ft", "deg", "degree", "degrees", "clock", "clock position"}:
         return True
-    return bool(re.fullmatch(r"[a-z%:/.\- ]{1,10}", norm))
+    # Short unit tokens only — avoid classifying multi-word source names (e.g. "alpha tool") as units.
+    return bool(re.fullmatch(r"[a-z%:/.\- ]{1,6}", norm))
 
 
 def _clean_joint_metric_label(label: Any) -> str:
@@ -304,7 +305,7 @@ def _reshape_joint_summary_dataframe(joint_df: pd.DataFrame) -> pd.DataFrame:
     # Common merged-header pattern: first two columns are both "Girth Weld No."
     first_norm = _normalize_text(first_col).lower()
     second_norm = _normalize_text(second_col).lower() if second_col is not None else ""
-    if first_norm.startswith("girth weld") and second_norm == first_norm:
+    if first_norm.startswith("girth weld") and second_norm.startswith("girth weld"):
         cols[0] = "Metric"
         cols[1] = "Source"
         df.columns = cols
@@ -312,6 +313,34 @@ def _reshape_joint_summary_dataframe(joint_df: pd.DataFrame) -> pd.DataFrame:
         cols[0] = "Metric"
         cols[1] = "Source"
         df.columns = cols
+    elif first_norm.startswith("girth weld") and second_col is not None:
+        gwd_hdr = _parse_header_token_for_gwd(str(second_col))
+        if gwd_hdr is not None and not second_norm.startswith("girth"):
+            # Single leading label column + GWD columns (4570, 4580, …); merged block labels in col0.
+            prev_raw_norm: Optional[str] = None
+            sub_i = 0
+            new_rows: List[List[Any]] = []
+            for idx in df.index:
+                raw = df.at[idx, first_col]
+                raw_norm = _normalize_text(raw)
+                if prev_raw_norm is not None and raw_norm == prev_raw_norm:
+                    sub_i += 1
+                else:
+                    sub_i = 0
+                prev_raw_norm = raw_norm
+                sources = _extract_sources_from_block_label(raw)
+                cleaned_metric = _clean_joint_metric_label(raw)
+                if sources:
+                    src = sources[sub_i] if sub_i < len(sources) else sources[-1]
+                    row_out = [cleaned_metric, _clean_joint_source_name(src)]
+                else:
+                    row_out = [cleaned_metric, ""]
+                for c in cols[1:]:
+                    row_out.append(df.at[idx, c])
+                new_rows.append(row_out)
+            out = pd.DataFrame(new_rows, columns=["Metric", "Source"] + cols[1:])
+            return out
+        return df
     else:
         return df
 

@@ -44,7 +44,7 @@ app.add_middleware(CORSMiddleware, ...)
 @app.post("/api/tml/inspection-report/read") # Parse PDF reports (OCR)
 @app.post("/api/tml/inspection-report")      # Parse PDFs + generate dataloader
 @app.post("/api/pipeline/metal-loss/assess") # Metal loss assessment
-@app.post("/api/pipeline/dig-package/generate") # Dig package generation
+@app.post("/api/pipeline/dig-package/generate") # Dig package generation (template optional → bundled 2026 xlsx)
 ```
 
 ### Request/Response Flow

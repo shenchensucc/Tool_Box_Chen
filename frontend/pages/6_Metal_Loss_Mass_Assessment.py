@@ -13,6 +13,7 @@ from frontend_utils import (
     check_backend_health,
     display_header,
     display_sidebar_navigation,
+    fu_key,
     get_layout_main,
     set_page_config,
     show_backend_unavailable_and_retry,
@@ -67,7 +68,12 @@ with main:
             <div style="font-size: 1.5rem;">📁 <strong>1. UPLOAD</strong></div>
         </div>
         """, unsafe_allow_html=True)
-        uploaded_file = st.file_uploader("Excel file", type=["xlsx", "xls"], key="upload_flow", label_visibility="collapsed")
+        uploaded_file = st.file_uploader(
+            "Excel file",
+            type=["xlsx", "xls"],
+            key=fu_key("mass", "excel"),
+            label_visibility="collapsed",
+        )
         if uploaded_file:
             st.caption(f"✓ {uploaded_file.name}")
 

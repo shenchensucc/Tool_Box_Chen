@@ -48,4 +48,10 @@ htmlcov/
 
 # Temporary files
 tmp/
-*.tmp 
+*.tmp
+
+# Dev-generated dig package inspection (recreate with tools/generate_dig_package_inspection.py)
+dev/dig_package_inspection/generated/
+
+# Backend runtime logs
+backend/logs/

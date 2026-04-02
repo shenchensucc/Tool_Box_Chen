@@ -20,78 +20,145 @@ display_sidebar_navigation()
 main = get_layout_main()
 
 with main:
-    # Main content
+    # -----------------------------------------------------------------------
+    # Hero
+    # -----------------------------------------------------------------------
     st.markdown(
-    """
-    <div style='text-align: center; padding: 2rem 0;'>
-        <h1 style='font-size: 3.5rem; color: #2c3e50; margin-bottom: 0;'>
-            🔧 Chen's Engineer Toolbox
-        </h1>
-        <p style='font-size: 1.3rem; color: #7f8c8d; margin-top: 0.5rem;'>
-            Python-based tools for facility and pipeline engineering
-        </p>
-    </div>
-    """,
-    unsafe_allow_html=True,
+        """
+        <div style="padding: 2.5rem 0 1rem 0;">
+            <div style="display:flex; align-items:center; gap:1rem; margin-bottom:0.5rem;">
+                <span style="font-size:2.8rem; line-height:1;">🔧</span>
+                <div>
+                    <h1 style="margin:0; font-size:2.5rem; letter-spacing:-0.03em;">
+                        Chen's Engineer Toolbox
+                    </h1>
+                    <p style="margin:0.25rem 0 0 0; font-size:1rem; color:#475569;">
+                        Pipeline &amp; facility integrity tools — ILI analysis, dig packages, metal loss assessment
+                    </p>
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
     st.markdown("---")
 
-    # Welcome section
-    col1, col2, col3 = st.columns([1, 2, 1])
+    # -----------------------------------------------------------------------
+    # System status strip
+    # -----------------------------------------------------------------------
+    backend_status = check_backend_health()
+    status_color = "#059669" if backend_status else "#DC2626"
+    status_dot = "●" if backend_status else "○"
+    status_label = "Backend API online" if backend_status else "Backend API offline"
+    st.markdown(
+        f"""
+        <div style="display:flex; align-items:center; gap:0.5rem; padding:0.6rem 1rem;
+                    background:#F1F5F9; border:1px solid #E2E8F0; border-radius:6px;
+                    margin-bottom:1.5rem; font-size:0.875rem; font-weight:500;">
+            <span style="color:{status_color}; font-size:1rem;">{status_dot}</span>
+            <span style="color:#475569;">{status_label}</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    with col2:
-        st.markdown(
-            """
-            ### Welcome to the Engineering Toolbox
+    if not backend_status:
+        show_backend_unavailable_and_retry()
 
-            This application provides a comprehensive suite of tools for:
+    # -----------------------------------------------------------------------
+    # Tool cards
+    # -----------------------------------------------------------------------
+    st.markdown(
+        "<p style='font-size:0.7rem; font-weight:600; text-transform:uppercase; "
+        "letter-spacing:0.1em; color:#94A3B8; margin-bottom:0.75rem;'>AVAILABLE TOOLS</p>",
+        unsafe_allow_html=True,
+    )
 
-            - 📊 **Dashboard**: Overview of your projects and data
-            - 🏭 **Facility Tools**: Facility management and analysis
-            - 🛢️ **Pipeline Tools**: Pipeline inspection and visualization
-            - ⚙️ **TML Data Loader**: Batch process thickness monitoring location data
+    tools = [
+        {
+            "icon": "📊", "title": "Dashboard",
+            "desc": "Project overview and data summaries",
+            "page": "1_Dashboard",
+        },
+        {
+            "icon": "📦", "title": "Dig Package Generator",
+            "desc": "Generate dig packages from MDL + ILI + template",
+            "page": "5_Dig_Package_Generator",
+        },
+        {
+            "icon": "🔍", "title": "Dig Package Visual Tool",
+            "desc": "Visualize ILI data from dig package Excel files",
+            "page": "3_Dig_Package_Visual_Tool",
+        },
+        {
+            "icon": "📈", "title": "ILI Visual Tool",
+            "desc": "Upload Excel or paste clipboard data for ILI visualization",
+            "page": "3_ILI_Visual_Tool",
+        },
+        {
+            "icon": "🧮", "title": "Metal Loss Assessment",
+            "desc": "Single-feature metal loss fitness-for-service calculation",
+            "page": "4_Metal_Loss_Assessment",
+        },
+        {
+            "icon": "📋", "title": "Metal Loss Mass Assessment",
+            "desc": "Batch metal loss assessment across multiple features",
+            "page": "6_Metal_Loss_Mass_Assessment",
+        },
+        {
+            "icon": "⚙️", "title": "TML Data Loader",
+            "desc": "Batch-process up to 20 TML workflows simultaneously",
+            "page": "2_TML_Data_Loader",
+        },
+        {
+            "icon": "📄", "title": "Inspection Report Loader",
+            "desc": "Parse and extract data from inspection report PDFs",
+            "page": "8_Inspection_Report_Loader",
+        },
+        {
+            "icon": "🔌", "title": "Deactivate CML",
+            "desc": "Deactivate corrosion monitoring locations in bulk",
+            "page": "7_Deactive_CML",
+        },
+    ]
 
-            ### Getting Started
+    cols = st.columns(3)
+    for i, tool in enumerate(tools):
+        with cols[i % 3]:
+            st.markdown(
+                f"""
+                <div style="background:#FFFFFF; border:1px solid #E2E8F0;
+                            border-left:3px solid #0F3460;
+                            border-radius:6px; padding:1rem 1.1rem;
+                            margin-bottom:0.75rem;
+                            transition:box-shadow 0.15s;">
+                    <div style="font-size:1.3rem; margin-bottom:0.4rem;">{tool['icon']}</div>
+                    <div style="font-weight:600; font-size:0.95rem; color:#0F172A;
+                                margin-bottom:0.25rem;">{tool['title']}</div>
+                    <div style="font-size:0.82rem; color:#64748B; line-height:1.45;">{tool['desc']}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
-            1. Use the sidebar to navigate to different sections
-            2. Upload your data files (Excel, CSV)
-            3. Analyze and visualize your engineering data
-
-            ### Features
-
-            - **Dig Package Visual Tool**: Visualize ILI data from dig package Excel files
-            - **ILI Visual Tool**: Upload Excel or paste clipboard data for ILI visualization
-            - **TML Data Loader**: Process up to 20 TML workflows simultaneously
-            - **Interactive Charts**: Powered by Plotly for rich visualizations
-            - **Data Export**: Download processed results
-            - **Fast API Backend**: Efficient data processing
-
-            ---
-
-            **Ready to begin?** Select a tool from the sidebar! 👈
-            """
-        )
+    with st.expander("🛠️ Development (remove when shipping)", expanded=False):
+        st.caption("Dig package template KPI checklist — static checks, optional pytest, manual marks.")
+        st.page_link("pages/10_Dig_Package_KPI_Dev.py", label="🧪 Dig Package KPI (dev)")
 
     st.markdown("---")
-    col1, col2, col3 = st.columns([1, 1, 1])
 
-    with col2:
-        st.markdown("### System Status")
-        backend_status = check_backend_health()
-
-        if backend_status:
-            st.success("✅ Backend API is running")
-        else:
-            show_backend_unavailable_and_retry()
-
+    # -----------------------------------------------------------------------
     # Footer
-    st.markdown("---")
+    # -----------------------------------------------------------------------
     st.markdown(
         """
-        <div style='text-align: center; color: #95a5a6; padding: 2rem 0;'>
-            <p>Chen's Engineer Toolbox v0.1.0</p>
-            <p>Built with Streamlit + FastAPI + Python 3.11</p>
+        <div style="display:flex; justify-content:space-between; align-items:center;
+                    color:#94A3B8; font-size:0.8rem; padding:0.5rem 0 1rem 0;">
+            <span>Chen's Engineer Toolbox v0.1.0</span>
+            <span style="font-family:'JetBrains Mono',monospace;">
+                Streamlit · FastAPI · Python 3.11
+            </span>
         </div>
         """,
         unsafe_allow_html=True,

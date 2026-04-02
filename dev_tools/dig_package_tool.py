@@ -179,7 +179,6 @@ def main():
     from backend.pipeline.dig_package import (
         parse_mdl_file,
         extract_dig_ids,
-        parse_ili_file,
         get_target_feature_indices,
         get_target_gw_chainage,
         filter_ili_data_by_range,
@@ -220,6 +219,8 @@ def main():
 
     # --- Step 3: Parse ILI ---
     st.subheader("3. Parse ILI")
+    from backend.pipeline.ili_parse import parse_ili_file
+
     ili_parsed = []
     if ili_contents and mdl_df is not None:
         for i, (content, fmt) in enumerate(zip(ili_contents, ili_formats)):

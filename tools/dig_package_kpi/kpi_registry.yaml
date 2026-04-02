@@ -1,0 +1,402 @@
+# Machine-readable Dig Package KPI registry for tools/dig_package_kpi/check_kpi.py
+# Template population uses dig_package_layout.json + resolve_field_cell (not Excel tmp_* defined names).
+#
+# check types:
+#   - code_all: { file: rel/path, substrings: [str, ...] }  — all must appear
+#   - code_any: { file: rel/path, substrings: [str, ...] }  — any suffices
+#   - not_until_def: { file, function_name } — PASS when function exists (Joint Summary)
+#
+# effective: auto_pass if any check passes OR optional pytest passes when --with-tests
+
+meta:
+  version: 2
+  repo_root: "."
+  primary_module: backend/pipeline/dig_package.py
+  test_module: tests/test_dig_package.py
+
+sections:
+  A:
+    title: "A. Description (PNG Integrity template — project / location block)"
+    items:
+      - id: A-1
+        name: "Dig Name (field dig_display; MDL Dig Name)"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["dig_display", "resolve_field_cell", "_dig_display"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: A-2
+        name: "Pipeline Name (field pipeline_name)"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["pipeline_name", "resolve_field_cell"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: A-3
+        name: "Target Girth Weld / TGW (MDL target_girth_weld; TGW chainage / matching)"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["target_girth_weld", "mdl_col_map"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: A-4
+        name: "Issue Date (field issue_date; MDL Dig Issuance / Revision / Cancellation Date, else =TODAY())"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["issue_date", "_issue_date_cell_value", "Dig Issuance / Revision / Cancellation Date"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: A-5
+        name: "Rev # (field revision; MDL dig_revision)"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["revision", "resolve_field_cell", "dig_revision"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: A-6
+        name: "TGW GPS — Lat / Long (fields latitude, longitude)"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["latitude", "longitude", "resolve_field_cell"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: A-7
+        name: "Nearest ROW MP / milepost (field milepost)"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["milepost", "resolve_field_cell"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: A-8
+        name: "Number of Excavations (field excavation_count; optional if template omits label)"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["excavation_count", "resolve_field_cell"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+
+  B:
+    title: "B. Pipe Information"
+    items:
+      - id: B-1
+        name: "Pipe NPS (field pipe_od)"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["pipe_od", "resolve_field_cell"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: B-2
+        name: "Pipe NWT (field pipe_nwt)"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["pipe_nwt", "resolve_field_cell"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: B-3
+        name: "MOP (field mop)"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ['"mop"', "resolve_field_cell"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: B-4
+        name: "SEP (field sep)"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ['"sep"', "resolve_field_cell"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: B-5
+        name: "Pipe Year (field pipe_year)"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["pipe_year", "resolve_field_cell"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: B-6
+        name: "Pipe Grade (field pipe_grade)"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["pipe_grade", "resolve_field_cell"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+
+  D_loc:
+    title: "D-loc. Location"
+    items:
+      - id: D1
+        name: "Latitude (field latitude)"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["latitude", "resolve_field_cell"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: D2
+        name: "Longitude (field longitude)"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["longitude", "resolve_field_cell"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: D3
+        name: "Milepost (field milepost)"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["milepost", "resolve_field_cell"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+
+  D_ili:
+    title: "D-ili. ILI Run Info"
+    items:
+      - id: D4
+        name: "ILI Run Name (field ili_run_name)"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["ili_run_name", "resolve_field_cell"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: D5
+        name: "ILI Run Date / accuracy (field ili_run_accuracy)"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["ili_run_accuracy", "resolve_field_cell"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+
+  E:
+    title: "E. AGM"
+    items:
+      - id: E-1
+        name: "Upstream AGM (US_AGM)"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["US_AGM", "upstream_agm"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: E-2
+        name: "Downstream AGM (DS_AGM)"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["DS_AGM", "downstream_agm"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+
+  F:
+    title: "F. Assessment Summary"
+    items:
+      - id: F-1
+        name: "Excavation label (Excavation #N)"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["Excavation #", "populate_excavation_summary"] }]
+        pytest: test_populate_excavation_summary_writes_via_layout_anchors
+      - id: F-2
+        name: "Total Assessment Length"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["assessment_length", "populate_excavation_summary"] }]
+        pytest: test_populate_excavation_summary_writes_via_layout_anchors
+      - id: F-3
+        name: "Start Assessment to TGW"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["start_assessment", "populate_excavation_summary"] }]
+        pytest: test_populate_excavation_summary_writes_via_layout_anchors
+      - id: F-4
+        name: "End Assessment to TGW"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["end_assessment", "populate_excavation_summary"] }]
+        pytest: test_populate_excavation_summary_writes_via_layout_anchors
+
+  G:
+    title: "G. Exposure Summary"
+    items:
+      - id: G-1
+        name: "Exposure excavation label (exposure_summary block)"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["exposure_summary", "populate_excavation_summary"] }]
+        pytest: test_populate_excavation_summary_writes_via_layout_anchors
+      - id: G-2
+        name: "Exposure Length"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["exposure_length", "populate_excavation_summary"] }]
+        pytest: test_populate_excavation_summary_writes_via_layout_anchors
+      - id: G-3
+        name: "Start Exposure to TGW"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["start_exposure", "populate_excavation_summary"] }]
+        pytest: test_populate_excavation_summary_writes_via_layout_anchors
+      - id: G-4
+        name: "End Exposure to TGW"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["end_exposure", "populate_excavation_summary"] }]
+        pytest: test_populate_excavation_summary_writes_via_layout_anchors
+
+  H:
+    title: "H. Feature Table"
+    items:
+      - id: H-1
+        name: "Feature ID column"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["populate_feature_table", "feature_id"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: H-2
+        name: "Excavation Number column"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["populate_feature_table", "excavation_num"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: H-3
+        name: "Feature Type"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["feature_type", "populate_feature_table"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: H-4
+        name: "Feature Description"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["feature_desc", "populate_feature_table"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: H-5
+        name: "Depth (%)"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["depth", "populate_feature_table"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: H-6
+        name: "Length (mm)"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["length", "get_ili_value"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: H-7
+        name: "Width (mm)"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["width", "get_ili_value"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: H-8
+        name: "Orientation"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["orientation", "populate_feature_table"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: H-9
+        name: "ILI Chainage"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["distance", "populate_feature_table"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: H-10
+        name: "Distance from TGW"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["target_gw_chainage", "populate_feature_table"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: H-11
+        name: "GW window filter — exclude far features"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["filter_ili_by_gw_count", "GWD"] }]
+        pytest: test_filter_ili_by_gw_count_happy_path_3_each_side
+      - id: H-12
+        name: "GW clamping when fewer than 3"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["filter_ili_by_gw_count", "girth"] }]
+        pytest: test_filter_ili_by_gw_count_clamps_when_fewer_upstream_gws
+      - id: H-13
+        name: "Fallback ±30 m when no GWD"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["DEFAULT_ASSESSMENT_RANGE_M", "filter_ili_by_gw_count"] }]
+        pytest: test_filter_ili_by_gw_count_falls_back_when_no_gwd_rows
+      - id: H-14
+        name: "GWD boundary buffer 0.5 m"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["buffer", "filter_ili_by_gw_count"] }]
+        pytest: test_filter_ili_by_gw_count_happy_path_3_each_side
+
+  I:
+    title: "I. File Naming"
+    items:
+      - id: I-1
+        name: "Stem uses Dig Name when present"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["package_output_stem", "dig_name"] }]
+        pytest: test_package_output_stem_prefers_dig_name
+      - id: I-2
+        name: "Fallback to Dig ID"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["package_output_stem", "dig_id"] }]
+        pytest: test_package_output_stem_prefers_dig_name
+      - id: I-3
+        name: "Sanitize filename chars"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["_sanitize_package_filename_base", "<>"] }]
+        pytest: test_package_output_stem_prefers_dig_name
+      - id: I-4
+        name: "PDF alongside Excel"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["convert_excel_to_pdf", ".pdf"] }]
+        pytest: test_generate_dig_packages_end_to_end_produces_zip_with_xlsx
+      - id: I-5
+        name: "ZIP bundles outputs"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["ZipFile", "zipfile"] }]
+        pytest: test_generate_dig_packages_end_to_end_produces_zip_with_xlsx
+
+  J:
+    title: "J. Summary JSON"
+    items:
+      - id: J-1
+        name: "total / dig list coverage"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["dig_ids_requested", "json.dumps"] }]
+        pytest: test_generate_dig_packages_end_to_end_produces_zip_with_xlsx
+      - id: J-2
+        name: "successful → generated[]"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["generated", "append"] }]
+        pytest: test_generate_dig_packages_end_to_end_produces_zip_with_xlsx
+      - id: J-3
+        name: "skipped digs"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["skipped", "summary"] }]
+        pytest: test_generate_dig_packages_end_to_end_produces_zip_with_xlsx
+      - id: J-4
+        name: "per-dig results list"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["generated", "dig_id"] }]
+        pytest: test_generate_dig_packages_end_to_end_produces_zip_with_xlsx
+      - id: J-5
+        name: "results dig_id"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ['"dig_id"', "generated"] }]
+        pytest: test_generate_dig_packages_end_to_end_produces_zip_with_xlsx
+      - id: J-6
+        name: "results dig_name"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ['"dig_name"', "generated"] }]
+        pytest: test_generate_dig_packages_end_to_end_produces_zip_with_xlsx
+      - id: J-7
+        name: "status-like fields (skipped vs generated)"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["skipped", "reason"] }]
+        pytest: test_generate_dig_packages_end_to_end_produces_zip_with_xlsx
+      - id: J-8
+        name: "skip reason / error context"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["reason", "skipped"] }]
+        pytest: test_generate_dig_packages_end_to_end_produces_zip_with_xlsx
+      - id: J-9
+        name: "features_matched"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["features_matched"] }]
+        pytest: test_generate_dig_packages_end_to_end_produces_zip_with_xlsx
+      - id: J-10
+        name: "ili_files_failed"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["ili_files_failed"] }]
+        pytest: test_generate_dig_packages_handles_failed_ili_parse_gracefully
+
+  K:
+    title: "K. Layout wiring (manifest fields → cells)"
+    items:
+      - id: K-1
+        name: "dig_display"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["dig_display", "resolve_field_cell"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: K-2
+        name: "revision"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["revision", "resolve_field_cell"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: K-3
+        name: "issue_date (MDL Dig Issuance / … → cell, else TODAY)"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["issue_date", "resolve_field_cell", "_issue_date_cell_value"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: K-4
+        name: "pipeline_name"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["pipeline_name", "resolve_field_cell"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: K-5
+        name: "excavation_count"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["excavation_count", "resolve_field_cell"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: K-6
+        name: "pipe_od"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["pipe_od", "resolve_field_cell"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: K-7
+        name: "pipe_nwt"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["pipe_nwt", "resolve_field_cell"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: K-8
+        name: "mop"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ['"mop"', "resolve_field_cell"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: K-9
+        name: "sep"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ['"sep"', "resolve_field_cell"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: K-10
+        name: "pipe_year"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["pipe_year", "resolve_field_cell"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: K-11
+        name: "pipe_grade"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["pipe_grade", "resolve_field_cell"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: K-12
+        name: "latitude"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["latitude", "resolve_field_cell"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: K-13
+        name: "longitude"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["longitude", "resolve_field_cell"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: K-14
+        name: "milepost"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["milepost", "resolve_field_cell"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: K-15
+        name: "ili_run_name"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["ili_run_name", "resolve_field_cell"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: K-16
+        name: "ili_run_accuracy"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["ili_run_accuracy", "resolve_field_cell"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: K-17
+        name: "upstream_agm"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["upstream_agm", "resolve_field_cell"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: K-18
+        name: "downstream_agm"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["downstream_agm", "resolve_field_cell"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+      - id: K-19
+        name: "excavation_summary block (Excavation #)"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["excavation_summary", "Excavation #"] }]
+        pytest: test_populate_excavation_summary_writes_via_layout_anchors
+      - id: K-20
+        name: "exposure_summary block"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["exposure_summary", "populate_excavation_summary"] }]
+        pytest: test_populate_excavation_summary_writes_via_layout_anchors
+      - id: K-21
+        name: "feature_table (Feature ID anchor)"
+        checks: [{ type: code_all, file: backend/pipeline/dig_package.py, substrings: ["populate_feature_table", "resolve_feature_table_data_start"] }]
+        pytest: test_generate_dig_packages_template_cell_value_populated
+
+  C:
+    title: "C. Joint Summary Table"
+    not_implemented: true
+    items:
+      - id: C-1
+        name: "GWD column headers"
+        gate: { type: not_until_def, file: backend/pipeline/dig_package.py, function: populate_joint_summary }
+      - id: C-2
+        name: "Longseam orientation matrix"
+        gate: { type: not_until_def, file: backend/pipeline/dig_package.py, function: populate_joint_summary }
+      - id: C-3
+        name: "Joint length per GWD"
+        gate: { type: not_until_def, file: backend/pipeline/dig_package.py, function: populate_joint_summary }
+      - id: C-4
+        name: "Target GWD column marker"
+        gate: { type: not_until_def, file: backend/pipeline/dig_package.py, function: populate_joint_summary }
+      - id: C-5
+        name: "Pipe year per joint"
+        gate: { type: not_until_def, file: backend/pipeline/dig_package.py, function: populate_joint_summary }
+      - id: C-6
+        name: "Pipe grade per joint"
+        gate: { type: not_until_def, file: backend/pipeline/dig_package.py, function: populate_joint_summary }
+      - id: C-7
+        name: "ILI source label rows"
+        gate: { type: not_until_def, file: backend/pipeline/dig_package.py, function: populate_joint_summary }

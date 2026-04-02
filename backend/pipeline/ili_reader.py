@@ -9,7 +9,7 @@ from backend.logging_config import get_logger
 logger = get_logger("backend.pipeline.ili_reader")
 
 # Version string - change when fixing column matching; appears in logs on reload
-ILI_READER_VERSION = "v2-depth-fix"
+ILI_READER_VERSION = "v3-early-exit"
 logger.info(f"ili_reader loaded ({ILI_READER_VERSION})")
 
 # Configurable keywords for column identification
@@ -151,14 +151,38 @@ def select_workbook_sheet(workbook, keywords: Optional[List[str]] = None) -> str
     return workbook.sheetnames[0]
 
 
+def _score_row_against_keywords(headers: List[str], keyword_map: Dict[str, List[str]]) -> int:
+    """
+    Fast in-place scoring of a row against keyword_map without allocating a DataFrame.
+    Returns the count of keyword groups with at least one match.
+    """
+    headers_lower = [h.lower().strip() for h in headers]
+    score = 0
+    for possible_names in keyword_map.values():
+        for name in possible_names:
+            name_lower = name.lower().strip()
+            if name_lower in headers_lower:
+                score += 1
+                break
+            if len(name_lower) >= 4 and any(name_lower in h for h in headers_lower):
+                score += 1
+                break
+    return score
+
+
 def detect_header_row(
     worksheet,
     keyword_map: Dict[str, List[str]],
     max_scan_rows: int = 60,
     min_matches: int = 2,
+    early_exit_score: int = 5,
 ) -> Optional[int]:
     """
     Detect the most likely header row by scoring rows against expected column keywords.
+
+    Uses a fast pre-score pass to avoid creating DataFrames for every row.
+    Exits early once a row with early_exit_score matched columns is found — this
+    covers the typical case where the header is found in the first 10 rows.
     """
     best_row = None
     best_score = -1
@@ -172,9 +196,8 @@ def detect_header_row(
         if non_empty < 2:
             continue
 
-        header_df = pd.DataFrame(columns=headers)
-        mapping = identify_ili_columns(header_df, keyword_map)
-        score = len([column for column in mapping.values() if column is not None])
+        # Fast pre-score — no DataFrame allocation.
+        score = _score_row_against_keywords(headers, keyword_map)
 
         if score < min_matches:
             continue
@@ -182,6 +205,10 @@ def detect_header_row(
             best_row = row_idx
             best_score = score
             best_non_empty = non_empty
+
+        # Early exit: we found a strong enough header row — no need to scan more.
+        if best_score >= early_exit_score:
+            break
 
     return best_row
 
@@ -221,9 +248,20 @@ def read_excel_with_detected_header(
     sheet_keywords: Optional[List[str]] = None,
     max_scan_rows: int = 60,
     min_matches: int = 2,
+    good_enough_score: int = 6,
+    max_sheets_to_scan: int = 10,
 ) -> tuple[pd.DataFrame, Dict[str, Optional[str]], str, int]:
     """
     Read an Excel worksheet using keyword-based sheet selection and header detection.
+
+    Performance notes:
+    - Tries the keyword-selected primary sheet first. If it scores >= good_enough_score
+      the search stops immediately — no other sheets are scanned. This is the typical
+      path for well-structured vendor files.
+    - Falls back to scanning up to max_sheets_to_scan additional sheets only when the
+      primary sheet scores below good_enough_score.
+    - detect_header_row uses a fast pre-score (no DataFrame per row) and early-exits
+      once it hits early_exit_score matched columns.
 
     Returns:
         (df, column_mapping, sheet_name, header_row)
@@ -231,7 +269,9 @@ def read_excel_with_detected_header(
     workbook = load_workbook(io.BytesIO(file_content), data_only=True)
     try:
         primary_sheet = select_workbook_sheet(workbook, sheet_keywords)
-        candidate_sheet_names = [primary_sheet] + [name for name in workbook.sheetnames if name != primary_sheet]
+        # Always try the primary (keyword-selected) sheet first.
+        remaining = [name for name in workbook.sheetnames if name != primary_sheet]
+        candidate_sheet_names = [primary_sheet] + remaining[:max_sheets_to_scan - 1]
 
         best_result = None
         best_score = -1
@@ -248,10 +288,14 @@ def read_excel_with_detected_header(
 
             df = read_worksheet_as_dataframe(worksheet, header_row)
             mapping = identify_ili_columns(df, keyword_map)
-            score = len([column for column in mapping.values() if column is not None])
+            score = len([col for col in mapping.values() if col is not None])
             if score > best_score:
                 best_result = (df, mapping, sheet_name, header_row)
                 best_score = score
+
+            # Primary sheet scored well enough — stop immediately, don't scan siblings.
+            if best_score >= good_enough_score:
+                break
 
         if best_result is not None:
             return best_result

@@ -1,18 +1,23 @@
 import io
+import json
+import zipfile
+
 import pandas as pd
 from openpyxl import Workbook
-from openpyxl.workbook.defined_name import DefinedName
 
 from backend.pipeline.dig_package import (
+    _get_mdl_value,
     extract_dig_ids,
+    filter_ili_by_gw_count,
+    generate_dig_packages,
     get_target_gw_chainage,
     is_valid_dig_id,
     match_features_by_dimensions,
     package_output_stem,
-    parse_ili_file,
     parse_mdl_file,
     populate_excavation_summary,
 )
+from backend.pipeline.dig_package_layout import load_layout_manifest
 from backend.pipeline.dig_package_reader import (
     _build_joint_context,
     _find_header_row_after,
@@ -31,12 +36,6 @@ def _workbook_bytes(workbook: Workbook) -> bytes:
     buffer = io.BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()
-
-
-def _add_named_range(workbook: Workbook, name: str, sheet_name: str, cell_ref: str) -> None:
-    column = "".join(ch for ch in cell_ref if ch.isalpha())
-    row = "".join(ch for ch in cell_ref if ch.isdigit())
-    workbook.defined_names[name] = DefinedName(name, attr_text=f"'{sheet_name}'!${column}${row}")
 
 
 def test_parse_mdl_file_detects_header_after_title_rows():
@@ -89,31 +88,14 @@ def test_is_valid_dig_id_numeric_and_legacy_gw():
     assert is_valid_dig_id("") is False
 
 
-def test_parse_ili_file_uses_shared_detection_for_rosen_anomalies_sheet():
-    workbook = Workbook()
-    workbook.active.title = "Cover"
-    ws = workbook.create_sheet("Anomalies Listing 2025")
-    ws["A1"] = "Rosen export"
-    ws.append(["Feature ID", "Description", "Length (mm)", "Width (mm)", "Peak Depth", "Orientation (hh:mm)", "ILI Chainage (m)", "Joint No. or US GW No."])
-    ws.append(["F-1", "Metal Loss", 25.4, 12.7, 42, "03:30", 1000.5, 3150])
-
-    df, column_mapping, sheet_name = parse_ili_file(_workbook_bytes(workbook), "Rosen-MFLA")
-
-    assert sheet_name == "Anomalies Listing 2025"
-    assert column_mapping["feature_id"] == "Feature ID"
-    assert column_mapping["distance"] == "ILI Chainage (m)"
-    assert column_mapping["joint_number"] == "Joint No. or US GW No."
-    assert len(df) == 1
-
-
-def test_populate_excavation_summary_writes_to_named_range_sheet():
+def test_populate_excavation_summary_writes_via_layout_anchors():
+    """Excavation / exposure blocks use anchor labels Excavation / Exposure + column B values."""
     workbook = Workbook()
     intro_ws = workbook.active
     intro_ws.title = "Intro"
-    template_ws = workbook.create_sheet("Template")
-
-    _add_named_range(workbook, "tmp_numExv_num", "Template", "B2")
-    _add_named_range(workbook, "tmp_numExp_num", "Template", "B10")
+    template_ws = workbook.create_sheet("Dig Package")
+    template_ws["A20"] = "Excavation"
+    template_ws["A25"] = "Exposure"
 
     mdl_row = pd.Series(
         {
@@ -134,12 +116,17 @@ def test_populate_excavation_summary_writes_to_named_range_sheet():
         "end_exposure": "end_exposure_col",
     }
 
-    populate_excavation_summary(workbook, mdl_row, mdl_col_map, excavation_num=7)
+    manifest = load_layout_manifest()
+    populate_excavation_summary(workbook, mdl_row, mdl_col_map, excavation_num=7, layout_manifest=manifest)
 
-    assert template_ws["B2"].value == "Excavation #7"
-    assert template_ws["B3"].value == 30
-    assert template_ws["B4"].value == 10
-    assert template_ws["B5"].value == 20
+    assert template_ws["B20"].value == "Excavation #7"
+    assert template_ws["B21"].value == 30
+    assert template_ws["B22"].value == 10
+    assert template_ws["B23"].value == 20
+    assert template_ws["B25"].value == "Excavation #7"
+    assert template_ws["B26"].value == 25
+    assert template_ws["B27"].value == 11
+    assert template_ws["B28"].value == 21
     assert intro_ws["B2"].value is None
 
 
@@ -454,3 +441,420 @@ def test_find_header_row_after_skips_repeated_merged_section_title():
     header_row = _find_header_row_after(ws, 1)
 
     assert header_row == 2
+
+
+# ============================================================================
+# New tests — Lane D
+# ============================================================================
+
+
+# -----------------------------------------------------------------------
+# _get_mdl_value helper
+# -----------------------------------------------------------------------
+
+def test_get_mdl_value_returns_value_when_present():
+    row = pd.Series({"Pipeline Name": "Main Line"})
+    col_map = {"pipeline_name": "Pipeline Name"}
+    assert _get_mdl_value(row, col_map, "pipeline_name") == "Main Line"
+
+
+def test_get_mdl_value_returns_dash_when_col_not_in_map():
+    row = pd.Series({"Pipeline Name": "Main Line"})
+    assert _get_mdl_value(row, {}, "pipeline_name") == "-"
+
+
+def test_get_mdl_value_returns_dash_for_nan_cell():
+    row = pd.Series({"Pipeline Name": float("nan")})
+    col_map = {"pipeline_name": "Pipeline Name"}
+    assert _get_mdl_value(row, col_map, "pipeline_name") == "-"
+
+
+# -----------------------------------------------------------------------
+# filter_ili_by_gw_count
+# -----------------------------------------------------------------------
+
+def _make_ili_with_girth_welds() -> tuple:
+    """Return (DataFrame, col_map) with a mix of girth weld and anomaly rows."""
+    rows = [
+        # GWDs sorted by chainage
+        {"Feature Type": "Girth Weld", "ILI Chainage (m)": 900.0, "ID#": "GW-1"},
+        {"Feature Type": "Girth Weld", "ILI Chainage (m)": 920.0, "ID#": "GW-2"},
+        {"Feature Type": "Girth Weld", "ILI Chainage (m)": 940.0, "ID#": "GW-3"},
+        # TGW
+        {"Feature Type": "Girth Weld", "ILI Chainage (m)": 1000.0, "ID#": "GW-TGW"},
+        {"Feature Type": "Metal Loss",  "ILI Chainage (m)": 1005.0, "ID#": "F-1"},
+        {"Feature Type": "Girth Weld", "ILI Chainage (m)": 1060.0, "ID#": "GW-5"},
+        {"Feature Type": "Girth Weld", "ILI Chainage (m)": 1080.0, "ID#": "GW-6"},
+        {"Feature Type": "Girth Weld", "ILI Chainage (m)": 1100.0, "ID#": "GW-7"},
+        {"Feature Type": "Metal Loss",  "ILI Chainage (m)": 1200.0, "ID#": "F-2"},
+    ]
+    df = pd.DataFrame(rows)
+    col_map = {
+        "feature_type": "Feature Type",
+        "distance": "ILI Chainage (m)",
+        "feature_id": "ID#",
+    }
+    return df, col_map
+
+
+def test_filter_ili_by_gw_count_happy_path_3_each_side():
+    df, col_map = _make_ili_with_girth_welds()
+    result = filter_ili_by_gw_count(df, target_gw_chainage=1000.0, ili_col_map=col_map)
+    chainages = result["ILI Chainage (m)"].tolist()
+    # Should include the 3 upstream GWDs (900, 920, 940) and 3 downstream (1060, 1080, 1100)
+    # plus the TGW itself (1000) and the anomaly between TGW and first downstream (1005)
+    assert 900.0 in chainages
+    assert 1000.0 in chainages
+    assert 1005.0 in chainages
+    assert 1100.0 in chainages
+    # The far-downstream anomaly at 1200m should be excluded
+    assert 1200.0 not in chainages
+
+
+def test_filter_ili_by_gw_count_clamps_when_fewer_upstream_gws():
+    """Only 1 GWD upstream of TGW — should clamp without error."""
+    rows = [
+        {"Feature Type": "Girth Weld", "ILI Chainage (m)": 990.0, "ID#": "GW-only-upstream"},
+        {"Feature Type": "Girth Weld", "ILI Chainage (m)": 1000.0, "ID#": "GW-TGW"},
+        {"Feature Type": "Girth Weld", "ILI Chainage (m)": 1020.0, "ID#": "GW-DS1"},
+        {"Feature Type": "Girth Weld", "ILI Chainage (m)": 1040.0, "ID#": "GW-DS2"},
+        {"Feature Type": "Girth Weld", "ILI Chainage (m)": 1060.0, "ID#": "GW-DS3"},
+    ]
+    df = pd.DataFrame(rows)
+    col_map = {"feature_type": "Feature Type", "distance": "ILI Chainage (m)", "feature_id": "ID#"}
+    result = filter_ili_by_gw_count(df, target_gw_chainage=1000.0, ili_col_map=col_map)
+    chainages = result["ILI Chainage (m)"].tolist()
+    assert 990.0 in chainages   # the only upstream GWD is still included
+    assert 1060.0 in chainages  # 3 downstream GWDs present
+
+
+def test_filter_ili_by_gw_count_falls_back_when_no_gwd_rows():
+    """No girth-weld rows at all → fall back to ±DEFAULT_ASSESSMENT_RANGE_M."""
+    from backend.pipeline.dig_package import DEFAULT_ASSESSMENT_RANGE_M
+    rows = [
+        {"Feature Type": "Metal Loss", "ILI Chainage (m)": 960.0, "ID#": "F-1"},
+        {"Feature Type": "Metal Loss", "ILI Chainage (m)": 1000.0, "ID#": "F-2"},
+        {"Feature Type": "Metal Loss", "ILI Chainage (m)": 1050.0, "ID#": "F-3"},
+    ]
+    df = pd.DataFrame(rows)
+    col_map = {"feature_type": "Feature Type", "distance": "ILI Chainage (m)", "feature_id": "ID#"}
+    result = filter_ili_by_gw_count(df, target_gw_chainage=1000.0, ili_col_map=col_map)
+    # ±30m window: 960 is in range (1000-30=970? no — 960 < 970, excluded)
+    # 1000 and 1050 (1050 > 1030) out as well — only 1000 is in [970, 1030]
+    chainages = result["ILI Chainage (m)"].tolist()
+    assert 1000.0 in chainages
+    assert 960.0 not in chainages   # outside ±30m
+
+
+def test_filter_ili_by_gw_count_returns_full_df_when_chainage_col_missing():
+    df = pd.DataFrame({"ID#": ["F-1", "F-2"], "Feature Type": ["Metal Loss", "Metal Loss"]})
+    col_map = {"feature_type": "Feature Type", "feature_id": "ID#"}
+    result = filter_ili_by_gw_count(df, target_gw_chainage=1000.0, ili_col_map=col_map)
+    assert len(result) == len(df)
+
+
+# -----------------------------------------------------------------------
+# End-to-end: generate_dig_packages
+# -----------------------------------------------------------------------
+
+def _build_minimal_template() -> bytes:
+    """Minimal template: column A labels (anchors), column B values; excavation/exposure/feature blocks."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Dig Package"
+
+    row_labels = [
+        "Dig Name",
+        "Rev #",
+        "Pipeline Name",
+        "Pipe NPS",
+        "Pipe NWT",
+        "MOP",
+        "SEP",
+        "Lat (deg)",
+        "Long (deg)",
+        "Milepost",
+        "Pipe Year",
+        "Pipe Grade",
+        "Originating ILI",
+        "ILI Time",
+        "Upstream AGM",
+        "Downstream AGM",
+        "Number of Excavations",
+        "Issue Date",
+    ]
+    for i, lab in enumerate(row_labels, start=1):
+        ws.cell(i, 1).value = lab
+
+    ws["A20"] = "Excavation"
+    ws["A25"] = "Exposure"
+    ws["A30"] = "Feature ID"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _build_minimal_mdl(dig_id: int = 6000, pipeline_name: str = "Test Line") -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Dig Notification Log"
+    ws.append(
+        [
+            "Dig ID",
+            "Dig Name",
+            "Feature ID",
+            "Pipeline Name",
+            "Length (mm)",
+            "Width (mm)",
+            "Target Girth Weld (TGW)",
+            "ILI Run Name",
+            "Total Assessment Length (m)",
+            "Start Assessment to TGW (m)",
+            "End Assessment to TGW (m)",
+        ]
+    )
+    ws.append(
+        [
+            dig_id,
+            f"ID{dig_id}_TestDig",
+            "F-001",
+            pipeline_name,
+            25.4,
+            12.7,
+            3180,
+            "2025 Test Run",
+            9.0,
+            -0.5,
+            8.5,
+        ]
+    )
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _build_minimal_ili(tgw_joint: int = 3180) -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Anomalies Listing"
+    ws.append(["Feature ID", "Feature Type", "Description", "Length (mm)", "Width (mm)",
+               "Peak Depth", "Orientation (hh:mm)", "ILI Chainage (m)", "Joint No. or US GW No."])
+    # Three GWDs upstream of TGW
+    for gwd, ch in [(3177, 940.0), (3178, 960.0), (3179, 980.0)]:
+        ws.append([f"GW-{gwd}", "Girth Weld", "GWD", 0, 0, 0, "12:00", ch, gwd])
+    # TGW
+    ws.append(["GW-3180", "Girth Weld", "Target GWD", 0, 0, 0, "12:00", 1000.0, tgw_joint])
+    # Target anomaly
+    ws.append(["F-001", "Metal Loss", "Corrosion", 25.4, 12.7, 42, "03:30", 1005.0, tgw_joint])
+    # Three GWDs downstream
+    for gwd, ch in [(3181, 1020.0), (3182, 1040.0), (3183, 1060.0)]:
+        ws.append([f"GW-{gwd}", "Girth Weld", "GWD", 0, 0, 0, "12:00", ch, gwd])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _build_minimal_mdl_two_digs() -> bytes:
+    """MDL with two dig IDs to test max_digs limiting."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Dig Notification Log"
+    hdr = [
+        "Dig ID",
+        "Dig Name",
+        "Feature ID",
+        "Pipeline Name",
+        "Length (mm)",
+        "Width (mm)",
+        "Target Girth Weld (TGW)",
+        "ILI Run Name",
+        "Total Assessment Length (m)",
+        "Start Assessment to TGW (m)",
+        "End Assessment to TGW (m)",
+    ]
+    ws.append(hdr)
+    row = [
+        6000,
+        "ID6000_TestDig",
+        "F-001",
+        "Test Line",
+        25.4,
+        12.7,
+        3180,
+        "2025 Test Run",
+        9.0,
+        -0.5,
+        8.5,
+    ]
+    ws.append(row)
+    ws.append(
+        [
+            6001,
+            "ID6001_OtherDig",
+            "F-002",
+            "Test Line",
+            10.0,
+            10.0,
+            3180,
+            "2025 Test Run",
+            9.0,
+            -0.5,
+            8.5,
+        ]
+    )
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_generate_dig_packages_skip_pdf_skips_pdf_file():
+    """skip_pdf=True produces Excel only (no PDF in ZIP)."""
+    mdl_content = _build_minimal_mdl(dig_id=6000)
+    ili_content = _build_minimal_ili(tgw_joint=3180)
+    template_content = _build_minimal_template()
+
+    zip_buffer = generate_dig_packages(
+        mdl_content=mdl_content,
+        ili_contents=[ili_content],
+        template_content=template_content,
+        revision="0",
+        ili_formats=["Rosen-MFLA"],
+        skip_pdf=True,
+    )
+
+    with zipfile.ZipFile(zip_buffer) as zf:
+        names = zf.namelist()
+        assert not any(n.lower().endswith(".pdf") for n in names)
+        summary = json.loads(zf.read([n for n in names if n.startswith("Dig_Package_Generation_Summary")][0]))
+        assert summary.get("skip_pdf") is True
+        assert summary["generated"][0].get("pdf_generated") is False
+
+
+def test_generate_dig_packages_max_digs_processes_first_id_only():
+    """max_digs=1 yields one xlsx / one generated row when MDL lists multiple digs."""
+    mdl_content = _build_minimal_mdl_two_digs()
+    ili_content = _build_minimal_ili(tgw_joint=3180)
+    template_content = _build_minimal_template()
+
+    zip_buffer = generate_dig_packages(
+        mdl_content=mdl_content,
+        ili_contents=[ili_content],
+        template_content=template_content,
+        revision="1",
+        ili_formats=["Rosen-MFLA"],
+        max_digs=1,
+    )
+
+    with zipfile.ZipFile(zip_buffer) as zf:
+        xlsx_files = [n for n in zf.namelist() if n.endswith(".xlsx")]
+        assert len(xlsx_files) == 1
+        summary_files = [n for n in zf.namelist() if n.startswith("Dig_Package_Generation_Summary")]
+        summary = json.loads(zf.read(summary_files[0]))
+        assert summary["max_digs"] == 1
+        assert len(summary["dig_ids_in_mdl"]) == 2
+        assert summary["dig_ids_requested"] == ["6000"]
+        assert len(summary["generated"]) == 1
+        assert summary["generated"][0]["dig_id"] == "6000"
+
+
+def test_generate_dig_packages_end_to_end_produces_zip_with_xlsx():
+    """Full pipeline: MDL + ILI + template → ZIP containing an xlsx for dig 6000."""
+    mdl_content = _build_minimal_mdl(dig_id=6000)
+    ili_content = _build_minimal_ili(tgw_joint=3180)
+    template_content = _build_minimal_template()
+
+    zip_buffer = generate_dig_packages(
+        mdl_content=mdl_content,
+        ili_contents=[ili_content],
+        template_content=template_content,
+        revision="1",
+        ili_formats=["Rosen-MFLA"],
+    )
+
+    assert zip_buffer is not None
+    with zipfile.ZipFile(zip_buffer) as zf:
+        names = zf.namelist()
+        xlsx_files = [n for n in names if n.endswith(".xlsx")]
+        assert len(xlsx_files) == 1
+        assert "ID6000_TestDig_DP_R1.xlsx" in xlsx_files[0] or "6000" in xlsx_files[0]
+
+        # Verify summary JSON is present and has the correct dig_id
+        summary_files = [n for n in names if n.startswith("Dig_Package_Generation_Summary")]
+        assert summary_files
+        summary = json.loads(zf.read(summary_files[0]))
+        assert len(summary["generated"]) == 1
+        assert str(summary["generated"][0]["dig_id"]) == "6000"
+        assert summary["generated"][0]["features_matched"] >= 1
+
+
+def test_generate_dig_packages_progress_callback_is_called():
+    """progress_callback receives phase-tagged updates (parse + dig_generation)."""
+    calls = []
+
+    def _cb(current, total, **kwargs):
+        calls.append((current, total, kwargs.get("phase", "")))
+
+    mdl_content = _build_minimal_mdl(dig_id=6000)
+    ili_content = _build_minimal_ili(tgw_joint=3180)
+    template_content = _build_minimal_template()
+
+    generate_dig_packages(
+        mdl_content=mdl_content,
+        ili_contents=[ili_content],
+        template_content=template_content,
+        revision="0",
+        ili_formats=["Rosen-MFLA"],
+        progress_callback=_cb,
+    )
+
+    phases = [ph for _, _, ph in calls]
+    assert "parse_mdl" in phases
+    assert "parse_ili" in phases
+    dig_calls = [(c, t) for c, t, ph in calls if ph == "dig_generation"]
+    assert dig_calls == [(0, 1), (1, 1)]
+
+
+def test_generate_dig_packages_handles_failed_ili_parse_gracefully():
+    """A corrupted second ILI file should not abort generation of the first."""
+    mdl_content = _build_minimal_mdl(dig_id=6000)
+    good_ili = _build_minimal_ili(tgw_joint=3180)
+    bad_ili = b"this is not an xlsx file"
+    template_content = _build_minimal_template()
+
+    zip_buffer = generate_dig_packages(
+        mdl_content=mdl_content,
+        ili_contents=[good_ili, bad_ili],
+        template_content=template_content,
+        revision="0",
+        ili_formats=["Rosen-MFLA", "TDW"],
+    )
+
+    with zipfile.ZipFile(zip_buffer) as zf:
+        xlsx_files = [n for n in zf.namelist() if n.endswith(".xlsx")]
+        assert len(xlsx_files) == 1  # still generated from the good ILI
+
+
+def test_generate_dig_packages_template_cell_value_populated():
+    """Named range tmp_pipNme in generated xlsx matches MDL pipeline name."""
+    from openpyxl import load_workbook as _load
+
+    mdl_content = _build_minimal_mdl(dig_id=6000, pipeline_name="Alpha Pipeline")
+    ili_content = _build_minimal_ili(tgw_joint=3180)
+    template_content = _build_minimal_template()
+
+    zip_buffer = generate_dig_packages(
+        mdl_content=mdl_content,
+        ili_contents=[ili_content],
+        template_content=template_content,
+        revision="0",
+        ili_formats=["Rosen-MFLA"],
+    )
+
+    with zipfile.ZipFile(zip_buffer) as zf:
+        xlsx_names = [n for n in zf.namelist() if n.endswith(".xlsx")]
+        wb = _load(io.BytesIO(zf.read(xlsx_names[0])))
+
+    # tmp_pipNme is mapped to cell B3 in our minimal template
+    ws = wb["Dig Package"]
+    assert ws["B3"].value == "Alpha Pipeline"

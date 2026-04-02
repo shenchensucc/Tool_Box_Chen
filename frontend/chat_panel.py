@@ -1,6 +1,7 @@
 """Chat with Chen — floating FAB + modal dialog (full-width main layout)."""
 
 import os
+import textwrap
 import httpx
 import streamlit as st
 
@@ -135,7 +136,7 @@ def _chat_dialog():
 def _render_chat_fab_link():
     """Fixed bottom-right FAB using HTML so it sits on the viewport (not trapped in a narrow block)."""
     st.markdown(
-        """
+        textwrap.dedent("""
         <style>
           a#chen-chat-fab {
             position: fixed !important;
@@ -164,7 +165,7 @@ def _render_chat_fab_link():
           }
         </style>
         <a href="?open_chat=1" id="chen-chat-fab" target="_self" title="Chat with Chen">💬</a>
-        """,
+        """).strip(),
         unsafe_allow_html=True,
     )
 

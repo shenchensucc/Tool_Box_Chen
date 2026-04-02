@@ -14,6 +14,7 @@ from frontend_utils import (
     display_header,
     display_session_privacy_banner,
     display_sidebar_navigation,
+    fu_key,
     get_layout_main,
     set_page_config,
     show_backend_unavailable_and_retry,
@@ -64,7 +65,7 @@ with main:
             "Source Excel File",
             type=["xlsx", "xls"],
             help="Excel file with sheet 'Source_Data' containing Equipment ID, CML Group ID, sub-CML ID",
-            key="deactive_source",
+            key=fu_key("deactive", "source"),
             on_change=lambda: st.session_state.pop("deactive_result", None),
         )
 
@@ -75,7 +76,7 @@ with main:
             "Template Excel File (TM_Loader.xlsx)",
             type=["xlsx", "xls"],
             help="Optional. Leave empty to use default template.",
-            key="deactive_template",
+            key=fu_key("deactive", "template"),
             on_change=lambda: st.session_state.pop("deactive_result", None),
         )
 

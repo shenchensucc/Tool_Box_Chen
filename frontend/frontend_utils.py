@@ -1,5 +1,7 @@
 import os
-from typing import Any, Dict, Optional
+import re
+import textwrap
+from typing import Any, Dict, Optional, Tuple
 
 import httpx
 import streamlit as st
@@ -7,140 +9,423 @@ import streamlit as st
 # Backend URL configuration
 BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
 
+# Dig Package Generator — ILI layout labels (must match ``backend.pipeline.dig_package`` / API).
+DIG_PACKAGE_ILI_FORMAT_OPTIONS: Tuple[str, ...] = (
+    "TDW",
+    "Rosen-MFLA",
+    "Rosen-MFLC",
+    "Rosen-EMAT",
+    "BH-EMAT",
+    "BH-MFLA",
+)
+
+
+def detect_dig_package_ili_format(filename: str) -> Tuple[str, str]:
+    """
+    Infer ILI vendor/layout from the uploaded filename (TDW, Rosen MFL-A/C/EMAT, BH EMAT/MFL).
+
+    Returns:
+        (format_name, short note for UI) — ``format_name`` is always one of
+        :data:`DIG_PACKAGE_ILI_FORMAT_OPTIONS`.
+    """
+    opts = DIG_PACKAGE_ILI_FORMAT_OPTIONS
+    name = (filename or "").strip()
+    lower = name.lower()
+    compact = re.sub(r"[^a-z0-9]", "", lower)
+
+    def _mfl_a() -> bool:
+        return bool(
+            re.search(r"mfl\s*[-_/]?\s*a\b", lower)
+            or re.search(r"\bmfla\b", lower)
+            or "mfla" in compact
+        )
+
+    def _mfl_c() -> bool:
+        return bool(
+            re.search(r"mfl\s*[-_/]?\s*c\b", lower)
+            or re.search(r"\bmflc\b", lower)
+            or "mflc" in compact
+            or "cmfl" in compact
+        )
+
+    has_emat_token = "emat" in compact
+    has_rosen = "rosen" in compact
+
+    # Baker Hughes — check before generic EMAT/MFL so vendor-specific names win.
+    if (
+        re.search(r"(^|[^a-z0-9])bh([^a-z0-9]|$)", lower)
+        or "baker" in lower
+        or "bakerhughes" in compact
+    ):
+        if has_emat_token:
+            return (opts[4], "filename suggests Baker Hughes EMAT")
+        if "mfl" in compact:
+            return (opts[5], "filename suggests Baker Hughes MFL")
+
+    # TDW vendor
+    if re.search(r"\btdw\b", lower) or "tdw" in compact:
+        return (opts[0], "filename contains TDW")
+
+    mfl_a, mfl_c = _mfl_a(), _mfl_c()
+
+    if mfl_a and mfl_c:
+        if "cmfl" in compact:
+            return (opts[2], "filename has both MFL-A and MFL-C cues; CMFL → Rosen-MFLC")
+        return (opts[1], "filename has both MFL-A and MFL-C cues; defaulting to Rosen-MFLA — override if needed")
+
+    if mfl_c:
+        return (opts[2], "filename suggests MFL-C or CMFL (Rosen)")
+
+    if mfl_a:
+        return (opts[1], "filename suggests MFL-A (Rosen)")
+
+    if has_emat_token:
+        return (opts[3], "filename contains EMAT (Rosen-EMAT)")
+
+    if has_rosen and "mfl" in compact:
+        return (opts[1], "Rosen + MFL in filename; defaulting to Rosen-MFLA — override if this is MFL-C")
+
+    if "mfl" in compact:
+        return (opts[1], "filename contains MFL; defaulting to Rosen-MFLA — override for TDW/BH/MFL-C if needed")
+
+    # Matches backend default in ``main.py`` when ``ili_formats`` is empty.
+    return (opts[1], "no strong match — using Rosen-MFLA (API default); override if your file differs")
+
+
+def fu_key(page: str, role: str) -> str:
+    """Return a distinct ``key`` for ``st.file_uploader`` widgets.
+
+    Use a unique key per control so Streamlit session state and widget identity
+    do not collide across pages or between uploaders on the same page.
+
+    Note: The OS/browser often remembers one recent folder per *site* for native
+    ``<input type="file">`` dialogs. That is not controlled by Streamlit keys;
+    Chromium can only associate separate folders per control when using the
+    File System Access API (e.g. ``showOpenFilePicker({ id })``), which
+    ``st.file_uploader`` does not use.
+    """
+    return f"fu_{page}_{role}"
+
 
 def apply_custom_styling():
-    """Apply custom CSS styling to the Streamlit app with dark/light mode support"""
-    st.markdown(
-        """
+    """Apply custom CSS styling — Industrial-Precision design system (see DESIGN.md)."""
+    # Use st.html (not st.markdown) so <style> is injected as real CSS. Streamlit's markdown
+    # path can strip <style> and leave the rules as visible text; then stSidebarNav never hides.
+    _custom_theme_css = textwrap.dedent("""
+        <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
         <style>
-        /* Main container styling */
-        .main {
-            padding: 2rem;
+        /* ------------------------------------------------------------------ */
+        /* Design tokens (DESIGN.md)                                           */
+        /* ------------------------------------------------------------------ */
+        :root {
+            --color-primary:        #0F3460;
+            --color-primary-hover:  #1A4A7A;
+            --color-accent:         #F59E0B;
+            --color-accent-hover:   #D97706;
+            --color-bg:             #F8FAFC;
+            --color-surface:        #FFFFFF;
+            --color-surface-raised: #F1F5F9;
+            --color-border:         #E2E8F0;
+            --color-border-strong:  #CBD5E1;
+            --color-text-primary:   #0F172A;
+            --color-text-secondary: #475569;
+            --color-text-muted:     #94A3B8;
+            --color-success:        #059669;
+            --color-warning:        #D97706;
+            --color-error:          #DC2626;
+            --color-info:           #0369A1;
+            --color-sidebar-bg:     #1E293B;
+            --color-sidebar-text:   #F1F5F9;
+            --font-ui:     'DM Sans', system-ui, sans-serif;
+            --font-mono:   'JetBrains Mono', 'Consolas', monospace;
+            --radius-sm:   4px;
+            --radius-md:   6px;
+            --radius-lg:   8px;
+            --transition:  0.15s ease-out;
         }
 
-        /* Header styling - adaptive to theme */
-        h1, h2, h3 {
-            font-weight: 600;
+        /* ------------------------------------------------------------------ */
+        /* Base typography                                                      */
+        /* ------------------------------------------------------------------ */
+        html, body, [class*="css"], .stMarkdown, .stText,
+        .stTextInput, .stSelectbox, .stMultiSelect,
+        button, label, p, span, div {
+            font-family: var(--font-ui) !important;
         }
 
-        /* Button styling - uses theme colors */
-        .stButton button {
-            border-radius: 8px;
-            padding: 0.5rem 1.5rem;
-            border: none;
-            transition: all 0.3s ease;
-            font-weight: 500;
+        /* Monospace for numbers in tables, code blocks, and metric values */
+        code, pre, .stCode,
+        [data-testid="stMetricValue"],
+        .mono, td, th {
+            font-family: var(--font-mono) !important;
         }
 
-        .stButton button:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+        h1 { font-size: 2.2rem !important; font-weight: 700 !important; color: var(--color-text-primary); letter-spacing: -0.02em; }
+        h2 { font-size: 1.5rem  !important; font-weight: 600 !important; color: var(--color-text-primary); }
+        h3 { font-size: 1.15rem !important; font-weight: 600 !important; color: var(--color-text-primary); }
+        h4 { font-size: 1rem    !important; font-weight: 600 !important; color: var(--color-text-secondary); text-transform: uppercase; letter-spacing: 0.05em; }
+
+        p, li { color: var(--color-text-secondary); line-height: 1.65; }
+
+        /* ------------------------------------------------------------------ */
+        /* Main layout                                                          */
+        /* ------------------------------------------------------------------ */
+        .main { padding: 1.5rem 2rem; background-color: var(--color-bg); }
+
+        /* Replace thick hr separators with precise 1px rules */
+        hr {
+            border: none !important;
+            border-top: 1px solid var(--color-border) !important;
+            margin: 1.25rem 0 !important;
         }
 
-        /* Primary button styling */
-        .stButton button[kind="primary"] {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        }
-
-        .stButton button[kind="primary"]:hover {
-            background: linear-gradient(135deg, #5568d3 0%, #6a3f8f 100%);
-        }
-
-        /* File uploader styling - adaptive */
-        [data-testid="stFileUploader"] {
-            border: 2px dashed;
-            border-color: var(--primary-color, #667eea);
-            border-radius: 8px;
-            padding: 1.5rem;
-            transition: all 0.3s ease;
-        }
-
-        [data-testid="stFileUploader"]:hover {
-            border-color: var(--primary-color, #764ba2);
-            background-color: rgba(102, 126, 234, 0.05);
-        }
-
-        /* Info/Alert box styling */
-        .stAlert {
-            border-radius: 8px;
-            border-left: 4px solid;
-        }
-
-        /* DataFrame styling - adaptive borders */
-        .dataframe {
-            border-radius: 8px;
-            overflow: hidden;
-        }
-
-        /* Metric styling */
-        [data-testid="stMetric"] {
-            background-color: rgba(102, 126, 234, 0.05);
-            padding: 1rem;
-            border-radius: 8px;
-            border: 1px solid rgba(102, 126, 234, 0.1);
-        }
-
-        /* Expander styling */
-        .streamlit-expanderHeader {
-            border-radius: 8px;
-            font-weight: 500;
-        }
-
-        /* Tab styling */
-        .stTabs [data-baseweb="tab-list"] {
-            gap: 8px;
-        }
-
-        .stTabs [data-baseweb="tab"] {
-            border-radius: 8px 8px 0 0;
-            padding: 0.5rem 1rem;
-            font-weight: 500;
-        }
-
-        /* Sidebar improvements */
+        /* ------------------------------------------------------------------ */
+        /* Sidebar — petroleum dark                                             */
+        /* ------------------------------------------------------------------ */
         [data-testid="stSidebar"] {
-            padding-top: 2rem;
+            background-color: var(--color-sidebar-bg) !important;
+            padding-top: 1.5rem;
+        }
+        [data-testid="stSidebar"] * {
+            color: var(--color-sidebar-text) !important;
+        }
+        [data-testid="stSidebar"] .stMarkdown h3,
+        [data-testid="stSidebar"] .stMarkdown h4 {
+            color: var(--color-text-muted) !important;
+            font-size: 0.7rem !important;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            border-bottom: 1px solid rgba(255,255,255,0.08);
+            padding-bottom: 4px;
+            margin-bottom: 6px;
+        }
+        [data-testid="stSidebarNav"] { display: none; }
+
+        /* ------------------------------------------------------------------ */
+        /* Buttons                                                              */
+        /* ------------------------------------------------------------------ */
+        .stButton button,
+        .stDownloadButton button,
+        .stFormSubmitButton button {
+            font-family: var(--font-ui) !important;
+            font-weight: 500 !important;
+            border-radius: var(--radius-md) !important;
+            border: 1.5px solid transparent !important;
+            padding: 0.45rem 1.25rem !important;
+            transition: background-color var(--transition), box-shadow var(--transition), transform var(--transition) !important;
+            letter-spacing: 0.01em;
         }
 
-        /* Hide default Streamlit navigation (we use custom navigation) */
-        [data-testid="stSidebarNav"] {
-            display: none;
+        /* Primary buttons — amber accent, not purple gradient */
+        .stButton button[kind="primary"],
+        .stDownloadButton button,
+        .stFormSubmitButton button[kind="primary"] {
+            background: var(--color-accent) !important;
+            color: #0F172A !important;
+            border-color: var(--color-accent) !important;
+            font-weight: 600 !important;
+        }
+        .stButton button[kind="primary"]:hover,
+        .stDownloadButton button:hover {
+            background: var(--color-accent-hover) !important;
+            border-color: var(--color-accent-hover) !important;
+            box-shadow: 0 2px 8px rgba(245, 158, 11, 0.35) !important;
+            transform: translateY(-1px);
         }
 
-        /* Card-like containers */
-        .element-container div[data-testid="stMarkdownContainer"] div {
-            border-radius: 8px;
+        /* Secondary buttons — petroleum blue outline */
+        .stButton button[kind="secondary"] {
+            background: transparent !important;
+            color: var(--color-primary) !important;
+            border-color: var(--color-primary) !important;
+        }
+        .stButton button[kind="secondary"]:hover {
+            background: rgba(15, 52, 96, 0.06) !important;
+            box-shadow: 0 2px 6px rgba(15, 52, 96, 0.12) !important;
+            transform: translateY(-1px);
         }
 
-        /* Plotly chart containers */
+        /* ------------------------------------------------------------------ */
+        /* File uploader                                                        */
+        /* ------------------------------------------------------------------ */
+        [data-testid="stFileUploader"] {
+            border: 1.5px dashed var(--color-border-strong) !important;
+            border-radius: var(--radius-lg) !important;
+            padding: 1.25rem !important;
+            background: var(--color-surface) !important;
+            transition: border-color var(--transition), background var(--transition) !important;
+        }
+        [data-testid="stFileUploader"]:hover {
+            border-color: var(--color-primary) !important;
+            background: rgba(15, 52, 96, 0.03) !important;
+        }
+
+        /* ------------------------------------------------------------------ */
+        /* Metrics / stat cards                                                 */
+        /* ------------------------------------------------------------------ */
+        [data-testid="stMetric"] {
+            background: var(--color-surface) !important;
+            border: 1px solid var(--color-border) !important;
+            border-radius: var(--radius-lg) !important;
+            padding: 1rem 1.25rem !important;
+            border-left: 3px solid var(--color-primary) !important;
+        }
+        [data-testid="stMetricLabel"] {
+            font-size: 0.75rem !important;
+            font-weight: 500 !important;
+            text-transform: uppercase !important;
+            letter-spacing: 0.06em !important;
+            color: var(--color-text-muted) !important;
+        }
+        [data-testid="stMetricValue"] {
+            font-family: var(--font-mono) !important;
+            font-size: 1.75rem !important;
+            font-weight: 500 !important;
+            color: var(--color-text-primary) !important;
+        }
+        [data-testid="stMetricDelta"] {
+            font-family: var(--font-mono) !important;
+            font-size: 0.8rem !important;
+        }
+
+        /* ------------------------------------------------------------------ */
+        /* Alert / info boxes                                                   */
+        /* ------------------------------------------------------------------ */
+        .stAlert {
+            border-radius: var(--radius-md) !important;
+            border-left-width: 3px !important;
+            font-size: 0.9rem !important;
+        }
+        [data-testid="stInfo"] {
+            background: rgba(3, 105, 161, 0.07) !important;
+            border-left-color: var(--color-info) !important;
+            color: var(--color-info) !important;
+        }
+        [data-testid="stSuccess"] {
+            background: rgba(5, 150, 105, 0.07) !important;
+            border-left-color: var(--color-success) !important;
+        }
+        [data-testid="stWarning"] {
+            background: rgba(217, 119, 6, 0.08) !important;
+            border-left-color: var(--color-warning) !important;
+        }
+        [data-testid="stError"] {
+            background: rgba(220, 38, 38, 0.07) !important;
+            border-left-color: var(--color-error) !important;
+        }
+
+        /* ------------------------------------------------------------------ */
+        /* DataFrames / tables                                                  */
+        /* ------------------------------------------------------------------ */
+        .dataframe, [data-testid="stDataFrame"] {
+            border-radius: var(--radius-lg) !important;
+            overflow: hidden !important;
+            border: 1px solid var(--color-border) !important;
+        }
+        [data-testid="stDataFrame"] th {
+            font-family: var(--font-ui) !important;
+            font-size: 0.75rem !important;
+            font-weight: 600 !important;
+            text-transform: uppercase !important;
+            letter-spacing: 0.05em !important;
+            color: var(--color-text-secondary) !important;
+            background: var(--color-surface-raised) !important;
+        }
+        [data-testid="stDataFrame"] td {
+            font-family: var(--font-mono) !important;
+            font-size: 0.85rem !important;
+        }
+
+        /* ------------------------------------------------------------------ */
+        /* Tabs                                                                 */
+        /* ------------------------------------------------------------------ */
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 4px !important;
+            border-bottom: 1px solid var(--color-border) !important;
+        }
+        .stTabs [data-baseweb="tab"] {
+            border-radius: var(--radius-md) var(--radius-md) 0 0 !important;
+            padding: 0.5rem 1rem !important;
+            font-weight: 500 !important;
+            font-size: 0.9rem !important;
+            color: var(--color-text-secondary) !important;
+        }
+        .stTabs [aria-selected="true"] {
+            color: var(--color-primary) !important;
+            border-bottom: 2px solid var(--color-primary) !important;
+            font-weight: 600 !important;
+        }
+
+        /* ------------------------------------------------------------------ */
+        /* Expanders                                                            */
+        /* ------------------------------------------------------------------ */
+        .streamlit-expanderHeader {
+            border-radius: var(--radius-md) !important;
+            font-weight: 500 !important;
+            font-size: 0.9rem !important;
+            border: 1px solid var(--color-border) !important;
+            padding: 0.6rem 1rem !important;
+            background: var(--color-surface) !important;
+        }
+        .streamlit-expanderContent {
+            border: 1px solid var(--color-border) !important;
+            border-top: none !important;
+            border-radius: 0 0 var(--radius-md) var(--radius-md) !important;
+            padding: 1rem !important;
+            background: var(--color-surface) !important;
+        }
+
+        /* ------------------------------------------------------------------ */
+        /* Progress bar                                                         */
+        /* ------------------------------------------------------------------ */
+        [data-testid="stProgressBar"] > div {
+            background: var(--color-surface-raised) !important;
+            border-radius: 999px !important;
+            height: 6px !important;
+        }
+        [data-testid="stProgressBar"] > div > div {
+            background: var(--color-accent) !important;
+            border-radius: 999px !important;
+            transition: width 0.4s ease-out !important;
+        }
+
+        /* ------------------------------------------------------------------ */
+        /* Select / input fields                                                */
+        /* ------------------------------------------------------------------ */
+        .stTextInput input, .stNumberInput input, .stTextArea textarea {
+            border: 1px solid var(--color-border) !important;
+            border-radius: var(--radius-md) !important;
+            font-family: var(--font-ui) !important;
+            font-size: 0.9rem !important;
+            background: var(--color-surface) !important;
+            color: var(--color-text-primary) !important;
+        }
+        .stTextInput input:focus, .stNumberInput input:focus, .stTextArea textarea:focus {
+            border-color: var(--color-primary) !important;
+            box-shadow: 0 0 0 3px rgba(15, 52, 96, 0.1) !important;
+        }
+        [data-testid="stSelectbox"] > div > div {
+            border: 1px solid var(--color-border) !important;
+            border-radius: var(--radius-md) !important;
+            background: var(--color-surface) !important;
+        }
+
+        /* ------------------------------------------------------------------ */
+        /* Plotly charts                                                        */
+        /* ------------------------------------------------------------------ */
         .js-plotly-plot {
-            border-radius: 8px;
+            border-radius: var(--radius-lg) !important;
+            border: 1px solid var(--color-border) !important;
         }
 
-        /* Download button */
-        .stDownloadButton button {
-            border-radius: 8px;
-            font-weight: 500;
-        }
-
-        /* Success/Error/Warning styling */
-        .stSuccess, .stError, .stWarning, .stInfo {
-            border-radius: 8px;
-        }
-
-        /* Smooth transitions */
-        * {
-            transition: background-color 0.3s ease, border-color 0.3s ease;
-        }
-
-        /* Chat panel: sticky/floating when scrolling */
+        /* ------------------------------------------------------------------ */
+        /* Chat panel (sticky)                                                  */
+        /* ------------------------------------------------------------------ */
         [data-testid="stHorizontalBlock"] > div:last-child {
             position: sticky !important;
             top: 1rem !important;
             align-self: start !important;
         }
-
-        /* Chat header with integrated hide button */
         .chat-header-row {
             display: flex;
             align-items: center;
@@ -148,20 +433,32 @@ def apply_custom_styling():
             gap: 0.5rem;
             margin-bottom: 0.5rem;
         }
-        .chat-header-row h4 {
-            margin: 0;
-            flex: 1;
-        }
+        .chat-header-row h4 { margin: 0; flex: 1; }
         .chat-hide-btn {
             padding: 0.25rem 0.5rem !important;
             min-width: auto !important;
             font-size: 0.85rem !important;
         }
 
+        /* ------------------------------------------------------------------ */
+        /* Utility classes                                                      */
+        /* ------------------------------------------------------------------ */
+        .mono { font-family: var(--font-mono) !important; }
+        .label-caps {
+            font-size: 0.7rem !important;
+            font-weight: 600 !important;
+            text-transform: uppercase !important;
+            letter-spacing: 0.08em !important;
+            color: var(--color-text-muted) !important;
+        }
+
         </style>
-        """,
-        unsafe_allow_html=True,
-    )
+        """).strip()
+    inject = getattr(st, "html", None)
+    if inject is not None:
+        inject(_custom_theme_css)
+    else:
+        st.markdown(_custom_theme_css, unsafe_allow_html=True)
 
 
 def set_page_config(page_title: str, page_icon: str = "🔧", layout: str = "wide"):
@@ -170,11 +467,21 @@ def set_page_config(page_title: str, page_icon: str = "🔧", layout: str = "wid
 
 
 def display_header(title: str, description: Optional[str] = None):
-    """Display a formatted page header"""
-    st.title(title)
-    if description:
-        st.markdown(f"*{description}*")
-    st.markdown("---")
+    """Display a formatted page header using the Industrial-Precision design system."""
+    desc_html = (
+        f'<p style="margin:0.3rem 0 0 0; font-size:0.95rem; color:var(--color-text-secondary, #475569);">'
+        f"{description}</p>"
+    ) if description else ""
+    st.markdown(
+        f"""
+        <div style="padding:1.5rem 0 0.75rem 0; border-bottom:1px solid var(--color-border, #E2E8F0);
+                    margin-bottom:1.5rem;">
+            <h1 style="margin:0; letter-spacing:-0.02em;">{title}</h1>
+            {desc_html}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def display_session_privacy_banner() -> None:
@@ -284,23 +591,38 @@ def _format_api_error(e: Exception, response: Optional[httpx.Response] = None) -
 
 async def call_process_feature_map_api(
     file,
-    sheet_name: str,
+    sheet_name: Optional[str] = None,
+    *,
+    vendor_format: Optional[str] = None,
     gwd_start: Optional[int] = None,
     gwd_end: Optional[int] = None,
     gwd_center: Optional[int] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Call the backend process-feature-map API for Excel → unwrapped pipe visualization"""
+    """
+    Call the backend process-feature-map API for Excel → unwrapped pipe visualization.
+
+    **Manual mode:** pass ``sheet_name`` (sheet from preview). Omit ``vendor_format``.
+
+    **Auto mode (same ILI parsing as Dig Package):** pass ``vendor_format`` (e.g. ``Rosen-MFLA``).
+    """
     url = f"{BACKEND_URL}/api/ili/process-feature-map"
+    if vendor_format:
+        data: Dict[str, Any] = {"vendor_format": vendor_format}
+    elif sheet_name:
+        data = {"sheet_name": sheet_name}
+    else:
+        st.error("Internal error: provide sheet_name or vendor_format for process-feature-map.")
+        return None
+    if gwd_start is not None:
+        data["gwd_start"] = str(gwd_start)
+    if gwd_end is not None:
+        data["gwd_end"] = str(gwd_end)
+    if gwd_center is not None:
+        data["gwd_center"] = str(gwd_center)
+    timeout = 300.0 if vendor_format else 60.0
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             files = {"file": (file.name, file.getvalue(), file.type)}
-            data = {"sheet_name": sheet_name}
-            if gwd_start is not None:
-                data["gwd_start"] = str(gwd_start)
-            if gwd_end is not None:
-                data["gwd_end"] = str(gwd_end)
-            if gwd_center is not None:
-                data["gwd_center"] = str(gwd_center)
             response = await client.post(url, files=files, data=data)
             response.raise_for_status()
             return response.json()
@@ -442,4 +764,7 @@ def display_sidebar_navigation():
             st.page_link("pages/3_ILI_Visual_Tool.py", label="📊 ILI Visual Tool")
             st.page_link("pages/4_Metal_Loss_Assessment.py", label="🔬 Metal Loss Assessment")
             st.page_link("pages/6_Metal_Loss_Mass_Assessment.py", label="📉 Metal Loss Mass Assessment")
-            st.page_link("pages/5_Dig_Package_Generator.py", label="📦 Dig Package Generator") 
+            st.page_link("pages/5_Dig_Package_Generator.py", label="📦 Dig Package Generator")
+
+        with st.expander("🛠️ Development", expanded=False):
+            st.page_link("pages/10_Dig_Package_KPI_Dev.py", label="🧪 Dig Package KPI (dev)") 

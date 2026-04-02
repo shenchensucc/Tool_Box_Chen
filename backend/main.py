@@ -1,7 +1,9 @@
 import asyncio
+import io
 import os
 import shutil
 import threading
+import time
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
@@ -28,7 +30,7 @@ logger = get_logger("backend.main")
 import pandas as pd
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from openpyxl import load_workbook
 
@@ -70,6 +72,7 @@ from backend.tml.workflows._18_design_factor import process_design_factor
 from backend.tml.workflows._19_joint_factor import process_joint_factor
 from backend.tml.workflows._20_location_factor import process_location_factor
 from backend.pipeline.metal_loss import assess_metal_loss_feature, mass_assess_metal_loss
+from backend.pipeline.ili_parse import parse_ili_file
 from backend.pipeline.ili_reader import (
     identify_ili_columns,
     parse_pasted_ili_text,
@@ -83,13 +86,39 @@ from backend.pipeline.feature_map_builder import (
 )
 from backend.pipeline.dig_package_reader import build_feature_map_from_dig_package
 from backend.pipeline.report_generator import generate_word_report
-from backend.pipeline.dig_package import generate_dig_packages
+from backend.pipeline.dig_package import (
+    DEFAULT_DIG_PACKAGE_TEMPLATE_FILENAME,
+    generate_dig_packages,
+    read_default_dig_package_template_bytes,
+)
 from backend.docs_loader import get_relevant_context
 from backend.llm_config import get_chat_base_url, get_api_key, DEFAULT_MODEL
 from backend.tools.web_search import web_search
 from backend.tools.schemas import WEB_SEARCH_SCHEMA
 
 app = FastAPI(title="Chen's Engineer Toolbox API", version="0.1.0")
+
+# ---------------------------------------------------------------------------
+# Dig-package generation progress store
+#
+# Keyed by job_id (str UUID). Each entry:
+#   {"current": int, "total": int, "status": "running"|"done"|"error",
+#    "expires_at": float (Unix timestamp)}
+#
+# Entries are kept for DIG_PACKAGE_PROGRESS_TTL_SECS after completion so a
+# final poll from the frontend never hits a 404 due to a race on cleanup.
+# ---------------------------------------------------------------------------
+_DIG_PACKAGE_PROGRESS: Dict[str, Dict[str, Any]] = {}
+DIG_PACKAGE_PROGRESS_TTL_SECS = 300  # 5 minutes
+
+
+def _cleanup_stale_progress_entries() -> None:
+    """Remove expired progress entries (called lazily on each new job start)."""
+    now = time.time()
+    stale = [k for k, v in _DIG_PACKAGE_PROGRESS.items() if v.get("expires_at", 0) < now]
+    for k in stale:
+        _DIG_PACKAGE_PROGRESS.pop(k, None)
+
 
 # PDF.js (Mozilla) for in-app preview — canvas rendering, not the browser PDF plug-in.
 _PDFJS_DIR = Path(__file__).resolve().parent / "static" / "pdfjs"
@@ -751,7 +780,8 @@ async def parse_pasted_ili(pasted_text: str = Form(...)):
 @app.post("/api/ili/process-feature-map", response_model=FeatureMapResponse)
 async def process_ili_feature_map(
     file: UploadFile = File(...),
-    sheet_name: str = Form(...),
+    sheet_name: Optional[str] = Form(None),
+    vendor_format: Optional[str] = Form(None),
     gwd_start: Optional[int] = Form(None),
     gwd_end: Optional[int] = Form(None),
     gwd_center: Optional[int] = Form(None),
@@ -759,11 +789,20 @@ async def process_ili_feature_map(
     """
     Process ILI Excel file and return features for unwrapped pipe visualization.
     Uses auto-identified columns (no manual column selection).
+
+    **Manual sheet mode:** pass ``sheet_name`` (from preview). Omit ``vendor_format``.
+
+    **Auto sheet mode (same as Dig Package ILI parsing):** pass non-empty ``vendor_format``
+    (e.g. ``Rosen-MFLA``, ``TDW``). Sheet and header are detected from the workbook; ``sheet_name`` is ignored.
+
     Optional GWD filter: gwd_start+gwd_end for range, or gwd_center for ±3 adjacent GWDs.
     """
+    vf = (vendor_format or "").strip()
+    sn = (sheet_name or "").strip()
     log_params(logger, "ili/process-feature-map", {
         "filename": file.filename,
-        "sheet_name": sheet_name,
+        "sheet_name": sn or None,
+        "vendor_format": vf or None,
         "gwd_start": gwd_start,
         "gwd_end": gwd_end,
         "gwd_center": gwd_center,
@@ -773,15 +812,27 @@ async def process_ili_feature_map(
     filename = file.filename
 
     def _do_work() -> FeatureMapResponse:
-        suffix = Path(filename).suffix
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            tmp.write(content)
-            tmp_path = Path(tmp.name)
+        tmp_path: Optional[Path] = None
         try:
-            df = pd.read_excel(tmp_path, sheet_name=sheet_name)
+            if vf:
+                df, ili_cols, used_sheet = parse_ili_file(content, vf)
+                sheet_label = used_sheet or "(auto)"
+            else:
+                if not sn:
+                    return FeatureMapResponse(
+                        success=False,
+                        error="Provide sheet_name for manual mode, or vendor_format for auto-detect mode.",
+                    )
+                suffix = Path(filename).suffix
+                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                    tmp.write(content)
+                    tmp_path = Path(tmp.name)
+                df = pd.read_excel(tmp_path, sheet_name=sn)
+                sheet_label = sn
+                ili_cols = identify_ili_columns(df)
+
             if df.empty:
                 return FeatureMapResponse(success=False, error="Sheet is empty")
-            ili_cols = identify_ili_columns(df)
             dist_col = ili_cols.get("distance")
             if not dist_col:
                 return FeatureMapResponse(
@@ -794,7 +845,7 @@ async def process_ili_feature_map(
                 features, scatter_data = _apply_gwd_filter(
                     features, scatter_data, gwd_start, gwd_end, gwd_center
                 )
-            logger.info(f"[ili/process-feature-map] Processed {len(features)} features from sheet '{sheet_name}'")
+            logger.info(f"[ili/process-feature-map] Processed {len(features)} features from sheet '{sheet_label}'")
             return FeatureMapResponse(
                 success=True,
                 total_rows=len(features),
@@ -805,7 +856,7 @@ async def process_ili_feature_map(
                 gwd_numbers=gwd_numbers,
             )
         finally:
-            if tmp_path.exists():
+            if tmp_path is not None and tmp_path.exists():
                 os.unlink(tmp_path)
 
     try:
@@ -1830,50 +1881,230 @@ async def export_word_report(
         raise HTTPException(status_code=500, detail=f"Error generating report: {str(e)}")
 
 
+@app.post("/api/pipeline/dig-package/preview-mdl")
+async def preview_mdl_endpoint(mdl_file: UploadFile = File(...)):
+    """
+    Parse an MDL file and return the list of valid Dig IDs without generating any packages.
+    Used by the frontend to show a quick preview after upload so the user knows the file
+    was read correctly before starting the full (slow) generation run.
+    """
+    log_params(logger, "dig-package/preview-mdl", {"filename": mdl_file.filename})
+    try:
+        validate_excel_file(mdl_file)
+        content = await mdl_file.read()
+
+        from backend.pipeline.dig_package import parse_mdl_file, extract_dig_ids
+        mdl_df, col_map = await asyncio.to_thread(parse_mdl_file, content)
+        dig_ids = extract_dig_ids(mdl_df, col_map)
+        return JSONResponse({"dig_ids": [str(d) for d in dig_ids], "count": len(dig_ids)})
+    except HTTPException:
+        raise
+    except Exception as e:
+        log_error(logger, "dig-package/preview-mdl", e)
+        raise HTTPException(status_code=500, detail=f"Error previewing MDL: {str(e)}")
+
+
+@app.get("/api/pipeline/dig-package/blank-template-zip")
+async def dig_package_blank_template_zip():
+    """
+    Return a small ZIP containing only the bundled Dig Package Excel template + a README.
+    Use this to verify the browser can download from the API without running MDL/ILI generation
+    (which may time out during PDF conversion).
+    """
+    log_params(logger, "dig-package/blank-template-zip", {})
+    try:
+        raw = await asyncio.to_thread(read_default_dig_package_template_bytes)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(DEFAULT_DIG_PACKAGE_TEMPLATE_FILENAME, raw)
+        zf.writestr(
+            "README_BLANK.txt",
+            "Blank Dig Package template (bundled on server)\n"
+            "==============================================\n"
+            "This archive is the raw .xlsx template only — no MDL or ILI data were applied.\n"
+            "If you can open this file, download + template wiring are working.\n"
+            "For populated packages, use Generate in the app; enable Skip PDF if Excel→PDF hangs.\n",
+        )
+    buf.seek(0)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename=Dig_Package_BLANK_TEMPLATE_{ts}.zip"},
+    )
+
+
+@app.get("/api/pipeline/dig-package/progress/{job_id}")
+async def get_dig_package_progress(job_id: str):
+    """
+    Return progress for an in-flight (or recently completed) dig-package generation job.
+    Returns 404 for unknown or expired job IDs.
+
+    Fields:
+    - ``phase``: e.g. ``receiving_upload``, ``parse_mdl``, ``parse_ili``, ``building_zip``
+    - ``message``: human-readable detail (large ILI files can take many minutes to parse)
+    """
+    entry = _DIG_PACKAGE_PROGRESS.get(job_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"No progress entry found for job_id='{job_id}'")
+    current = entry.get("current", 0)
+    total = entry.get("total", 1)
+    phase = entry.get("phase", "")
+    # During ILI parse, current/total are file index / file count; during dig loop, dig index / dig count.
+    pct = round(current / total * 100) if total > 0 else 0
+    return JSONResponse({
+        "job_id": job_id,
+        "current": current,
+        "total": total,
+        "pct": pct,
+        "status": entry.get("status", "running"),
+        "phase": phase,
+        "message": entry.get("message", ""),
+    })
+
+
 @app.post("/api/pipeline/dig-package/generate")
 async def generate_dig_package_endpoint(
     mdl_file: UploadFile = File(...),
-    ili_files: List[UploadFile] = File(...),
-    template_file: UploadFile = File(...),
+    ili_files: List[UploadFile] = File(default=[]),
+    template_file: Optional[UploadFile] = File(default=None),
     revision: str = Form("0"),
     ili_formats: str = Form(""),
+    job_id: str = Form(""),
+    max_digs: str = Form(""),
+    skip_pdf: str = Form(""),
+    skip_ili: str = Form(""),
+    include_debug: str = Form(""),
 ):
     """
-    Generate dig packages from MDL, multiple ILI data files, and template files.
+    Generate dig packages from MDL, multiple ILI data files, and an optional template.
+    If no template is uploaded, the bundled ``2026 Dig Package Template.xlsx`` under
+    ``backend/static/templates/dig_package/`` is used (must exist on the server).
+    If job_id is provided the endpoint writes per-dig progress to the progress store
+    so the frontend can poll GET /api/pipeline/dig-package/progress/{job_id}.
+    Optional ``max_digs`` (positive integer form field) limits generation to the first N
+    dig IDs in MDL order — use ``1`` for a single-package smoke test.
+    Optional ``skip_pdf`` (``true`` / ``1``) skips Excel→PDF conversion (often slow on Windows COM).
+    Optional ``skip_ili`` (``true`` / ``1``) skips ILI workbook parsing — MDL-only packages (empty feature table).
+    Optional ``include_debug`` (``true`` / ``1``) adds ``Dig_Package_Debug.json`` to the ZIP (column map + per-dig MDL values).
+    When ``skip_ili`` is set, ILI files may be omitted (empty list); ``ili_formats`` is ignored.
+    Returns the ZIP directly as a streaming response (no temp file written to disk).
     """
+    tpl_label = (
+        template_file.filename
+        if template_file and template_file.filename
+        else "(default bundled template)"
+    )
     log_params(logger, "dig-package/generate", {
         "mdl_filename": mdl_file.filename,
         "ili_count": len(ili_files),
         "ili_filenames": [f.filename for f in ili_files],
-        "template_filename": template_file.filename,
+        "template_filename": tpl_label,
         "revision": revision,
         "ili_formats": ili_formats,
+        "job_id": job_id or "(none)",
+        "max_digs": max_digs or "(all)",
+        "skip_pdf": skip_pdf or "(false)",
+        "skip_ili": skip_ili or "(false)",
+        "include_debug": include_debug or "(false)",
     })
+    # Resolve early so except blocks can always reference it.
+    effective_job_id = job_id.strip() if job_id else None
     try:
         validate_excel_file(mdl_file)
-        for ili_file in ili_files:
-            validate_excel_file(ili_file)
-        validate_excel_file(template_file)
+        skip_ili_flag = str(skip_ili).strip().lower() in ("1", "true", "yes", "on")
+        include_debug_flag = str(include_debug).strip().lower() in ("1", "true", "yes", "on")
+        if not skip_ili_flag:
+            for ili_file in ili_files:
+                validate_excel_file(ili_file)
+        elif ili_files:
+            for ili_file in ili_files:
+                validate_excel_file(ili_file)
 
-        # Read contents
+        # Register job before reading the body so GET /progress/{job_id} never 404s while multipart uploads.
+        if effective_job_id:
+            _cleanup_stale_progress_entries()
+            _DIG_PACKAGE_PROGRESS[effective_job_id] = {
+                "current": 0,
+                "total": 0,
+                "status": "running",
+                "phase": "receiving_upload",
+                "message": "Reading uploaded MDL and ILI files (this can take a while for large uploads)…",
+                "expires_at": 0,
+            }
+
         mdl_content = await mdl_file.read()
-        template_content = await template_file.read()
-        
-        ili_contents = []
-        for ili_file in ili_files:
-            ili_contents.append(await ili_file.read())
-            
-        # Parse formats
-        formats_list = [fmt.strip() for fmt in ili_formats.split(",") if fmt.strip()] if ili_formats else ["Rosen-MFLA"] * len(ili_files)
-        if len(formats_list) != len(ili_files):
-            raise HTTPException(
-                status_code=400,
-                detail=f"ILI format count ({len(formats_list)}) does not match uploaded ILI file count ({len(ili_files)}).",
-            )
-        logger.info(f"[dig-package/generate] Parsed: {len(ili_contents)} ILI files, formats={formats_list}")
+        if template_file and template_file.filename:
+            validate_excel_file(template_file)
+            template_content = await template_file.read()
+        else:
+            try:
+                template_content = read_default_dig_package_template_bytes()
+            except FileNotFoundError as e:
+                raise HTTPException(
+                    status_code=503,
+                    detail=str(e),
+                ) from e
+        ili_contents = [await f.read() for f in ili_files] if ili_files else []
 
-        # Generate dig packages (offloaded to thread — CPU/I/O-bound work)
-        from backend.pipeline.dig_package import generate_dig_packages
+        if skip_ili_flag:
+            # MDL-only: ignore any ili_formats from the client (no ILI files read).
+            formats_list: List[str] = []
+        else:
+            if not ili_files:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Upload at least one ILI file, or enable skip_ili (MDL-only packages).",
+                )
+            formats_list = (
+                [fmt.strip() for fmt in ili_formats.split(",") if fmt.strip()]
+                if ili_formats
+                else ["Rosen-MFLA"] * len(ili_files)
+            )
+            if len(formats_list) != len(ili_files):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"ILI format count ({len(formats_list)}) does not match uploaded ILI file count ({len(ili_files)}).",
+                )
+
+        max_digs_int: Optional[int] = None
+        if max_digs and str(max_digs).strip():
+            try:
+                max_digs_int = int(str(max_digs).strip())
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail="max_digs must be a positive integer") from e
+            if max_digs_int < 1:
+                raise HTTPException(status_code=400, detail="max_digs must be >= 1")
+
+        skip_pdf_flag = str(skip_pdf).strip().lower() in ("1", "true", "yes", "on")
+
+        logger.info(
+            f"[dig-package/generate] {len(ili_contents)} ILI files, formats={formats_list}, "
+            f"max_digs={max_digs_int}, skip_pdf={skip_pdf_flag}, skip_ili={skip_ili_flag}, "
+            f"include_debug={include_debug_flag}"
+        )
+
+        def _progress_callback(
+            current: int,
+            total: int,
+            *,
+            phase: str = "",
+            message: str = "",
+        ) -> None:
+            if effective_job_id:
+                entry: Dict[str, Any] = {
+                    "current": current,
+                    "total": total,
+                    "status": "running",
+                    "expires_at": 0,
+                }
+                if phase:
+                    entry["phase"] = phase
+                if message:
+                    entry["message"] = message
+                _DIG_PACKAGE_PROGRESS[effective_job_id] = entry
 
         zip_buffer = await asyncio.to_thread(
             lambda: generate_dig_packages(
@@ -1882,29 +2113,60 @@ async def generate_dig_package_endpoint(
                 template_content=template_content,
                 revision=revision,
                 ili_formats=formats_list,
+                progress_callback=_progress_callback,
+                max_digs=max_digs_int,
+                skip_pdf=skip_pdf_flag,
+                skip_ili=skip_ili_flag,
+                include_debug=include_debug_flag,
             )
         )
-        
+
+        # Mark job done with TTL so a final frontend poll still succeeds.
+        if effective_job_id:
+            _DIG_PACKAGE_PROGRESS[effective_job_id]["status"] = "done"
+            _DIG_PACKAGE_PROGRESS[effective_job_id]["expires_at"] = (
+                time.time() + DIG_PACKAGE_PROGRESS_TTL_SECS
+            )
+
         logger.info("[dig-package/generate] Dig packages generated successfully")
-        # Create temporary file for ZIP
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.zip') as tmp:
-            tmp.write(zip_buffer.getvalue())
-            tmp_path = tmp.name
-        
-        # Return ZIP file
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        return FileResponse(
-            path=tmp_path,
-            filename=f"Dig_Packages_R{revision}_{timestamp}.zip",
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"Dig_Packages_R{revision}_{timestamp}.zip"
+        # Stream BytesIO directly — no temp file written to disk.
+        return StreamingResponse(
+            zip_buffer,
             media_type="application/zip",
-            headers={"Content-Disposition": f"attachment; filename=Dig_Packages_R{revision}_{timestamp}.zip"}
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
         )
 
     except HTTPException:
+        if effective_job_id:
+            _DIG_PACKAGE_PROGRESS[effective_job_id] = {
+                "current": 0,
+                "total": 0,
+                "status": "error",
+                "phase": "error",
+                "message": "Request failed (HTTP validation or client error).",
+                "expires_at": time.time() + DIG_PACKAGE_PROGRESS_TTL_SECS,
+            }
         raise
     except Exception as e:
         log_error(logger, "dig-package/generate", e)
-        raise HTTPException(status_code=500, detail=f"Error generating dig packages: {str(e)}")
+        if effective_job_id:
+            _DIG_PACKAGE_PROGRESS[effective_job_id] = {
+                "current": 0,
+                "total": 0,
+                "status": "error",
+                "phase": "error",
+                "message": str(e)[:500],
+                "expires_at": time.time() + DIG_PACKAGE_PROGRESS_TTL_SECS,
+            }
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Error generating dig packages: {str(e)} "
+                f"(failure log on server: backend/logs/dig_package_last_failure.log)"
+            ),
+        )
 
 
 if __name__ == "__main__":

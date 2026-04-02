@@ -14,6 +14,7 @@ from frontend_utils import (
     display_header,
     display_session_privacy_banner,
     display_sidebar_navigation,
+    fu_key,
     get_layout_main,
     set_page_config,
     show_backend_unavailable_and_retry,
@@ -108,6 +109,7 @@ with main:
             "Source Excel File (input.xlsx)",
             type=["xlsx", "xls"],
             help="Upload the source data file containing TML information",
+            key=fu_key("tml", "source"),
             on_change=lambda: st.session_state.update({'tml_processing_result': None})
         )
 
@@ -116,6 +118,7 @@ with main:
             "Template Excel File (TM_Loader.xlsx)",
             type=["xlsx", "xls"],
             help="Upload the template file with Assets and TML sheets",
+            key=fu_key("tml", "template"),
             on_change=lambda: st.session_state.update({'tml_processing_result': None})
         )
 
