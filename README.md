@@ -22,7 +22,7 @@ A Python-based web application providing tools for facility and pipeline enginee
 - **Backend**: FastAPI + Uvicorn (multi-worker, non-blocking async)
 - **Visualization**: Plotly (interactive charts)
 - **Data Processing**: pandas, openpyxl, pdfplumber
-- **OCR**: EasyOCR / PaddleOCR / Tesseract — isolated in a subprocess worker
+- **OCR**: Surya / EasyOCR / Tesseract — isolated in a subprocess worker
 - **Validation**: Pydantic
 - **Tooling**: uv (package management), ruff (linting), black (formatting)
 

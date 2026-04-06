@@ -75,8 +75,8 @@ Chen's Engineer Toolbox is a modern, Python-based web application built with a *
 | **Excel Parsing** | openpyxl | Read/write Excel files | 3.1+ |
 | **Numeric Computing** | numpy | Statistical calculations | 1.26+ |
 | **PDF Parsing** | pdfplumber | Text and table extraction from PDFs | 0.10+ |
-| **OCR (primary)** | EasyOCR | Neural-network OCR for image-based reports | Latest |
-| **OCR (fallback)** | PaddleOCR / Tesseract | Fallback OCR engines | Latest |
+| **OCR (primary)** | Surya | Document OCR for structured table extraction | Latest |
+| **OCR (fallback)** | EasyOCR / Tesseract | Neural and classic OCR fallbacks | Latest |
 | **Process Isolation** | ProcessPoolExecutor | Isolate OCR crashes from main server | stdlib |
 
 **Location**: `backend/`
@@ -200,7 +200,7 @@ This ensures the event loop stays free to handle concurrent requests (health che
 
 ### 6. OCR Process Isolation
 
-OCR (EasyOCR, PaddleOCR) runs in a separate **subprocess** via `ProcessPoolExecutor`, completely isolated from the FastAPI server process. This means:
+OCR (Surya, EasyOCR, Tesseract) runs in a separate **subprocess** via `ProcessPoolExecutor`, completely isolated from the FastAPI server process. This means:
 
 - An OCR crash (segfault, OOM) cannot bring down the API server
 - On crash, the executor is automatically re-created and the user gets a retryable error
@@ -210,7 +210,7 @@ OCR (EasyOCR, PaddleOCR) runs in a separate **subprocess** via `ProcessPoolExecu
 FastAPI process
     └── asyncio event loop (non-blocking)
             └── asyncio.to_thread → thread pool (I/O: Excel, file ops)
-            └── ProcessPoolExecutor → OCR worker process (EasyOCR / PaddleOCR)
+            └── ProcessPoolExecutor → OCR worker process (Surya / EasyOCR / Tesseract)
                     ↑ crash here stays here — server keeps running
 ```
 
@@ -667,7 +667,7 @@ Future extensibility:
 
 1. Logs registered API routes for verification.
 2. Spawns the OCR worker process via `ProcessPoolExecutor` in a background daemon thread.
-3. Submits a warmup job so OCR models (EasyOCR, PaddleOCR) are pre-loaded before the first real request. This takes 30–60 s on first run; the server is fully responsive during warmup.
+3. Submits a warmup job so OCR models (EasyOCR; Surya/Tesseract load on demand) are pre-loaded before the first real request. This takes 30–60 s on first run; the server is fully responsive during warmup.
 
 ### Shutdown (`@app.on_event("shutdown")`)
 

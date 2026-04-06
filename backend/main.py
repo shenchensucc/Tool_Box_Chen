@@ -2,10 +2,7 @@ import asyncio
 import io
 import os
 import shutil
-import threading
 import time
-from concurrent.futures import ProcessPoolExecutor
-from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 
 # Load .env from project root (secrets stay out of git)
@@ -291,37 +288,9 @@ async def startup_log_routes():
     logger.info(f"[startup] ILI routes: {[(r.path, getattr(r, 'methods', '')) for r in ili_routes]}")
     logger.info(f"[startup] Inspection report routes: {[(r.path, getattr(r, 'methods', '')) for r in insp_routes]}")
 
-    # Spawn the OCR worker process now and let it load models in the background.
-    # This avoids a 30-60 s stall on the first real OCR request.
-    # The warmup runs in a daemon thread so it doesn't block server startup.
-    def _warmup_ocr_worker():
-        try:
-            from backend.pipeline.ocr_subprocess import warmup_ocr_worker
-            executor = _get_ocr_executor()
-            future = executor.submit(warmup_ocr_worker)
-            future.result(timeout=180)  # wait up to 3 min for model loading
-            logger.info("[startup] OCR worker process pre-warmed (pid ready).")
-        except Exception as exc:
-            logger.debug(f"[startup] OCR worker pre-warm skipped: {exc}")
-
-    threading.Thread(target=_warmup_ocr_worker, daemon=True).start()
-    logger.info(
-        "[startup] HTTP API is ready (/health, /docs). "
-        "Inspection-report OCR runs in a worker process; neural OCR models are not loaded at "
-        "startup by default (avoids ~400MB RAM spike). Set INSPECTION_REPORT_PRELOAD_OCR=1 to "
-        "preload when you have enough memory."
-    )
+    logger.info("[startup] HTTP API is ready (/health, /docs).")
 
 
-@app.on_event("shutdown")
-async def shutdown_ocr_worker():
-    """Cleanly terminate the OCR worker process when the server stops.
-
-    Without this, the ProcessPoolExecutor subprocess becomes an orphan —
-    it keeps running after uvicorn exits, wasting memory until the OS kills it.
-    """
-    _reset_ocr_executor()
-    logger.info("[shutdown] OCR worker process terminated.")
 
 
 @app.get("/")
@@ -1290,82 +1259,21 @@ async def deactivate_cml(
 
 
 # ---------------------------------------------------------------------------
-# OCR process pool — true process isolation for EasyOCR / PaddleOCR
+# OCR process pool — true process isolation for EasyOCR / Surya (inspection-report OCR)
 # ---------------------------------------------------------------------------
-# Each OCR request runs in a separate OS process so that any crash, segfault,
-# or OOM-kill inside the OCR libraries cannot bring down the FastAPI server.
-#
-# max_workers=1: OCR is CPU-bound; running two workers in parallel does not
-# double throughput and doubles memory pressure (each worker holds ~1-2 GB of
-# model weights).  A second request while one is running gets a 503 instantly.
-#
-# If the worker process crashes, BrokenProcessPool is raised on await.
-# _run_ocr_in_process() catches this, resets the executor, and re-raises so
-# the endpoint can return a clean 500 to the user without restarting the server.
-
-_ocr_executor: Optional[ProcessPoolExecutor] = None
-_ocr_executor_lock = threading.Lock()
-_ocr_busy = False   # single-flag guard; set True while a parse is in-flight
+# OCR requests run in a thread pool so they don't block the async event loop.
+# _ocr_busy ensures only one parse is in-flight at a time (OCR is CPU-bound).
+_ocr_busy = False
 
 
-def _get_ocr_executor() -> ProcessPoolExecutor:
-    """Return (creating if necessary) the long-lived OCR worker process."""
-    global _ocr_executor
-    with _ocr_executor_lock:
-        if _ocr_executor is None:
-            from backend.pipeline.ocr_subprocess import init_ocr_worker
-            _ocr_executor = ProcessPoolExecutor(
-                max_workers=1,
-                initializer=init_ocr_worker,
-            )
-    return _ocr_executor
+async def _run_ocr(temp_pdfs: List[Path], source_filenames: List[str]):
+    """Run parse_inspection_report_pdfs in a thread so it doesn't block the event loop."""
+    from backend.tml.inspection_report_parser import parse_inspection_report_pdfs
 
+    def _parse():
+        return parse_inspection_report_pdfs(temp_pdfs, source_filenames)
 
-def _reset_ocr_executor() -> None:
-    """Shut down the broken executor and clear it so the next call rebuilds it."""
-    global _ocr_executor
-    with _ocr_executor_lock:
-        if _ocr_executor is not None:
-            try:
-                _ocr_executor.shutdown(wait=False, cancel_futures=True)
-            except Exception:
-                pass
-            _ocr_executor = None
-    logger.warning("[ocr] Executor reset — worker will restart on next request")
-
-
-async def _run_ocr_in_process(temp_pdfs: List[Path], source_filenames: List[str]):
-    """
-    Submit an OCR job to the isolated worker process and await the result.
-
-    - Runs parse_inspection_report_pdfs() inside the worker, fully isolated.
-    - If the worker crashes (BrokenProcessPool), resets the executor and raises
-      RuntimeError so the endpoint can return HTTP 500 without dying itself.
-    - Returns List[ExtractedReading].
-    """
-    from backend.pipeline.ocr_subprocess import run_ocr_parse
-
-    pdf_strs = [str(p) for p in temp_pdfs]
-    loop = asyncio.get_event_loop()
-
-    for attempt in range(2):
-        executor = _get_ocr_executor()
-        try:
-            return await loop.run_in_executor(
-                executor, run_ocr_parse, pdf_strs, source_filenames
-            )
-        except BrokenProcessPool:
-            logger.error(
-                "[ocr] Worker process crashed (attempt %d/2) — resetting executor",
-                attempt + 1,
-            )
-            _reset_ocr_executor()
-            if attempt == 1:
-                raise RuntimeError(
-                    "OCR worker crashed twice in a row. "
-                    "The backend is still running — please try again."
-                )
-    return []
+    return await asyncio.to_thread(_parse)
 
 
 @app.post("/api/tml/inspection-report/read", response_model=InspectionReportResponse)
@@ -1401,8 +1309,7 @@ async def read_inspection_reports(
 
         source_filenames = [name for _, name in pdf_data]
 
-        # OCR runs in an isolated worker process — a crash there cannot kill this server.
-        readings = await _run_ocr_in_process(temp_pdfs, source_filenames)
+        readings = await _run_ocr(temp_pdfs, source_filenames)
 
         if not readings:
             return InspectionReportResponse(
@@ -1519,8 +1426,8 @@ async def process_inspection_reports(
     source_filenames = [name for _, name in pdf_bytes_list]
     _ocr_busy = True
     try:
-        # ── Phase 1: OCR — runs in an isolated worker process ──────────────
-        readings = await _run_ocr_in_process(temp_pdfs, source_filenames)
+        # ── Phase 1: OCR ──────────────────────────────────────────────────────
+        readings = await _run_ocr(temp_pdfs, source_filenames)
 
         if not readings:
             return InspectionReportResponse(

@@ -19,7 +19,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import pandas as pd
 from openpyxl import load_workbook
-from openpyxl.cell.cell import MergedCell
 from openpyxl.styles import Font, PatternFill
 
 from backend.logging_config import get_logger
@@ -27,6 +26,7 @@ from backend.pipeline.dig_package_layout import (
     AnchorNotFoundError,
     OPTIONAL_EXCAVATION_LAYOUT_BLOCKS,
     OPTIONAL_LAYOUT_VALUE_FIELDS,
+    _writable_cell,
     load_layout_manifest,
     resolve_excavation_block_top_left,
     resolve_feature_table_data_start,
@@ -112,20 +112,6 @@ def _write_dig_package_debug_json(
         encoding="utf-8",
     )
 
-
-def _writable_cell(ws, row: int, column: int):
-    """
-    Return a writable openpyxl Cell for ``(row, column)``.
-    Inside a merged range, only the top-left cell accepts writes; other coordinates
-    are ``MergedCell`` placeholders (read-only).
-    """
-    cell = ws.cell(row=row, column=column)
-    if not isinstance(cell, MergedCell):
-        return cell
-    for rng in ws.merged_cells.ranges:
-        if rng.min_row <= row <= rng.max_row and rng.min_col <= column <= rng.max_col:
-            return ws.cell(row=rng.min_row, column=rng.min_col)
-    return cell
 
 # Bundled 2026 Dig Package Template (used when the client does not upload a template).
 DEFAULT_DIG_PACKAGE_TEMPLATE_FILENAME = "2026 Dig Package Template.xlsx"
@@ -306,6 +292,32 @@ def _mdl_rows_for_dig_id(mdl_df: pd.DataFrame, dig_id_col: str, dig_id: Any) -> 
             return mdl_df[mask]
     ds = col.astype(str).str.strip()
     return mdl_df[ds == str(dig_id).strip()]
+
+
+def _parse_single_ili_file(
+    content: bytes,
+    v_format: str,
+    file_index: int,
+    record_failure: Callable[[str, str], None],
+) -> Optional[Dict[str, Any]]:
+    """Parse one ILI file; return dict or None on failure (timeout or parse error)."""
+    try:
+        df, col_map, sheet = parse_ili_file_with_timeout(content, v_format)
+        logger.info(f"ILI file {file_index + 1} ({v_format}): sheet={sheet}, shape={df.shape}")
+        return {"df": df, "col_map": col_map, "format": v_format}
+    except ILIParseTimeoutError as e:
+        logger.error(
+            f"ILI file {file_index + 1} ({v_format}) timed out — excluded from all dig packages: {e}"
+        )
+        record_failure("parse_ili", f"file {file_index + 1} ({v_format}) TIMEOUT: {e}")
+        return None
+    except Exception as e:
+        logger.error(
+            f"Error parsing ILI file {file_index + 1} ({v_format}): {type(e).__name__}: {e} — "
+            "this source will be excluded from all dig packages"
+        )
+        record_failure("parse_ili", f"file {file_index + 1} ({v_format}): {type(e).__name__}: {e}")
+        return None
 
 
 def package_output_stem(mdl_row: pd.Series, mdl_col_map: Dict[str, str], dig_id: Any) -> str:
@@ -1268,28 +1280,10 @@ def _generate_dig_packages_impl(
                         "large workbooks can take several minutes per file"
                     ),
                 )
-            try:
-                df, col_map, sheet = parse_ili_file_with_timeout(content, v_format)
-                ili_data_parsed.append({"df": df, "col_map": col_map, "format": v_format})
-                logger.info(f"ILI file {i+1} ({v_format}): sheet={sheet}, shape={df.shape}")
-            except ILIParseTimeoutError as e:
-                logger.error(
-                    f"ILI file {i+1} ({v_format}) timed out — excluded from all dig packages: {e}"
-                )
-                record_failure(
-                    "parse_ili",
-                    f"file {i + 1} ({v_format}) TIMEOUT: {e}",
-                )
-                failed_ili_formats.append(v_format)
-            except Exception as e:
-                logger.error(
-                    f"Error parsing ILI file {i+1} ({v_format}): {type(e).__name__}: {e} — "
-                    "this source will be excluded from all dig packages"
-                )
-                record_failure(
-                    "parse_ili",
-                    f"file {i + 1} ({v_format}): {type(e).__name__}: {e}",
-                )
+            parsed = _parse_single_ili_file(content, v_format, i, record_failure)
+            if parsed is not None:
+                ili_data_parsed.append(parsed)
+            else:
                 failed_ili_formats.append(v_format)
 
         if not ili_data_parsed:
@@ -1368,28 +1362,10 @@ def _generate_dig_packages_impl(
                                 "large workbooks can take several minutes per file"
                             ),
                         )
-                    try:
-                        df, col_map, sheet = parse_ili_file_with_timeout(content, v_format)
-                        ili_data_parsed.append({"df": df, "col_map": col_map, "format": v_format})
-                        logger.info(f"ILI file {i+1} ({v_format}): sheet={sheet}, shape={df.shape}")
-                    except ILIParseTimeoutError as e:
-                        logger.error(
-                            f"ILI file {i+1} ({v_format}) timed out — excluded from all dig packages: {e}"
-                        )
-                        record_failure(
-                            "parse_ili",
-                            f"file {i + 1} ({v_format}) TIMEOUT: {e}",
-                        )
-                        failed_ili_formats.append(v_format)
-                    except Exception as e:
-                        logger.error(
-                            f"Error parsing ILI file {i+1} ({v_format}): {type(e).__name__}: {e} — "
-                            "this source will be excluded from all dig packages"
-                        )
-                        record_failure(
-                            "parse_ili",
-                            f"file {i + 1} ({v_format}): {type(e).__name__}: {e}",
-                        )
+                    parsed = _parse_single_ili_file(content, v_format, i, record_failure)
+                    if parsed is not None:
+                        ili_data_parsed.append(parsed)
+                    else:
                         failed_ili_formats.append(v_format)
 
                     if progress_callback and n_ili > 0:
@@ -1402,8 +1378,6 @@ def _generate_dig_packages_impl(
                                 f"{len(ili_data_parsed)} vendor source(s) loaded"
                             ),
                         )
-
-                    dig_id_col = mdl_col_map.get("dig_id")
                     for excavation_num, dig_id in enumerate(dig_ids, start=1):
                         mdl_features = _mdl_rows_for_dig_id(mdl_df, dig_id_col, dig_id)
                         if mdl_features.empty:
@@ -1493,11 +1467,10 @@ def _generate_dig_packages_impl(
                 excel_path = temp_path / excel_filename
 
                 if not ili_datasets_for_dig and not skip_ili:
-                    if excel_path.exists():
-                        try:
-                            excel_path.unlink()
-                        except OSError:
-                            pass
+                    try:
+                        excel_path.unlink()
+                    except OSError:
+                        pass
                     summary["skipped"].append({
                         "dig_id": str(dig_id),
                         "reason": "No ILI rows found in assessment range",

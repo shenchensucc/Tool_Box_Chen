@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import threading
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -27,12 +28,14 @@ import pymupdf
 _logger = logging.getLogger(__name__)
 _EASYOCR_READER = None
 _EASYOCR_INIT_FAILED = False
-_PADDLEOCR_READER = None
-_PADDLEOCR_INIT_FAILED = False
+_SURYA_MODELS = None  # tuple: (det_predictor, rec_predictor) once loaded
+_SURYA_INIT_FAILED = False
+_TESSERACT_AVAILABLE: Optional[bool] = None
 
 # Protect singleton initialization: two threads must not race to create the same reader.
 _EASYOCR_INIT_LOCK = threading.Lock()
-_PADDLEOCR_INIT_LOCK = threading.Lock()
+_SURYA_INIT_LOCK = threading.Lock()
+_TESSERACT_INIT_LOCK = threading.Lock()
 
 # In-process cache for OCR results: {(pdf_path_str, mtime_ns) -> List[ExtractedReading]}
 # Avoids re-running expensive EasyOCR on a file that hasn't changed.
@@ -42,6 +45,10 @@ _STRUCT_OCR_CACHE_LOCK = threading.Lock()
 # Limit simultaneous OCR (CPU-bound) threads to 1 so they don't thrash each other.
 # pdfplumber threads are not gated by this semaphore and run truly in parallel.
 _OCR_SEMAPHORE = threading.Semaphore(1)
+
+# Tesseract character whitelist — only characters that appear in inspection reports.
+# Eliminates letter/digit confusion (O↔0, l↔1, S↔5, B↔8) that corrupts readings.
+_OCR_CHAR_WHITELIST = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ.-/: "
 
 
 @dataclass
@@ -54,7 +61,7 @@ class ExtractedReading:
     min_reading: float  # Used for single reading; same as first of all_readings when row-based
     all_readings: List[float] = field(default_factory=list)
     source_file: str = ""
-    extraction_method: str = "pdfplumber"  # "pdfplumber" or "ocr"
+    extraction_method: str = "pdfplumber"  # pdfplumber | ocr | ocr_structured:<engine>
     source_page: Optional[int] = None  # 1-based page index
     table_bbox: Optional[Tuple[float, float, float, float]] = None
     table_image_id: str = ""
@@ -810,15 +817,30 @@ def _parse_generic_zone_table(
                     if re.search(r"N/A|FLANGE", row_text, re.I) and not readings_in_row:
                         continue
 
-                    # Require diameter when we have multiple CMLs (avoids noise from other tables)
-                    if len(cml_bases) > 1 and not diam:
+                    # Explicit CML value in the row (Format B: CIRCUIT CML ZONE DIAM columns).
+                    # Check this FIRST — more reliable than the diameter heuristic since multiple
+                    # CMLs can share the same pipe diameter (e.g. all 8" lines).
+                    row_explicit_cml = None
+                    for c in cells:
+                        m = re.search(r"(\d+\.\d+)", c)
+                        if m and m.group(1) in cml_bases:
+                            row_explicit_cml = m.group(1)
+                            current_cml_base = row_explicit_cml
+                            break
+
+                    # Require diameter OR an explicit CML when we have multiple CMLs
+                    # (avoids noise from other tables that lack both).
+                    if len(cml_bases) > 1 and not diam and not row_explicit_cml:
                         continue
 
                     if zone_num and readings_in_row:
                         min_reading = min(readings_in_row)
-                        # When we have diam, use diam_to_cml (heuristic) - ignore page header order
                         cml_base = None
-                        if diam and cml_bases:
+                        if row_explicit_cml:
+                            # Explicit CML column value takes priority over diameter heuristic
+                            cml_base = row_explicit_cml
+                        elif diam and cml_bases:
+                            # Diameter heuristic: only used when no explicit CML in row
                             if diam not in diam_to_cml:
                                 # Prefer heuristic over page header when we have 16/30/8/6 (multi-section page)
                                 if diam in ("16", "12") and "1.52" in cml_bases:
@@ -832,13 +854,6 @@ def _parse_generic_zone_table(
                                 else:
                                     diam_to_cml[diam] = cml_bases[len(diam_to_cml) % len(cml_bases)]
                             cml_base = diam_to_cml[diam]
-                        if not cml_base:
-                            # No diam: use row CML or current section header
-                            for c in cells:
-                                m = re.search(r"(\d+\.\d+)\s*$", c)
-                                if m and m.group(1) in cml_bases:
-                                    cml_base = m.group(1)
-                                    break
                         if not cml_base:
                             cml_base = current_cml_base
                         if not cml_base and cml_bases:
@@ -914,7 +929,7 @@ def _preprocess_for_ocr(img):
     try:
         from PIL import ImageEnhance, ImageFilter, ImageOps
 
-        # Grayscale gives a uniform, noise-reduced base for both Tesseract and EasyOCR/Paddle
+        # Grayscale gives a uniform, noise-reduced base for both Tesseract and EasyOCR/Surya
         gray = img.convert("L")
         # Autocontrast: stretches histogram to [0, 255]; cutoff=1 clips 1% of dark/light pixels
         # to avoid a single dark border or white glare dominating the normalisation.
@@ -922,7 +937,7 @@ def _preprocess_for_ocr(img):
         # UnsharpMask: radius controls the blur kernel; percent is the boost strength;
         # threshold avoids sharpening already-sharp edges twice.
         gray = gray.filter(ImageFilter.UnsharpMask(radius=1, percent=180, threshold=3))
-        # Return RGB so pytesseract / EasyOCR / PaddleOCR all accept it without conversion.
+        # Return RGB so pytesseract / EasyOCR / Surya all accept it without conversion.
         return gray.convert("RGB")
     except Exception:
         return img
@@ -955,7 +970,7 @@ def _run_ocr_on_page(page_image: bytes, dpi: int = 300, psm: int = 6) -> str:
         # Preprocessing is on by default; set INSPECTION_REPORT_OCR_PREPROCESS=0 to disable.
         if os.getenv("INSPECTION_REPORT_OCR_PREPROCESS", "1") != "0":
             img = _preprocess_for_ocr(img)
-        config = f"--psm {psm} --oem 3"  # OEM 3 = default LSTM
+        config = f"--psm {psm} --oem 3 -c tessedit_char_whitelist={_OCR_CHAR_WHITELIST}"
         return pytesseract.image_to_string(img, config=config)
     except Exception:
         return ""
@@ -1005,11 +1020,14 @@ def _extract_with_ocr(pdf_path: Path) -> Tuple[str, List[float], List[str], str]
 
         is_summary = _UT_REPORT_SUMMARY.search(text)
         is_grid_only = (_OCR_GRID_PAGE.search(text) or _UT_GRID_SECTION.search(text)) and not is_summary
+        if is_grid_only and summary_page_readings:
+            continue
+
+        # The whitelist in _run_ocr_on_page already eliminates the primary noise sources
+        # (phone/fax numbers confusable with readings). No separate crop pass needed.
         readings = _extract_numeric_readings(text)
         if is_summary:
             summary_page_readings.extend(readings)
-        if is_grid_only and summary_page_readings:
-            continue
         all_readings.extend(readings)
         # Dual-PSM second pass: opt-in only (off by default to avoid doubling OCR time)
         if dual_psm and len(readings) < 3:
@@ -1091,47 +1109,45 @@ def _extract_with_easyocr(pdf_path: Path) -> Tuple[str, List[float], List[str], 
     return date or "", all_readings, cml_ids, circuit or ""
 
 
-def _is_image_heavy_report(pdf_path: Path, full_text: str) -> bool:
-    """Heuristic: scanned/image-heavy reports need structured OCR more than text parsing."""
+def _classify_pdf_for_ocr(
+    pdf_path: Path, full_text: str, max_pages: int = 5
+) -> Tuple[bool, List[int]]:
+    """
+    Single-pass PDF analysis: open once, return (is_image_heavy, candidate_pages).
+
+    Replaces the former _is_image_heavy_report + _get_candidate_vision_pages pair which
+    each opened the file independently. One open saves ~100-200 ms per image-heavy PDF.
+
+    Returns:
+        is_image_heavy: True when the PDF needs OCR (image-based tables, little text).
+        candidate_pages: ordered list of page indices to run structured OCR on.
+    """
     if len(full_text.strip()) < 400:
-        return True
+        # Barely any text at all — definitely image-heavy; fall back to all early pages.
+        return True, list(range(1, max_pages + 1))
+
     try:
         doc = pymupdf.open(pdf_path)
     except Exception:
-        return False
-
-    try:
-        image_pages = 0
-        for page_idx, page in enumerate(doc):
-            if page_idx == 0:
-                continue
-            page_text = page.get_text() or ""
-            images = page.get_images(full=True)
-            large_images = sum(1 for img in images if len(img) >= 4 and img[2] >= 900 and img[3] >= 400)
-            if large_images >= 1 and len(page_text.strip()) < 400:
-                image_pages += 1
-        return image_pages >= 1
-    finally:
-        doc.close()
-
-
-def _get_candidate_vision_pages(pdf_path: Path, max_pages: int = 5) -> List[int]:
-    """
-    Pick likely result-table pages for structured local OCR.
-    Prefer pages with large embedded images and CML/result markers, while skipping grid pages.
-    """
-    try:
-        doc = pymupdf.open(pdf_path)
-    except Exception:
-        return []
+        return False, []
 
     scored_pages: List[Tuple[int, int]] = []
     page_count = len(doc)
+    image_pages = 0
+
     try:
         for page_idx, page in enumerate(doc):
             if page_idx == 0:
                 continue
             text = page.get_text() or ""
+            images = page.get_images(full=True)
+            large_images = sum(1 for img in images if len(img) >= 4 and img[2] >= 900 and img[3] >= 400)
+
+            # is_image_heavy: count pages dominated by large images with little text
+            if large_images >= 1 and len(text.strip()) < 400:
+                image_pages += 1
+
+            # candidate_pages: skip UT Grid noise pages
             if _OCR_GRID_PAGE.search(text) or _UT_GRID_SECTION.search(text):
                 continue
 
@@ -1145,9 +1161,6 @@ def _get_candidate_vision_pages(pdf_path: Path, max_pages: int = 5) -> List[int]
                 score += 3
             if "CIRCUIT" in upper_text:
                 score += 2
-
-            images = page.get_images(full=True)
-            large_images = sum(1 for img in images if len(img) >= 4 and img[2] >= 900 and img[3] >= 400)
             score += min(large_images, 3)
 
             if score > 0:
@@ -1155,11 +1168,13 @@ def _get_candidate_vision_pages(pdf_path: Path, max_pages: int = 5) -> List[int]
     finally:
         doc.close()
 
+    is_image_heavy = image_pages >= 1
     scored_pages.sort(key=lambda item: (-item[0], item[1]))
-    page_indices = [page_idx for _, page_idx in scored_pages[:max_pages]]
-    if page_indices:
-        return page_indices
-    return list(range(1, min(page_count, max_pages + 1)))
+    candidate_pages = [page_idx for _, page_idx in scored_pages[:max_pages]]
+    if not candidate_pages:
+        candidate_pages = list(range(1, min(page_count, max_pages + 1)))
+
+    return is_image_heavy, candidate_pages
 
 
 def _iter_candidate_image_segments(doc, candidate_pages: List[int]):
@@ -1242,55 +1257,66 @@ def _normalize_easyocr_tokens(ocr_result) -> List[dict]:
     return tokens
 
 
-def _normalize_paddleocr_tokens(ocr_result) -> List[dict]:
-    """Convert PaddleOCR output into simple positioned tokens."""
+def _normalize_surya_tokens(ocr_result) -> List[dict]:
+    """Convert surya OCR output into simple positioned tokens.
+
+    surya returns a list of OCRResult objects (one per image), each with a
+    ``text_lines`` attribute that is a list of TextLine objects.  Each
+    TextLine has ``.text``, ``.confidence``, and ``.bbox`` ([x1, y1, x2, y2]).
+    """
     tokens = []
-    lines = []
-    if isinstance(ocr_result, list):
-        if ocr_result and isinstance(ocr_result[0], list) and ocr_result and ocr_result[0]:
-            # Common form: [ [ [bbox, (text, conf)], ... ] ]
-            first = ocr_result[0]
-            if first and isinstance(first[0], (list, tuple)):
-                lines = first
-        if not lines:
-            # Alternate form: [ [bbox, (text, conf)], ... ]
-            lines = ocr_result
-    for item in lines or []:
-        if not isinstance(item, (list, tuple)) or len(item) < 2:
-            continue
-        bbox, txt_conf = item[0], item[1]
-        if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
-            continue
-        text = ""
-        conf = 0.0
-        if isinstance(txt_conf, (list, tuple)) and len(txt_conf) >= 2:
-            text = str(txt_conf[0] or "").strip()
-            try:
-                conf = float(txt_conf[1])
-            except Exception:
-                conf = 0.0
-        else:
-            text = str(txt_conf or "").strip()
-        if not text:
-            continue
-        try:
-            xs = [float(p[0]) for p in bbox]
-            ys = [float(p[1]) for p in bbox]
-        except Exception:
-            continue
-        tokens.append(
-            {
-                "text": text,
-                "conf": conf,
-                "left": min(xs),
-                "right": max(xs),
-                "top": min(ys),
-                "bottom": max(ys),
-                "cy": (min(ys) + max(ys)) / 2,
-                "height": max(1.0, max(ys) - min(ys)),
-            }
-        )
+    for page_result in ocr_result or []:
+        for line in getattr(page_result, "text_lines", []) or []:
+            text = (getattr(line, "text", None) or "").strip()
+            if not text:
+                continue
+            bbox = getattr(line, "bbox", None)
+            if bbox is None or len(bbox) < 4:
+                continue
+            x1, y1, x2, y2 = float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])
+            tokens.append(
+                {
+                    "text": text,
+                    "conf": float(getattr(line, "confidence", 0.0) or 0.0),
+                    "left": x1,
+                    "right": x2,
+                    "top": y1,
+                    "bottom": y2,
+                    "cy": (y1 + y2) / 2,
+                    "height": max(1.0, y2 - y1),
+                }
+            )
     return tokens
+
+
+def _get_surya_models():
+    """Lazy-load surya detection + recognition predictors. Thread-safe singleton."""
+    global _SURYA_MODELS, _SURYA_INIT_FAILED
+    if _SURYA_INIT_FAILED:
+        return None
+    if _SURYA_MODELS is not None:
+        return _SURYA_MODELS
+    with _SURYA_INIT_LOCK:
+        if _SURYA_INIT_FAILED:
+            return None
+        if _SURYA_MODELS is not None:
+            return _SURYA_MODELS
+        try:
+            from surya.recognition import RecognitionPredictor, FoundationPredictor
+            from surya.detection import DetectionPredictor
+        except ImportError:
+            _SURYA_INIT_FAILED = True
+            return None
+        try:
+            det_predictor = DetectionPredictor()
+            foundation_predictor = FoundationPredictor()
+            rec_predictor = RecognitionPredictor(foundation_predictor)
+            _SURYA_MODELS = (det_predictor, rec_predictor)
+        except Exception as exc:
+            _logger.warning("surya init failed: %s", exc)
+            _SURYA_INIT_FAILED = True
+            return None
+    return _SURYA_MODELS
 
 
 def _easyocr_use_gpu() -> bool:
@@ -1344,67 +1370,128 @@ def _get_easyocr_reader():
     return _EASYOCR_READER
 
 
-def _get_paddleocr_reader():
-    """Reuse a singleton PaddleOCR reader. Thread-safe: initialization is guarded by a lock."""
-    global _PADDLEOCR_READER, _PADDLEOCR_INIT_FAILED
-    # Fast path
-    if _PADDLEOCR_INIT_FAILED:
-        return None
-    if _PADDLEOCR_READER is not None:
-        return _PADDLEOCR_READER
-    # Slow path: serialize init
-    with _PADDLEOCR_INIT_LOCK:
-        if _PADDLEOCR_INIT_FAILED:
-            return None
-        if _PADDLEOCR_READER is not None:
-            return _PADDLEOCR_READER
+def _is_tesseract_available() -> bool:
+    """Cached check: returns True if Tesseract is installed and callable. Thread-safe."""
+    global _TESSERACT_AVAILABLE
+    if _TESSERACT_AVAILABLE is not None:
+        return _TESSERACT_AVAILABLE
+    with _TESSERACT_INIT_LOCK:
+        if _TESSERACT_AVAILABLE is not None:
+            return _TESSERACT_AVAILABLE
         try:
-            from paddleocr import PaddleOCR
+            import pytesseract
+            _win_path = Path("C:/Program Files/Tesseract-OCR/tesseract.exe")
+            if _win_path.exists():
+                pytesseract.pytesseract.tesseract_cmd = str(_win_path)
+            pytesseract.get_tesseract_version()
+            _TESSERACT_AVAILABLE = True
         except Exception:
-            # Catches ImportError but also DLL/binary errors (FileNotFoundError on Windows
-            # when paddle's native libs are missing or incompatible). Mark as failed so we
-            # never retry — the failed import is slow and prints noisy warnings.
-            _PADDLEOCR_INIT_FAILED = True
-            return None
-        try:
-            _PADDLEOCR_READER = PaddleOCR(
-                use_angle_cls=True,
-                lang="en",
-                show_log=False,
+            _TESSERACT_AVAILABLE = False
+    return _TESSERACT_AVAILABLE
+
+
+def _normalize_tesseract_tokens(img_np) -> List[dict]:
+    """
+    Run Tesseract with per-word bounding boxes (image_to_data) and return tokens in the
+    same format as EasyOCR/Surya tokens so _extract_structured_rows_from_easyocr_tokens
+    can consume them without modification.
+
+    Uses the same whitelist as _run_ocr_on_page to eliminate letter/digit confusion.
+    Confidence values are normalized from Tesseract's 0-100 scale to 0.0-1.0.
+    """
+    try:
+        import pytesseract
+        from PIL import Image
+
+        _win_path = Path("C:/Program Files/Tesseract-OCR/tesseract.exe")
+        if _win_path.exists():
+            pytesseract.pytesseract.tesseract_cmd = str(_win_path)
+
+        pil_img = Image.fromarray(img_np)
+        # Rescale small images so Tesseract resolves 3-decimal readings reliably.
+        w, h = pil_img.size
+        if w < 1400 or h < 1400:
+            scale = max(1400 / w, 1400 / h, 1.5)
+            pil_img = pil_img.resize((int(w * scale), int(h * scale)), Image.Resampling.LANCZOS)
+        if os.getenv("INSPECTION_REPORT_OCR_PREPROCESS", "1") != "0":
+            pil_img = _preprocess_for_ocr(pil_img)
+
+        config = f"--psm 6 --oem 3 -c tessedit_char_whitelist={_OCR_CHAR_WHITELIST}"
+        data = pytesseract.image_to_data(pil_img, config=config, output_type=pytesseract.Output.DICT)
+
+        tokens: List[dict] = []
+        for i, text in enumerate(data["text"]):
+            text = str(text or "").strip()
+            if not text:
+                continue
+            raw_conf = float(data["conf"][i])
+            if raw_conf < 0:
+                continue  # Tesseract uses -1 for block/line-level rows with no confidence
+            conf = raw_conf / 100.0
+            left = float(data["left"][i])
+            top = float(data["top"][i])
+            width = float(data["width"][i])
+            height = float(data["height"][i])
+            tokens.append(
+                {
+                    "text": text,
+                    "conf": conf,
+                    "left": left,
+                    "right": left + width,
+                    "top": top,
+                    "bottom": top + height,
+                    "cy": top + height / 2.0,
+                    "height": max(1.0, height),
+                }
             )
-        except Exception as exc:
-            _logger.warning("PaddleOCR init failed: %s", exc)
-            _PADDLEOCR_INIT_FAILED = True
-            return None
-    return _PADDLEOCR_READER
+        return tokens
+    except Exception as exc:
+        _logger.debug("tesseract token extraction failed: %s", exc)
+        return []
 
 
 def _run_structured_ocr_on_image(img_np):
     """
-    Return normalized OCR tokens from preferred structured OCR engine.
-    Engine order:
-    - INSPECTION_REPORT_STRUCTURED_OCR_ENGINE=paddle: PaddleOCR only
-    - INSPECTION_REPORT_STRUCTURED_OCR_ENGINE=easyocr: EasyOCR only
-    - default/auto: PaddleOCR first, then EasyOCR fallback
+    Return (normalized OCR tokens, engine id) from the preferred structured OCR engine.
+
+    Engine order (auto mode):
+    1. Surya — document OCR, fast on CPU
+    2. EasyOCR — neural fallback
+    3. Tesseract — last resort; per-word bboxes via image_to_data
+
+    Override with INSPECTION_REPORT_STRUCTURED_OCR_ENGINE:
+    - tesseract: Tesseract only
+    - surya:     Surya only
+    - easyocr:   EasyOCR only
+    - auto:      Surya → EasyOCR → Tesseract (default)
+
+    Legacy value ``paddle`` is treated as ``auto`` (PaddleOCR support removed).
+
+    Returns:
+        (list of token dicts, engine name). Engine is \"surya\"|\"easyocr\"|\"tesseract\"
+        or \"\" if no tokens were produced.
     """
     engine = os.getenv("INSPECTION_REPORT_STRUCTURED_OCR_ENGINE", "auto").strip().lower()
-    token_sets: List[List[dict]] = []
+    if engine == "paddle":
+        _logger.debug("INSPECTION_REPORT_STRUCTURED_OCR_ENGINE=paddle ignored (removed); using auto")
+        engine = "auto"
 
     # Serialize CPU-bound OCR calls so parallel threads don't thrash each other.
     # pdfplumber threads never reach this point and remain truly parallel.
     with _OCR_SEMAPHORE:
-        if engine in ("paddle", "auto"):
-            reader = _get_paddleocr_reader()
-            if reader is not None:
+        if engine in ("surya", "auto"):
+            models = _get_surya_models()
+            if models is not None:
                 try:
-                    paddle_result = reader.ocr(img_np, cls=True)
-                    paddle_tokens = _normalize_paddleocr_tokens(paddle_result)
-                    if paddle_tokens:
-                        token_sets.append(paddle_tokens)
-                        if engine == "paddle":
-                            return paddle_tokens
-                except Exception:
-                    pass
+                    from PIL import Image as _PILImage
+                    det_predictor, rec_predictor = models
+                    pil_img = _PILImage.fromarray(img_np)
+                    surya_result = rec_predictor([pil_img], det_predictor=det_predictor)
+                    surya_tokens = _normalize_surya_tokens(surya_result)
+                    if surya_tokens:
+                        return surya_tokens, "surya"
+                except Exception as exc:
+                    _logger.debug("surya OCR failed on image: %s", exc)
 
         if engine in ("easyocr", "auto"):
             reader = _get_easyocr_reader()
@@ -1413,17 +1500,17 @@ def _run_structured_ocr_on_image(img_np):
                     easy_result = reader.readtext(img_np, detail=1)
                     easy_tokens = _normalize_easyocr_tokens(easy_result)
                     if easy_tokens:
-                        token_sets.append(easy_tokens)
-                        if engine == "easyocr":
-                            return easy_tokens
+                        return easy_tokens, "easyocr"
                 except Exception:
                     pass
 
-    # In auto mode, prefer richer token output (usually better row reconstruction).
-    if token_sets:
-        token_sets.sort(key=len, reverse=True)
-        return token_sets[0]
-    return []
+        # Tesseract: last resort in auto mode. Uses image_to_data for per-word bboxes.
+        if engine in ("tesseract", "auto"):
+            tokens = _normalize_tesseract_tokens(img_np)
+            if tokens:
+                return tokens, "tesseract"
+
+    return [], ""
 
 
 def _extract_structured_rows_from_easyocr_tokens(
@@ -1432,17 +1519,29 @@ def _extract_structured_rows_from_easyocr_tokens(
     fallback_circuit: str,
     fallback_date: str,
     fallback_cml_ids: Optional[List[str]] = None,
+    structured_ocr_engine: str = "",
 ) -> List[ExtractedReading]:
     """
     Recover summary-table rows from positioned OCR tokens.
     This is a lightweight local alternative to a document parser like MinerU.
+
+    structured_ocr_engine: which backend produced ``tokens`` (e.g. surya, easyocr) — stored on
+    each reading as extraction_method ``ocr_structured:<engine>``.
     """
     if not tokens:
         return []
 
+    _method = (
+        f"ocr_structured:{structured_ocr_engine}"
+        if structured_ocr_engine
+        else "ocr_structured"
+    )
+
     joined_text = " ".join(t["text"] for t in sorted(tokens, key=lambda t: (t["top"], t["left"])))
     upper_text = joined_text.upper()
-    if "CIRCUIT" not in upper_text or "CML" not in upper_text or "SECTION" not in upper_text:
+    _has_section = "SECTION" in upper_text or "ZONE" in upper_text
+    if "CIRCUIT" not in upper_text or "CML" not in upper_text or not _has_section:
+        _logger.debug("[token-extract] early exit — missing header words. Sample text: %r", joined_text[:200])
         return []
 
     circuit_id = fallback_circuit or "Unknown"
@@ -1468,15 +1567,20 @@ def _extract_structured_rows_from_easyocr_tokens(
         return []
 
     avg_height = sum(t["height"] for t in tokens) / max(1, len(tokens))
-    # OCR often places the leftmost section cell and the numeric reading cells on slightly
-    # different baselines; use a wider band so one logical table row stays together.
-    row_tolerance = max(55.0, avg_height * 1.5)
-    header_tokens = [t for t in tokens if re.fullmatch(r"(?:CIRCUIT|CML|SECTION|DIAM\.?|NORTH|SOUTH|EAST|WEST|TOP|BOTTOM|CENTER|HIGH|COMMENTS|A|B|C|D|E)", t["text"], re.I)]
+    # Two separate tolerances:
+    # - cluster_tolerance: used when building row_centers so that closely-spaced data rows
+    #   (e.g. elbow/tee reports with ~25 px between zones) are not merged into one.
+    # - row_tolerance: wider band used when collecting all tokens that belong to a row, so
+    #   OCR tokens with slightly different baselines still join the same logical row.
+    cluster_tolerance = max(14.0, avg_height * 0.7)
+    row_tolerance = max(30.0, avg_height * 1.2)
+    header_tokens = [t for t in tokens if re.fullmatch(r"(?:CIRCUIT|CML|SECTION|ZONE|DIAM\.?|NORTH|SOUTH|EAST|WEST|TOP|BOTTOM|CENTER|HIGH|COMMENTS|A|B|C|D|E)", t["text"], re.I)]
     header_row = None
     for token in header_tokens:
         same_row = [t for t in header_tokens if abs(t["cy"] - token["cy"]) <= row_tolerance]
         labels = {t["text"].upper().rstrip(".") for t in same_row}
-        if {"CIRCUIT", "CML", "SECTION"}.issubset(labels):
+        _section_label_present = "SECTION" in labels or "ZONE" in labels
+        if {"CIRCUIT", "CML"}.issubset(labels) and _section_label_present:
             header_row = same_row
             break
     if not header_row:
@@ -1488,7 +1592,7 @@ def _extract_structured_rows_from_easyocr_tokens(
         if label not in x_by_label:
             x_by_label[label] = token["left"]
 
-    section_x = x_by_label.get("SECTION")
+    section_x = x_by_label.get("SECTION") or x_by_label.get("ZONE")
     cml_x = x_by_label.get("CML")
     reading_start_x = min(
         [x_by_label[label] for label in ("A", "NORTH", "TOP") if label in x_by_label] or [x_by_label.get("DIAM", 0) + 80]
@@ -1500,19 +1604,28 @@ def _extract_structured_rows_from_easyocr_tokens(
     for token in sorted_tokens:
         if token["cy"] <= header_cutoff:
             continue
-        if any(abs(token["cy"] - center) <= row_tolerance for center in row_centers):
+        if any(abs(token["cy"] - center) <= cluster_tolerance for center in row_centers):
             continue
         row_centers.append(token["cy"])
 
+    # Assign each token to the nearest row center so tokens are never shared between rows.
+    # This avoids cross-row bleed when data rows are tightly spaced (e.g. elbow/tee reports).
+    _token_by_center: dict = defaultdict(list)
+    for _t in sorted_tokens:
+        if _t["cy"] <= header_cutoff:
+            continue
+        _nearest = min(row_centers, key=lambda c: abs(_t["cy"] - c))
+        if abs(_t["cy"] - _nearest) <= row_tolerance:
+            _token_by_center[_nearest].append(_t)
+
     results: List[ExtractedReading] = []
     active_cml_base = cml_base
-    pending_row: Optional[dict] = None
+    _row_seq = 0  # fallback sequential zone counter when section column is absent
+    _explicit_sections_used: set = set()  # track explicitly-read section numbers
     for center in row_centers:
-        row_tokens = [t for t in sorted_tokens if abs(t["cy"] - center) <= row_tolerance]
-        row_tokens.sort(key=lambda t: t["left"])
+        row_tokens = sorted(_token_by_center.get(center, []), key=lambda t: t["left"])
         row_text = " ".join(t["text"] for t in row_tokens)
         if re.search(r"N/?A|FLANGE", row_text, re.I):
-            pending_row = None
             continue
 
         row_cml_base = active_cml_base
@@ -1562,7 +1675,7 @@ def _extract_structured_rows_from_easyocr_tokens(
         for token in row_tokens:
             if token["left"] + 10 < reading_start_x:
                 continue
-            if re.fullmatch(r"0\.\d{2,4}", token["text"]):
+            if re.fullmatch(r"\d+\.\d{2,4}", token["text"]):
                 if _min_conf > 0 and token.get("conf", 1.0) < _min_conf:
                     continue  # discard low-confidence decimal token (likely OCR noise)
                 try:
@@ -1572,36 +1685,34 @@ def _extract_structured_rows_from_easyocr_tokens(
                 if 0.05 <= value <= 3.0:
                     readings_in_row.append(value)
         if not readings_in_row:
-            pending_row = None
             continue
 
         if not unique_sections:
-            pending_row = {
-                "cml_base": row_cml_base,
-                "readings": readings_in_row,
-                "inherits_next_cml": not row_has_explicit_cml,
-            }
-            continue
-
-        if pending_row and len(unique_sections) >= 2:
-            pending_section = unique_sections[0]
-            pending_cml_base = row_cml_base if pending_row.get("inherits_next_cml") else pending_row["cml_base"]
+            # No section-number token found in this row. Use a sequential counter so
+            # tables that omit explicit zone numbers (e.g. elbow/tee reports) still emit
+            # one reading per data row instead of silently discarding all of them.
+            # Skip any numbers already claimed by explicit section tokens to avoid conflicts
+            # (e.g. when zones 2 and 3 have explicit numbers but zones 1 and 4 do not).
+            _row_seq += 1
+            while str(_row_seq) in _explicit_sections_used:
+                _row_seq += 1
+            section = str(_row_seq)
+            min_value = min(readings_in_row)
             results.append(
                 ExtractedReading(
                     circuit_id=circuit_id,
-                    cml_id=f"{pending_cml_base}-{pending_section}",
+                    cml_id=f"{row_cml_base}-{section}",
                     measurement_date=fallback_date or "",
-                    min_reading=min(pending_row["readings"]),
-                    all_readings=pending_row["readings"],
+                    min_reading=min_value,
+                    all_readings=readings_in_row,
                     source_file=source_filename,
-                    extraction_method="ocr_structured",
+                    extraction_method=_method,
                 )
             )
-            section = unique_sections[-1]
-            pending_row = None
-        else:
-            section = unique_sections[-1]
+            continue
 
+        section = unique_sections[-1]
+        _explicit_sections_used.add(section)
         min_value = min(readings_in_row)
         results.append(
             ExtractedReading(
@@ -1611,10 +1722,9 @@ def _extract_structured_rows_from_easyocr_tokens(
                 min_reading=min_value,
                 all_readings=readings_in_row,
                 source_file=source_filename,
-                extraction_method="ocr_structured",
+                extraction_method=_method,
             )
         )
-        pending_row = None
 
     return _validate_and_dedupe_before_export(results) if results else []
 
@@ -1625,14 +1735,23 @@ def _extract_structured_with_local_ocr(
     fallback_circuit: str = "",
     fallback_date: str = "",
     fallback_cml_ids: Optional[List[str]] = None,
+    candidate_pages: Optional[List[int]] = None,
 ) -> List[ExtractedReading]:
-    """Local structured OCR for image-heavy reports using embedded summary images."""
-    # ── Cache check ────────────────────────────────────────────────────────────
+    """Local structured OCR for image-heavy reports using embedded summary images.
+
+    Args:
+        candidate_pages: Pre-computed page indices from _classify_pdf_for_ocr().
+                         When provided, skips the redundant PDF open for page selection.
+    """
+    # ── Cache check (keyed on content hash, not temp-file path) ───────────────
+    # Temp files have unique UUID paths, so path+mtime never hits across requests.
+    # MD5 of file bytes hits whenever the same PDF is uploaded again.
     try:
-        _cache_key = (str(pdf_path), pdf_path.stat().st_mtime_ns)
-        if _cache_key in _STRUCT_OCR_CACHE:
-            _logger.debug("OCR cache hit for %s", pdf_path.name)
-            return _STRUCT_OCR_CACHE[_cache_key]
+        _cache_key = hashlib.md5(pdf_path.read_bytes(), usedforsecurity=False).hexdigest()
+        with _STRUCT_OCR_CACHE_LOCK:
+            if _cache_key in _STRUCT_OCR_CACHE:
+                _logger.debug("OCR cache hit (content hash) for %s", pdf_path.name)
+                return _STRUCT_OCR_CACHE[_cache_key]
     except Exception:
         _cache_key = None
 
@@ -1643,12 +1762,14 @@ def _extract_structured_with_local_ocr(
     except ImportError:
         return []
 
-    candidate_pages = _get_candidate_vision_pages(pdf_path, max_pages=6)
+    if candidate_pages is None:
+        _, candidate_pages = _classify_pdf_for_ocr(pdf_path, "", max_pages=6)
     if not candidate_pages:
         return []
 
-    # Require at least one OCR backend.
-    if _get_paddleocr_reader() is None and _get_easyocr_reader() is None:
+    # Require at least one OCR backend to proceed.
+    if (_get_surya_models() is None and _get_easyocr_reader() is None
+            and not _is_tesseract_available()):
         return []
 
     doc = pymupdf.open(pdf_path)
@@ -1659,8 +1780,10 @@ def _extract_structured_with_local_ocr(
         # Pass 1: embedded report images (high precision on image-based summary tables).
         for page_idx, xref, segment_name, segment in _iter_candidate_image_segments(doc, candidate_pages):
             try:
-                tokens = _run_structured_ocr_on_image(np.array(segment))
+                tokens, ocr_engine = _run_structured_ocr_on_image(np.array(segment))
             except Exception:
+                continue
+            if not tokens:
                 continue
             page_results = _extract_structured_rows_from_easyocr_tokens(
                 tokens,
@@ -1668,6 +1791,7 @@ def _extract_structured_with_local_ocr(
                 fallback_circuit=fallback_circuit,
                 fallback_date=fallback_date,
                 fallback_cml_ids=fallback_cml_ids,
+                structured_ocr_engine=ocr_engine,
             )
             if page_results:
                 results.extend(page_results)
@@ -1683,8 +1807,10 @@ def _extract_structured_with_local_ocr(
             for page_idx, xref, segment_name, pix in _iter_candidate_page_segments(doc, candidate_pages):
                 try:
                     segment = Image.open(io.BytesIO(pix.tobytes(output="png"))).convert("RGB")
-                    tokens = _run_structured_ocr_on_image(np.array(segment))
+                    tokens, ocr_engine = _run_structured_ocr_on_image(np.array(segment))
                 except Exception:
+                    continue
+                if not tokens:
                     continue
                 page_results = _extract_structured_rows_from_easyocr_tokens(
                     tokens,
@@ -1692,6 +1818,7 @@ def _extract_structured_with_local_ocr(
                     fallback_circuit=fallback_circuit,
                     fallback_date=fallback_date,
                     fallback_cml_ids=fallback_cml_ids,
+                    structured_ocr_engine=ocr_engine,
                 )
                 if page_results:
                     results.extend(page_results)
@@ -1703,7 +1830,8 @@ def _extract_structured_with_local_ocr(
     # Guard against weak OCR matches: require at least a few row-level readings.
     out = [] if (finalized and len(finalized) < 3) else finalized
     if _cache_key:
-        _STRUCT_OCR_CACHE[_cache_key] = out
+        with _STRUCT_OCR_CACHE_LOCK:
+            _STRUCT_OCR_CACHE[_cache_key] = out
     return out
 
 
@@ -1720,11 +1848,18 @@ def _supplement_with_pdfplumber(
     explicit CML tokens.  pdfplumber-based parsers often recover these rows since
     they work from PDF text rather than rendered images.  We only ADD rows, never
     replace: if OCR already found a zone, the OCR reading is kept.
+
+    Exception: when pdfplumber covers CML bases that OCR missed entirely, the
+    pdfplumber result is used as the authoritative source for those CMLs.
     """
     primary_keys = {(r.circuit_id, r.cml_id) for r in primary_results}
     plumber: List[ExtractedReading] = []
     try:
-        if len(cml_ids) == 1 and _get_summary_page_indices(pdf_path):
+        # For 3+ CMLs use the generic zone table first — it handles multi-CML section
+        # headers with explicit CML values per row more reliably than the Acuren parser.
+        if len(cml_ids) >= 3:
+            plumber = _parse_generic_zone_table(pdf_path, circuit_base, cml_ids, date_str)
+        if not plumber and len(cml_ids) == 1 and _get_summary_page_indices(pdf_path):
             plumber = _parse_ut_report_summary_table(pdf_path, circuit_base, cml_ids, date_str)
         if not plumber:
             plumber = _parse_acuren_results_table(pdf_path, circuit_base, cml_ids, date_str)
@@ -1737,6 +1872,24 @@ def _supplement_with_pdfplumber(
 
     if not plumber:
         return primary_results
+
+    # When pdfplumber covers CML bases that OCR missed entirely, prefer pdfplumber for
+    # those CMLs (OCR misassignment is more damaging than a missed zone).
+    primary_cml_bases = {r.cml_id.split("-", 1)[0] for r in primary_results if "-" in r.cml_id}
+    plumber_cml_bases = {r.cml_id.split("-", 1)[0] for r in plumber if "-" in r.cml_id}
+    ocr_missing_bases = plumber_cml_bases - primary_cml_bases
+    if ocr_missing_bases and len(plumber) >= len(primary_results):
+        # pdfplumber found CML sections that OCR missed — use pdfplumber as the base.
+        # Only supplement with OCR zones whose CML base pdfplumber didn't cover at all
+        # (avoids adding OCR misassignments for CMLs already handled by pdfplumber).
+        plumber_keys = {(r.circuit_id, r.cml_id) for r in plumber}
+        supplemented = list(plumber)
+        for r in primary_results:
+            if (r.circuit_id, r.cml_id) not in plumber_keys:
+                r_base = r.cml_id.split("-", 1)[0] if "-" in r.cml_id else r.cml_id
+                if r_base not in plumber_cml_bases:
+                    supplemented.append(r)
+        return _validate_and_dedupe_before_export(supplemented)
 
     supplemented = list(primary_results)
     for r in plumber:
@@ -1757,7 +1910,7 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
         source_filename: Original filename for display
 
     Returns:
-        List of ExtractedReading (one per CML)
+        List of ExtractedReading (one per zone/CML row; multi-zone reports may return one row per section)
     """
     source_filename = source_filename or str(pdf_path)
     date = ""
@@ -1844,23 +1997,37 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
                 )
                 return _finalize_results(pdf_path, source_filename, merged)
 
-    # Try OCR when: no readings, very little text, or suspicious 0.0-only readings (image-based table)
+    # Try OCR when: no readings, very little text, suspicious 0.0-only readings, or image-heavy report.
+    # Always classify first so _image_heavy_report is available for the late fallback path too.
     _suspicious_readings = all_readings and all(r == 0.0 for r in all_readings)
-    _try_ocr = not all_readings or len(full_text) < 100 or _suspicious_readings
-    _image_heavy_report = _is_image_heavy_report(pdf_path, full_text)
+    _image_heavy_report, _precomputed_candidate_pages = _classify_pdf_for_ocr(pdf_path, full_text)
+    # Include multi-CML + vision candidates so structured OCR (Surya/EasyOCR/Tesseract) runs
+    # even when pdfplumber already found numeric noise — otherwise we skip straight to generic
+    # table / chunk fallback and lose zone-level rows (same PDF differs from OCR Dev).
+    _multi_cml_vision = len(cml_ids) >= 3 and bool(_precomputed_candidate_pages)
+    _try_ocr = (
+        not all_readings
+        or len(full_text) < 100
+        or _suspicious_readings
+        or _image_heavy_report
+        or _multi_cml_vision
+    )
     if _try_ocr:
-        if _image_heavy_report:
+        if _image_heavy_report or _multi_cml_vision:
             structured_local_results = _extract_structured_with_local_ocr(
                 pdf_path,
                 source_filename=source_filename,
                 fallback_circuit=_extract_circuit_base(circuit or "Unknown"),
                 fallback_date=date or "",
                 fallback_cml_ids=cml_ids,
+                candidate_pages=_precomputed_candidate_pages,
             )
             if structured_local_results:
-                return _finalize_results(
-                    pdf_path, source_filename, [replace(r, source_file=source_filename) for r in structured_local_results]
+                _circuit_base = _extract_circuit_base(circuit or "Unknown")
+                merged = _supplement_with_pdfplumber(
+                    pdf_path, _circuit_base, cml_ids, date or "", structured_local_results
                 )
+                return _finalize_results(pdf_path, source_filename, merged)
 
         # OCR fallback order: EasyOCR first (usually more accurate on tables, no external install),
         # then Tesseract. Each engine is called at most once to avoid doubling the OCR time.
@@ -1920,6 +2087,25 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
     circuit_base = _extract_circuit_base(circuit)
     date_str = date or ""
 
+    # Finalized CML list may only appear after filename fallback — retry structured OCR here
+    # so production (API) matches OCR Dev when the early pass had len(cml_ids) < 3.
+    if len(cml_ids) >= 3 and _precomputed_candidate_pages:
+        structured_late = _extract_structured_with_local_ocr(
+            pdf_path,
+            source_filename=source_filename,
+            fallback_circuit=circuit_base,
+            fallback_date=date_str,
+            fallback_cml_ids=cml_ids,
+            candidate_pages=_precomputed_candidate_pages,
+        )
+        if structured_late:
+            _zone_level = any("-" in r.cml_id for r in structured_late)
+            if _zone_level or len(structured_late) > len(cml_ids):
+                merged = _supplement_with_pdfplumber(
+                    pdf_path, circuit_base, cml_ids, date_str, structured_late
+                )
+                return _finalize_results(pdf_path, source_filename, merged)
+
     # When 3+ CMLs, use generic zone table (multi-section format). Else try Acuren first.
     if len(cml_ids) >= 3:
         generic_results = _parse_generic_zone_table(pdf_path, circuit_base, cml_ids, date_str)
@@ -1964,6 +2150,7 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
             fallback_circuit=circuit_base,
             fallback_date=date_str,
             fallback_cml_ids=cml_ids,
+            candidate_pages=_precomputed_candidate_pages,
         )
         if structured_local_results:
             return _finalize_results(

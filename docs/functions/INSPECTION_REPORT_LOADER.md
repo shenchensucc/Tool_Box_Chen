@@ -92,7 +92,7 @@ If table parsing returns no rows, falls back to aggregate logic (min reading per
 
 ## OCR Process Isolation
 
-OCR (EasyOCR, PaddleOCR) runs inside a dedicated **subprocess** managed by a `ProcessPoolExecutor` with `max_workers=1`. This provides hard isolation from the FastAPI server:
+OCR (Surya, EasyOCR, Tesseract) runs inside a dedicated **subprocess** managed by a `ProcessPoolExecutor` with `max_workers=1`. This provides hard isolation from the FastAPI server:
 
 - **Crash safety**: A segfault or OOM inside the OCR worker cannot crash the API server. The main process catches `BrokenProcessPool`, recreates the executor, and returns a retryable error to the user.
 - **Busy rejection**: If an OCR job is already running, new OCR requests are rejected immediately with **HTTP 503** (Service Unavailable) instead of silently queuing. This prevents memory pile-up when users refresh mid-parse.

@@ -149,7 +149,7 @@ def apply_custom_styling():
         /* ------------------------------------------------------------------ */
         html, body, [class*="css"], .stMarkdown, .stText,
         .stTextInput, .stSelectbox, .stMultiSelect,
-        button, label, p, span, div {
+        button, label, p, div {
             font-family: var(--font-ui) !important;
         }
 
@@ -767,4 +767,5 @@ def display_sidebar_navigation():
             st.page_link("pages/5_Dig_Package_Generator.py", label="📦 Dig Package Generator")
 
         with st.expander("🛠️ Development", expanded=False):
-            st.page_link("pages/10_Dig_Package_KPI_Dev.py", label="🧪 Dig Package KPI (dev)") 
+            st.page_link("pages/10_Dig_Package_KPI_Dev.py", label="🧪 Dig Package KPI (dev)")
+            st.page_link("pages/11_OCR_Dev.py", label="🔬 OCR Dev (facility parser)")

@@ -2,7 +2,7 @@
 OCR Worker — runs inside an isolated ProcessPoolExecutor worker process.
 
 WHY A SEPARATE PROCESS:
-  EasyOCR and PaddleOCR load large neural-network models and call into native C/C++
+  EasyOCR and Surya load large neural-network models and call into native C/C++
   extensions.  Any of these can segfault, be OOM-killed by the OS, or crash
   unpredictably — especially when interrupted mid-read (e.g. user refreshes the page).
   Running them in the same process as the FastAPI server means one OCR crash = full
@@ -35,7 +35,7 @@ def init_ocr_worker() -> None:
     """
     ProcessPoolExecutor initializer: called ONCE when the worker process starts.
 
-    By default we do **not** load EasyOCR/Paddle weights here: PyTorch allocates ~400MB+
+    By default we do **not** load EasyOCR/Surya weights here: PyTorch allocates ~400MB+
     RAM at import/init, which fails on low-memory machines and looks like a broken
     backend even though /health and non-OCR APIs are fine.
 
@@ -56,23 +56,10 @@ def init_ocr_worker() -> None:
             )
             return
 
-        from backend.tml.inspection_report_parser import (
-            _get_easyocr_reader,
-            _get_paddleocr_reader,
-        )
+        from backend.tml.inspection_report_parser import _get_easyocr_reader
 
         engine = os.getenv("INSPECTION_REPORT_STRUCTURED_OCR_ENGINE", "auto").strip().lower()
-        preload_paddle = os.getenv("INSPECTION_REPORT_PRELOAD_PADDLE", "").strip().lower() in (
-            "1",
-            "true",
-            "yes",
-        )
-
-        # PaddleOCR pulls in paddle and often prints noisy stderr ("install *.whl") even when
-        # EasyOCR is enough. Preload Paddle only when explicitly requested or engine is paddle-only.
-        if engine == "paddle" or preload_paddle:
-            _get_paddleocr_reader()
-        if engine in ("auto", "easyocr", "paddle"):
+        if engine in ("auto", "easyocr", "tesseract", "surya"):
             _get_easyocr_reader()
 
         _logger.info("[ocr-worker] Models pre-loaded in worker process pid=%d", os.getpid())

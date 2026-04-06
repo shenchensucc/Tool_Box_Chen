@@ -2,7 +2,10 @@ import base64
 import hashlib
 import json
 import math
+import os
 import sys
+import tempfile
+import traceback as _tb
 from pathlib import Path
 
 import httpx
@@ -10,7 +13,11 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as st_components
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+_FRONTEND_DIR = Path(__file__).resolve().parent.parent
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(_FRONTEND_DIR))
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 from frontend_utils import (
     BACKEND_URL,
@@ -445,29 +452,76 @@ def _do_read(
     status_slots: list,
     table_ph,
 ) -> None:
-    """Per-file progress bars (polling every 2 s); time-estimate fills bar between completions."""
+    """Parse PDFs in-process (same stack as OCR Dev). Optional HTTP fallback via env."""
     import concurrent.futures
     import time
-    import traceback as _tb
 
+    use_http = os.getenv("INSPECTION_REPORT_READ_VIA_HTTP", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
     url = f"{BACKEND_URL}/api/tml/inspection-report/read"
     n_files = len(pdf_files)
 
-    # Count pages once (fast, ~50 ms) for time estimation
     page_counts = [_pdf_page_count(pf.getvalue()) for pf in pdf_files]
 
     def _estimate_secs(pages: int) -> float:
-        # Conservative OCR estimate: ~8 s/page + 6 s overhead.
-        # Text-based PDFs finish much faster and the bar just jumps to 100 %.
         return max(14.0, 6.0 + max(pages, 1) * 8.0)
 
-    # Initialise per-file progress bars at 0 %
     for i, pf in enumerate(pdf_files):
         pages = page_counts[i]
         pg_str = f" ({pages} pages)" if pages else ""
-        status_slots[i].progress(0.0, text=f"⏳ **{pf.name}**{pg_str}")
+        mode = "HTTP API" if use_http else "in-process (same as OCR Dev)"
+        status_slots[i].progress(0.0, text=f"⏳ **{pf.name}**{pg_str} — {mode}")
 
-    def _read_one(idx: int, pf):
+    def _read_one_local(idx: int, pf):
+        """Mirror backend /api/tml/inspection-report/read for a single file without HTTP."""
+        from backend.tml.inspection_dataloader import generate_measurements_dataloader
+        from backend.tml.inspection_report_parser import parse_inspection_report_pdf
+
+        tmp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as f:
+                f.write(pf.getvalue())
+                tmp_path = Path(f.name)
+            readings = parse_inspection_report_pdf(tmp_path, pf.name)
+            if not readings:
+                return idx, pf.name, {
+                    "success": False,
+                    "message": "No data extracted from PDFs.",
+                    "summary": [],
+                    "records_count": 0,
+                    "error": "No Circuit, CML, or readings found in uploaded PDFs.",
+                }
+            records_count, summary = generate_measurements_dataloader(
+                readings,
+                circuit_to_equipment={},
+                output_path="",
+                use_placeholder_when_missing=True,
+            )
+            return idx, pf.name, {
+                "success": True,
+                "message": f"Read PDF(s), extracted **{len(summary)}** row(s).",
+                "records_count": records_count,
+                "summary": summary,
+            }
+        except Exception as exc:
+            return idx, pf.name, {
+                "success": False,
+                "message": str(exc),
+                "summary": [],
+                "records_count": 0,
+                "error": f"{type(exc).__name__}: {exc}\n\n```\n{_tb.format_exc()}\n```",
+            }
+        finally:
+            if tmp_path is not None:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    def _read_one_http(idx: int, pf):
         data = pf.getvalue()
         files_payload = [("pdf_files", (pf.name, data, "application/pdf"))]
         with httpx.Client(timeout=360.0) as client:
@@ -481,8 +535,11 @@ def _do_read(
     try:
         max_w = min(n_files, 4)
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_w) as pool:
-            future_map = {pool.submit(_read_one, i, pf): i for i, pf in enumerate(pdf_files)}
-            # Record start time per file index
+            if use_http:
+                future_map = {pool.submit(_read_one_http, i, pf): i for i, pf in enumerate(pdf_files)}
+            else:
+                future_map = {pool.submit(_read_one_local, i, pf): i for i, pf in enumerate(pdf_files)}
+
             start_times: dict = {idx: time.time() for idx in future_map.values()}
 
             pending = set(future_map.keys())
@@ -490,7 +547,6 @@ def _do_read(
                 now = time.time()
                 done_set, pending = concurrent.futures.wait(pending, timeout=2.0)
 
-                # --- update in-flight bars with time-based estimate ---
                 for fut in pending:
                     idx = future_map[fut]
                     elapsed = now - start_times[idx]
@@ -502,43 +558,72 @@ def _do_read(
                         text=f"⏳ **{pf.name}** — {int(elapsed)}s elapsed",
                     )
 
-                # --- process newly-completed futures ---
                 for fut in done_set:
                     orig_idx = future_map[fut]
                     try:
-                        idx, name, resp = fut.result()
+                        idx, name, payload = fut.result()
                         files_finished += 1
 
-                        if resp.status_code == 200:
-                            data = resp.json()
-                            n_cml = len(data.get("summary", []))
-                            elapsed_done = time.time() - start_times[idx]
-                            status_slots[idx].progress(
-                                1.0,
-                                text=f"✅ **{name}** — {n_cml} CML(s) found ({int(elapsed_done)}s)",
-                            )
-                            per_file_results[idx] = data
-
-                            # Live preview table when multiple files
-                            if n_files > 1:
-                                partial: list = []
-                                for j in sorted(per_file_results.keys()):
-                                    partial.extend(per_file_results[j].get("summary", []))
-                                if partial:
-                                    _show_live_extracted_table(
-                                        table_ph,
-                                        partial,
-                                        caption=(
-                                            f"📋 **{len(partial)} CML(s)** from "
-                                            f"{files_finished}/{n_files} files — edit now or wait for all"
-                                        ),
-                                    )
+                        if use_http:
+                            resp = payload
+                            if resp.status_code == 200:
+                                data = resp.json()
+                                n_cml = len(data.get("summary", []))
+                                elapsed_done = time.time() - start_times[idx]
+                                status_slots[idx].progress(
+                                    1.0,
+                                    text=f"✅ **{name}** — {n_cml} row(s) ({int(elapsed_done)}s)",
+                                )
+                                per_file_results[idx] = data
+                                if n_files > 1:
+                                    partial: list = []
+                                    for j in sorted(per_file_results.keys()):
+                                        partial.extend(per_file_results[j].get("summary", []))
+                                    if partial:
+                                        _show_live_extracted_table(
+                                            table_ph,
+                                            partial,
+                                            caption=(
+                                                f"📋 **{len(partial)} row(s)** from "
+                                                f"{files_finished}/{n_files} files — edit now or wait for all"
+                                            ),
+                                        )
+                            else:
+                                status_slots[orig_idx].progress(
+                                    1.0,
+                                    text=f"❌ **{pdf_files[orig_idx].name}** — HTTP {resp.status_code}",
+                                )
+                                per_file_errors[orig_idx] = _format_error(resp, f"{pdf_files[orig_idx].name} failed")
                         else:
-                            status_slots[orig_idx].progress(
-                                1.0,
-                                text=f"❌ **{pdf_files[orig_idx].name}** — read failed (HTTP {resp.status_code})",
-                            )
-                            per_file_errors[orig_idx] = _format_error(resp, f"{pdf_files[orig_idx].name} failed")
+                            data = payload
+                            if data.get("success") and data.get("summary"):
+                                n_cml = len(data.get("summary", []))
+                                elapsed_done = time.time() - start_times[idx]
+                                status_slots[idx].progress(
+                                    1.0,
+                                    text=f"✅ **{name}** — {n_cml} row(s) ({int(elapsed_done)}s)",
+                                )
+                                per_file_results[idx] = data
+                                if n_files > 1:
+                                    partial2: list = []
+                                    for j in sorted(per_file_results.keys()):
+                                        partial2.extend(per_file_results[j].get("summary", []))
+                                    if partial2:
+                                        _show_live_extracted_table(
+                                            table_ph,
+                                            partial2,
+                                            caption=(
+                                                f"📋 **{len(partial2)} row(s)** from "
+                                                f"{files_finished}/{n_files} files — edit now or wait for all"
+                                            ),
+                                        )
+                            else:
+                                status_slots[orig_idx].progress(
+                                    1.0,
+                                    text=f"❌ **{name}** — parse failed",
+                                )
+                                per_file_errors[orig_idx] = data.get("error") or data.get("message", "Parse failed")
+
                     except httpx.TimeoutException:
                         files_finished += 1
                         status_slots[orig_idx].progress(1.0, text=f"❌ **{pdf_files[orig_idx].name}** — timed out")
@@ -551,7 +636,6 @@ def _do_read(
                         files_finished += 1
                         status_slots[orig_idx].progress(1.0, text=f"❌ **{pdf_files[orig_idx].name}** — error")
                         per_file_errors[orig_idx] = f"{type(exc).__name__}: {exc}\n\n```\n{_tb.format_exc()}\n```"
-
 
     except Exception as exc:
         st.session_state.insp_read_error = f"{type(exc).__name__}: {exc}\n\n```\n{_tb.format_exc()}\n```"
@@ -616,7 +700,7 @@ def _render_results_section() -> None:
 
     if success and summary:
         st.success(
-            f"✅ Read **{len(summary)}** CML(s). "
+            f"✅ Read **{len(summary)}** row(s). "
             "Edit the table below, then click **Generate Dataloader from Table**."
         )
 
@@ -898,9 +982,13 @@ with main:
         4. **PDF panel**: fixed to the right edge, 40 % wide — content shifts left, nothing is covered.
            Drag the header to resize. Use × to dismiss; toggle the **📄 PDF Preview** switch to re-open.
 
-        ### OCR notes
-        pdfplumber runs first (fast, text-based PDFs). OCR kicks in only when pdfplumber finds no data.
-        Set `INSPECTION_REPORT_IMAGE_FIRST=1` to force OCR-first for scanned/image PDFs.
+        ### Parsing (same as OCR Dev)
+        **Read Reports** runs the PDF parser **in this Python process** (not the HTTP API), so results
+        match the **OCR Dev** page and your `.env` / `INSPECTION_REPORT_*` variables for Streamlit.
+        Set `INSPECTION_REPORT_READ_VIA_HTTP=1` only if you need the legacy behavior (parse on the backend server).
+
+        OCR notes: pdfplumber runs first where possible; structured OCR (Surya / EasyOCR / Tesseract) is used
+        for image-heavy or multi-CML summaries. Set `INSPECTION_REPORT_IMAGE_FIRST=1` to force OCR-first.
         """)
 
     st.caption("Inspection Report Loader | Chen's Engineer Toolbox")
