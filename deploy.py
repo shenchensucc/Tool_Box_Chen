@@ -22,7 +22,9 @@ if not TOKEN:
 
 import httpx
 
-url = "https://space.ai-builders.com/backend/v1/deployments"
+# AI Builders Space API — base URL from platform (same as MCP user-ai-builders-coach get_base_url)
+_api_base = os.getenv("AI_BUILDERS_BASE_URL", "https://space.ai-builders.com/backend").rstrip("/")
+url = f"{_api_base}/v1/deployments"
 payload = {
     "repo_url": "https://github.com/shenchensucc/Tool_Box_Chen",
     "service_name": "tool-box-chen",
@@ -44,7 +46,7 @@ if resp.status_code == 202:
     print(f"Service: {data.get('service_name', 'tool-box-chen')}")
     print(f"URL: https://tool-box-chen.ai-builders.space")
     print("\nProvisioning takes 5-10 minutes. Check status at:")
-    print("https://space.ai-builders.com/backend/v1/deployments/tool-box-chen")
+    print(f"{_api_base}/v1/deployments/tool-box-chen")
     if data.get("streaming_logs"):
         print("\n--- Build logs ---")
         print(data["streaming_logs"])
