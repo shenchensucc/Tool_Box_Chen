@@ -21,6 +21,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from frontend_utils import (
     BACKEND_URL,
+    _st_html,
     apply_custom_styling,
     check_backend_health,
     display_header,
@@ -47,6 +48,8 @@ main = get_layout_main()
 _PANEL_WIDTH_VW  = 40          # percent of viewport width
 _PANEL_STYLE_ID  = "insp-pdf-panel-style"
 _PANEL_DATA_ATTR = "data-insp-pdf-panel"
+# Bump when `_insp_pdf_floating_panel_html` script changes (invalidates session cache).
+_PANEL_HTML_VER  = 2
 
 
 def _insp_pdf_floating_panel_html(panel_id: str, pdfjs_base: str,
@@ -279,13 +282,14 @@ def _insp_pdf_floating_panel_html(panel_id: str, pdfjs_base: str,
   zRst.onclick = function() {{ curScale = baseScale*1.3; updZ(); if (pdfCache[activeIdx]) renderDoc(pdfCache[activeIdx], false); }};
   updZ();
 
-  /* ══════════════════ DRAG-TO-RESIZE (drag zoom bar) ══════════════════ */
-  var dragging = false, startX = 0, startW = 0;
-  zoomBar.addEventListener('mousedown', function(e) {{
-    dragging = true; startX = e.clientX; startW = panel.getBoundingClientRect().width;
-    function onMove(e) {{
-      if (!dragging) return;
-      var newW = Math.max(280, startW - (e.clientX - startX));
+  /* ══════════════════ DRAG-TO-RESIZE (zoom bar + PDF area left edge) ══════════════════ */
+  var RESIZE_EDGE_PX = 14;
+  function beginPanelResize(e) {{
+    if (e.button !== 0) return;
+    e.preventDefault();
+    var startX = e.clientX, startW = panel.getBoundingClientRect().width;
+    function onMove(ev) {{
+      var newW = Math.max(280, startW - (ev.clientX - startX));
       var pct  = Math.round((newW / window.parent.innerWidth) * 100);
       panel.style.width = pct + 'vw';
       var st2 = P.getElementById({repr(_PANEL_STYLE_ID)});
@@ -294,9 +298,28 @@ def _insp_pdf_floating_panel_html(panel_id: str, pdfjs_base: str,
         'div[data-testid="stAppViewBlockContainer"] {{' +
         'max-width:none !important;padding-right:calc(' + pct + 'vw + 28px) !important;box-sizing:border-box !important;}}';
     }}
+    function onUp() {{
+      P.removeEventListener('mousemove', onMove);
+      P.removeEventListener('mouseup', onUp);
+      wrap.style.cursor = '';
+    }}
     P.addEventListener('mousemove', onMove);
-    P.addEventListener('mouseup', function() {{ dragging=false; P.removeEventListener('mousemove', onMove); }}, {{once:true}});
+    P.addEventListener('mouseup', onUp);
+  }}
+  zoomBar.addEventListener('mousedown', function(e) {{
+    if (e.target.closest && e.target.closest('button')) return;
+    beginPanelResize(e);
   }});
+  wrap.addEventListener('mousedown', function(e) {{
+    var pl = panel.getBoundingClientRect().left;
+    if (e.clientX - pl > RESIZE_EDGE_PX) return;
+    beginPanelResize(e);
+  }});
+  wrap.addEventListener('mousemove', function(e) {{
+    var pl = panel.getBoundingClientRect().left;
+    wrap.style.cursor = (e.clientX - pl <= RESIZE_EDGE_PX) ? 'ew-resize' : '';
+  }});
+  wrap.addEventListener('mouseleave', function() {{ wrap.style.cursor = ''; }});
 
   /* ══════════════════ CLOSE ══════════════════ */
   closeBtn.onclick = function() {{
@@ -339,8 +362,8 @@ def _render_pdf_floating_panel(pdf_files, sel_idx: int) -> None:
 
     combined_fp = "|".join(fp_parts)
     panel_id = "insp-pdf-" + hashlib.md5(combined_fp.encode(), usedforsecurity=False).hexdigest()[:12]
-    html_key = f"insp_pdf_float_{panel_id}"
-    done_key = f"insp_pdf_done_{panel_id}"
+    html_key = f"insp_pdf_float_{panel_id}_v{_PANEL_HTML_VER}"
+    done_key = f"insp_pdf_done_{panel_id}_v{_PANEL_HTML_VER}"
 
     if html_key not in st.session_state:
         st.session_state[html_key] = _insp_pdf_floating_panel_html(
@@ -410,10 +433,174 @@ _LIVE_EDITOR_KEY = "insp_live_editor"
 _EDITOR_COL_CONFIG = {
     "Circuit":      st.column_config.TextColumn("Circuit",            width="medium"),
     "CML":          st.column_config.TextColumn("CML",                width="small"),
-    "Min Reading":  st.column_config.NumberColumn("Min Reading (in)", format="%.4f", width="small"),
+    "Min Reading":  st.column_config.NumberColumn("Min Reading (in)", format="%.3f", width="small"),
     "Date":         st.column_config.TextColumn("Date (YYYY-MM-DD)", width="medium"),
     "Equipment ID": st.column_config.TextColumn("Equipment ID",       width="large"),
 }
+
+# First *data* column after Streamlit’s row-selection checkboxes (we cannot merge into those cells).
+# Header + default cell value use fullwidth plus (＋) as the “operations” affordance.
+_INSP_ACTION_COL = "＋"
+_INSP_ACTION_IDLE = "＋"
+_INSP_ACTION_OPTIONS = (
+    _INSP_ACTION_IDLE,
+    "Insert above",
+    "Insert below",
+    "Delete row",
+)
+_INSP_ACTION_COMMANDS = frozenset({"Insert above", "Insert below", "Delete row"})
+
+_RESULT_EDITOR_COL_CONFIG = {
+    _INSP_ACTION_COL: st.column_config.SelectboxColumn(
+        None,
+        help="Row operations: **single-click** the cell to open the menu (insert above/below or delete). Default **＋** means no action.",
+        options=list(_INSP_ACTION_OPTIONS),
+        width=52,
+        pinned=True,
+        default=_INSP_ACTION_IDLE,
+        required=False,
+    ),
+    **_EDITOR_COL_CONFIG,
+}
+
+
+def _inject_insp_action_column_style() -> None:
+    """Narrow the action lane, match checkbox column background, and single-click → open ＋ cell editor."""
+    css = """
+    <style>
+    /* Columns 1–2: row checkbox + action (＋) — same lane styling */
+    div[data-testid="stDataFrame"] [role="row"] > [role="gridcell"]:nth-child(1),
+    div[data-testid="stDataFrame"] [role="row"] > [role="gridcell"]:nth-child(2),
+    div[data-testid="stDataFrame"] [role="row"] > [role="columnheader"]:nth-child(1),
+    div[data-testid="stDataFrame"] [role="row"] > [role="columnheader"]:nth-child(2),
+    div[data-testid="stDataEditor"] [role="row"] > [role="gridcell"]:nth-child(1),
+    div[data-testid="stDataEditor"] [role="row"] > [role="gridcell"]:nth-child(2),
+    div[data-testid="stDataEditor"] [role="row"] > [role="columnheader"]:nth-child(1),
+    div[data-testid="stDataEditor"] [role="row"] > [role="columnheader"]:nth-child(2) {
+        min-width: 48px !important;
+        max-width: 72px !important;
+        background-color: rgba(0, 0, 0, 0.03) !important;
+    }
+    html[data-toolbox-theme="dark"] div[data-testid="stDataFrame"] [role="row"] > [role="gridcell"]:nth-child(1),
+    html[data-toolbox-theme="dark"] div[data-testid="stDataFrame"] [role="row"] > [role="gridcell"]:nth-child(2),
+    html[data-toolbox-theme="dark"] div[data-testid="stDataFrame"] [role="row"] > [role="columnheader"]:nth-child(1),
+    html[data-toolbox-theme="dark"] div[data-testid="stDataFrame"] [role="row"] > [role="columnheader"]:nth-child(2),
+    html[data-toolbox-theme="dark"] div[data-testid="stDataEditor"] [role="row"] > [role="gridcell"]:nth-child(1),
+    html[data-toolbox-theme="dark"] div[data-testid="stDataEditor"] [role="row"] > [role="gridcell"]:nth-child(2),
+    html[data-toolbox-theme="dark"] div[data-testid="stDataEditor"] [role="row"] > [role="columnheader"]:nth-child(1),
+    html[data-toolbox-theme="dark"] div[data-testid="stDataEditor"] [role="row"] > [role="columnheader"]:nth-child(2) {
+        background-color: rgba(255, 255, 255, 0.06) !important;
+    }
+    </style>
+    """
+    # Glide Data Grid opens overlays on double-click; synthesize dblclick for the pinned ＋ column on single click.
+    js = """
+    <script>
+    (function () {
+      var MARKER = "[data-insp-plus-editor]";
+      var ROW_MARKER_MAX = 58;
+      var PLUS_COL_RIGHT = 128;
+      var HEADER_SKIP = 42;
+
+      function findEditorAfterMarker() {
+        var m = document.querySelector(MARKER);
+        if (!m) return null;
+        var w = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+        var found = false;
+        var node;
+        while ((node = w.nextNode())) {
+          if (node === m) { found = true; continue; }
+          if (!found) continue;
+          if (node.getAttribute && node.getAttribute("data-testid") === "stDataEditor") return node;
+        }
+        return null;
+      }
+
+      function install(root) {
+        if (!root || root.dataset.inspPlusClickInstalled) return;
+        root.dataset.inspPlusClickInstalled = "1";
+        root.addEventListener(
+          "click",
+          function (ev) {
+            var t = ev.target;
+            if (!t || t.tagName !== "CANVAS") return;
+            if (!root.contains(t)) return;
+            var r = t.getBoundingClientRect();
+            var x = ev.clientX - r.left;
+            var y = ev.clientY - r.top;
+            if (y < HEADER_SKIP) return;
+            if (x < ROW_MARKER_MAX || x >= PLUS_COL_RIGHT) return;
+            requestAnimationFrame(function () {
+              t.dispatchEvent(
+                new MouseEvent("dblclick", {
+                  bubbles: true,
+                  cancelable: true,
+                  view: window,
+                  detail: 2,
+                  clientX: ev.clientX,
+                  clientY: ev.clientY,
+                  screenX: ev.screenX,
+                  screenY: ev.screenY,
+                  button: ev.button,
+                  buttons: ev.buttons,
+                })
+              );
+            });
+          },
+          true
+        );
+      }
+
+      function tryInstall() {
+        var ed = findEditorAfterMarker();
+        if (ed) install(ed);
+      }
+
+      tryInstall();
+      var obs = new MutationObserver(tryInstall);
+      obs.observe(document.body, { childList: true, subtree: true });
+    })();
+    </script>
+    """
+    _st_html(css + js, allow_js=True)
+
+
+def _insp_df_with_actions(buf: pd.DataFrame) -> pd.DataFrame:
+    """Prepend ＋ action column immediately after the grid’s checkbox column."""
+    out = buf.copy()
+    out.insert(0, _INSP_ACTION_COL, [_INSP_ACTION_IDLE] * len(out))
+    return out
+
+
+def _insp_apply_row_action(edited: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
+    """
+    Apply the first real command in the ＋ column (not the default ＋ idle). Returns (data only, changed).
+    """
+    if edited.empty or _INSP_ACTION_COL not in edited.columns:
+        return edited, False
+    data_cols = [c for c in edited.columns if c != _INSP_ACTION_COL]
+    if not data_cols:
+        return edited, False
+    for i in range(len(edited)):
+        raw = edited.iloc[i][_INSP_ACTION_COL]
+        if pd.isna(raw):
+            continue
+        act = str(raw).strip()
+        if act not in _INSP_ACTION_COMMANDS:
+            continue
+        data = edited[data_cols].copy()
+        if act == "Delete row":
+            new_data = data.drop(index=i).reset_index(drop=True)
+        elif act == "Insert above":
+            blank = pd.DataFrame([{c: None for c in data_cols}])
+            new_data = pd.concat([data.iloc[:i], blank, data.iloc[i:]], ignore_index=True)
+        elif act == "Insert below":
+            blank = pd.DataFrame([{c: None for c in data_cols}])
+            new_data = pd.concat([data.iloc[: i + 1], blank, data.iloc[i + 1 :]], ignore_index=True)
+        else:
+            new_data = data
+        return new_data, True
+    return edited, False
 
 
 def _show_live_extracted_table(slot, summary: list, *, caption: str) -> None:
@@ -440,7 +627,7 @@ def _show_live_extracted_table(slot, summary: list, *, caption: str) -> None:
         st.caption(caption)
         st.data_editor(
             df_new,
-            use_container_width=True,
+            width="stretch",
             num_rows="dynamic",
             key=_LIVE_EDITOR_KEY,
             column_config=_EDITOR_COL_CONFIG,
@@ -737,80 +924,55 @@ def _render_results_section() -> None:
             st.session_state.pop(_LIVE_EDITOR_KEY, None)
 
         st.markdown("##### Extracted Readings")
-
-        # ── Insert-row controls (compact row above the table) ──────────────────
-        # Keep a version counter so bumping it changes editor_key → data_editor
-        # re-initialises from the new buf_key that contains the inserted row.
-        ver = int(st.session_state.get("insp_df_ver", 0))
-        cur = st.session_state[buf_key]
-        n_rows = len(cur)
-
-        ins_c1, ins_c2, ins_c3 = st.columns([3, 1, 4])
-        with ins_c1:
-            ins_before = st.number_input(
-                "Insert blank row before row #",
-                min_value=1,
-                max_value=n_rows + 1,
-                value=1,
-                key=f"insp_ins_pos_{result_id}",
-                label_visibility="collapsed",
-                help="Row number to insert before (1 = very top, last = append at end).",
-            )
-        with ins_c2:
-            ins_btn = st.button(
-                "＋ Insert",
-                key=f"insp_ins_btn_{result_id}",
-                help=f"Insert a blank row before row {ins_before}.",
-                use_container_width=True,
-            )
-        with ins_c3:
-            st.caption(
-                f"↑ Insert blank row at a position (1–{n_rows + 1}). "
-                "Use the **＋** at the table bottom to append."
-            )
-
-        # ── Data editor ────────────────────────────────────────────────────────
-        # KEY FIX (Streamlit issue #7749): pass the stable buf_key base and do NOT
-        # write edited_df back to buf_key on normal reruns.  The data_editor tracks
-        # user edits internally via editor_key.  Only update buf_key on Insert so
-        # the new row is included in the next re-initialisation.
-        editor_key = f"insp_data_editor_{result_id}_v{ver}"
-        edited_df = st.data_editor(
-            st.session_state[buf_key],   # stable base — never overwritten during normal editing
-            use_container_width=True,
-            num_rows="dynamic",
-            key=editor_key,
-            column_config=_EDITOR_COL_CONFIG,
+        st.caption(
+            "**＋ column** (next to checkboxes): **single-click** the cell to open the menu and pick **Insert above**, **Insert below**, or **Delete row** "
+            "(default **＋** means no action). **Toolbar:** multi-select + trash · search · download · fullscreen. "
+            "**Bottom:** **＋** appends a row."
         )
 
-        if ins_btn:
-            # Capture the current editor state (includes user cell-edits) as the new base,
-            # inject the blank row at the chosen position, bump version → fresh editor.
-            idx = min(max(int(ins_before) - 1, 0), len(edited_df))
-            empty_row = pd.DataFrame([{c: None for c in edited_df.columns}])
-            new_base = pd.concat(
-                [edited_df.iloc[:idx], empty_row, edited_df.iloc[idx:]],
-                ignore_index=True,
-            )
+        # ── Data editor ────────────────────────────────────────────────────────
+        ver = int(st.session_state.get("insp_df_ver", 0))
+        display_df = _insp_df_with_actions(st.session_state[buf_key])
+        st.markdown(
+            '<div data-insp-plus-editor="1" style="position:absolute;width:0;height:0;overflow:hidden;clip:rect(0,0,0,0);" aria-hidden="true"></div>',
+            unsafe_allow_html=True,
+        )
+        _inject_insp_action_column_style()
+        editor_key = f"insp_data_editor_{result_id}_v{ver}"
+        edited_df = st.data_editor(
+            display_df,
+            width="stretch",
+            num_rows="dynamic",
+            key=editor_key,
+            column_order=list(display_df.columns),
+            column_config=_RESULT_EDITOR_COL_CONFIG,
+        )
+
+        new_base, did_structure = _insp_apply_row_action(edited_df)
+        if did_structure:
             st.session_state[buf_key] = new_base
             st.session_state["insp_df_ver"] = ver + 1
             try:
                 st.rerun(scope="fragment")
             except TypeError:
                 st.rerun()
+        else:
+            # Toolbar row delete, bottom +, and cell edits — keep working copy in sync (no ＋ column in buf).
+            st.session_state[buf_key] = edited_df.drop(
+                columns=[_INSP_ACTION_COL], errors="ignore"
+            ).copy()
 
         gen_from_table_btn = st.button(
             "📊 Generate Dataloader from Table",
             type="primary",
-            use_container_width=True,
+            width="stretch",
             key="insp_gen_from_table",
             help="Build APM dataloader Excel from the edited table above.",
         )
 
         if gen_from_table_btn:
-            # Use edited_df (data_editor return value) — it contains all user edits
-            # including any made during this fragment run, even without an explicit sync.
-            rows_payload = _sanitize_rows_for_json(edited_df)
+            gen_df = edited_df.drop(columns=[_INSP_ACTION_COL], errors="ignore")
+            rows_payload = _sanitize_rows_for_json(gen_df)
             with st.spinner("⏳ Building dataloader from table…"):
                 try:
                     url = f"{BACKEND_URL}/api/tml/inspection-report/generate-from-table"
@@ -934,7 +1096,7 @@ with main:
             type="primary",
             disabled=not pdf_files or _btn_busy,
             key="insp_read",
-            use_container_width=True,
+            width="stretch",
             help="Parse the uploaded PDFs and refresh the table below.",
         )
 

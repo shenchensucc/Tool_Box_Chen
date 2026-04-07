@@ -884,7 +884,7 @@ def render_feature_map(
         height=450,
         use_opacity_overlay=filter_by_source,
     )
-    st.plotly_chart(fig, use_container_width=True, config=_FEATURE_MAP_PLOTLY_CONFIG)
+    st.plotly_chart(fig, width="stretch", config=_FEATURE_MAP_PLOTLY_CONFIG)
 
     combined_contexts = _selected_joint_contexts(selected_sources)
     if combined_contexts:
@@ -929,7 +929,7 @@ def render_feature_map(
         title=f"3D Pipeline View — {joint_count or '≤3'} Joint(s) | NPS {nps} (OD {pipe_od_mm:.1f} mm)",
         max_joints=3,
     )
-    st.plotly_chart(fig_3d, use_container_width=True)
+    st.plotly_chart(fig_3d, width="stretch")
 
     if len(all_sources) >= 2:
         st.markdown("---")
@@ -949,7 +949,7 @@ def render_feature_map(
             fig_breakdown.update_layout(title=f"Source: {src} ({count} features)")
             st.plotly_chart(
                 fig_breakdown,
-                use_container_width=True,
+                width="stretch",
                 config=_FEATURE_MAP_PLOTLY_CONFIG,
             )
             src_context = joint_context_by_source.get(src)
@@ -1483,7 +1483,7 @@ def _render_ili_paste_mode() -> None:
     }
     edited_df = st.data_editor(
         st.session_state.ili_pasted_df,
-        use_container_width=True,
+        width="stretch",
         num_rows="dynamic",
         key="ili_paste_editor",
         hide_index=True,

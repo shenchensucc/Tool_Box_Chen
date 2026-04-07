@@ -1,3 +1,4 @@
+import inspect
 import os
 import re
 import textwrap
@@ -107,16 +108,160 @@ def fu_key(page: str, role: str) -> str:
     return f"fu_{page}_{role}"
 
 
+def _st_html(body: str, *, allow_js: bool = False) -> None:
+    """Inject HTML via ``st.html``; pass ``allow_js=True`` so theme scripts run (Streamlit strips JS by default)."""
+    html_fn = getattr(st, "html", None)
+    if html_fn is None:
+        st.markdown(body, unsafe_allow_html=True)
+        return
+    if allow_js:
+        try:
+            sig = inspect.signature(html_fn)
+            if "unsafe_allow_javascript" in sig.parameters:
+                html_fn(body, unsafe_allow_javascript=True)
+                return
+        except (TypeError, ValueError):
+            pass
+    html_fn(body)
+
+
 def apply_custom_styling():
-    """Apply custom CSS styling — Industrial-Precision design system (see DESIGN.md)."""
+    """Apply custom CSS styling — Industrial-Precision design system (see DESIGN.md).
+
+    Light/dark is toggled in the sidebar via plain HTML/JS (``localStorage`` +
+    ``data-toolbox-theme`` on ``<html>``) so the app does **not** rerun and
+    widget state (uploads, inputs) is preserved. Default is explicit **light**
+    (see repo ``.streamlit/config.toml`` ``base = "light"`` for Streamlit chrome).
+    """
     # Use st.html (not st.markdown) so <style> is injected as real CSS. Streamlit's markdown
     # path can strip <style> and leave the rules as visible text; then stSidebarNav never hides.
     _custom_theme_css = textwrap.dedent("""
+        <script>
+        /* Streamlit injects theme CSS after our &lt;style&gt; block; cascade often blocks
+           var(--color-bg) on the shell. We set backgrounds via JS with setProperty(..., "important")
+           and re-run after hydration (stApp mounts async). Toggle calls __toolboxApplyShellTheme(). */
+        (function () {
+            var K = "toolbox-theme";
+            var doc = window.top.document;
+            var root = doc.documentElement;
+            function readStored() {
+                var v = null;
+                try { v = window.top.localStorage.getItem(K); } catch (e) {}
+                if (v !== "dark" && v !== "light") { v = "light"; }
+                return v;
+            }
+            function setText(el, c) {
+                if (!el || !el.style) return;
+                el.style.setProperty("color", c, "important");
+                el.style.setProperty("-webkit-text-fill-color", c, "important");
+            }
+            function applyShell() {
+                var dark = root.getAttribute("data-toolbox-theme") === "dark";
+                var bg = dark ? "#0F172A" : "#F8FAFC";
+                var sbg = dark ? "#0B1220" : "#1E293B";
+                /* Sidebar label text: always light on dark sidebar (Streamlit theme forces dark gray otherwise). */
+                var sText = "#E8EDF5";
+                var sMuted = "#94A3B8";
+                var shellSelectors = [
+                    "html", "body", ".stApp", '[data-testid="stAppViewContainer"]',
+                    '[data-testid="stAppViewContainer"] > section',
+                    '[data-testid="stHeader"]', '[data-testid="stToolbar"]',
+                    '[data-testid="stMain"]', "section.main", ".main"
+                ];
+                shellSelectors.forEach(function (sel) {
+                    try {
+                        doc.querySelectorAll(sel).forEach(function (el) {
+                            el.style.setProperty("background-color", bg, "important");
+                        });
+                    } catch (e) {}
+                });
+                try {
+                    doc.querySelectorAll('[data-testid="stSidebar"]').forEach(function (el) {
+                        el.style.setProperty("background-color", sbg, "important");
+                    });
+                } catch (e) {}
+                try {
+                    doc.querySelectorAll(".main .block-container").forEach(function (el) {
+                        el.style.setProperty("background-color", "transparent", "important");
+                    });
+                } catch (e) {}
+                /* --- Typography: Streamlit injects theme text colors after our CSS --- */
+                try {
+                    doc.querySelectorAll('[data-testid="stSidebar"] *').forEach(function (el) {
+                        var tag = (el.tagName || "").toUpperCase();
+                        if (tag === "SCRIPT" || tag === "STYLE" || tag === "SVG" || tag === "PATH") return;
+                        if (el.closest && el.closest("button.toolbox-theme-toggle-btn")) return;
+                        var muted = el.getAttribute && el.getAttribute("data-testid") === "stCaption";
+                        setText(el, muted ? sMuted : sText);
+                    });
+                    doc.querySelectorAll(
+                        '[data-testid="stSidebar"] .streamlit-expanderHeader, ' +
+                        '[data-testid="stSidebar"] [data-testid="stExpander"] summary'
+                    ).forEach(function (el) {
+                        setText(el, sText);
+                        el.style.setProperty("background-color", "rgba(255,255,255,0.07)", "important");
+                        el.style.setProperty("color", sText, "important");
+                    });
+                    doc.querySelectorAll('[data-testid="stSidebar"] .streamlit-expanderContent').forEach(function (el) {
+                        el.style.setProperty("background-color", "rgba(0,0,0,0.2)", "important");
+                    });
+                } catch (e) {}
+                var headC = dark ? "#F8FAFC" : "#0F172A";
+                var bodyC = dark ? "#CBD5E1" : "#475569";
+                var mutedC = dark ? "#94A3B8" : "#64748B";
+                var linkC = dark ? "#38BDF8" : "#0369A1";
+                try {
+                    doc.querySelectorAll(
+                        '.main h1, .main h2, .main h3, .main h4, .main h5, .main h6, ' +
+                        '[data-testid="stMain"] h1, [data-testid="stMain"] h2, [data-testid="stMain"] h3, ' +
+                        '[data-testid="stMain"] h4, [data-testid="stMain"] h5, [data-testid="stMain"] h6'
+                    ).forEach(function (el) {
+                        setText(el, headC);
+                    });
+                    doc.querySelectorAll(
+                        '.main p, .main li, .main td, .main th, .main label, ' +
+                        '[data-testid="stMain"] p, [data-testid="stMain"] li, [data-testid="stMain"] td, [data-testid="stMain"] th, ' +
+                        '[data-testid="stMain"] label, ' +
+                        '[data-testid="stMarkdownContainer"] p, [data-testid="stMarkdownContainer"] li, ' +
+                        '[data-testid="stMarkdownContainer"] td, [data-testid="stMarkdownContainer"] th'
+                    ).forEach(function (el) {
+                        if (el.closest && (el.closest("button") || el.closest('[role="button"]'))) return;
+                        setText(el, bodyC);
+                    });
+                    doc.querySelectorAll(
+                        '.main [data-testid="stCaption"], [data-testid="stMain"] [data-testid="stCaption"], .main small'
+                    ).forEach(function (el) {
+                        if (el.closest && !el.closest(".main") && !el.closest('[data-testid="stMain"]')) return;
+                        setText(el, mutedC);
+                    });
+                    doc.querySelectorAll('[data-testid="stMetricLabel"]').forEach(function (el) {
+                        if (el.closest && !el.closest(".main") && !el.closest('[data-testid="stMain"]')) return;
+                        setText(el, mutedC);
+                    });
+                    doc.querySelectorAll('[data-testid="stMetricValue"]').forEach(function (el) {
+                        if (el.closest && !el.closest(".main") && !el.closest('[data-testid="stMain"]')) return;
+                        setText(el, headC);
+                    });
+                    doc.querySelectorAll('.main a, [data-testid="stMain"] a').forEach(function (el) {
+                        if (el.closest && el.closest('[data-testid="stSidebar"]')) return;
+                        setText(el, linkC);
+                    });
+                } catch (e) {}
+            }
+            root.setAttribute("data-toolbox-theme", readStored());
+            applyShell();
+            window.top.__toolboxApplyShellTheme = applyShell;
+            [0, 50, 100, 200, 400, 800, 1500, 3000].forEach(function (ms) {
+                window.top.setTimeout(applyShell, ms);
+            });
+        })();
+        </script>
         <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
         <style>
         /* ------------------------------------------------------------------ */
         /* Design tokens (DESIGN.md)                                           */
         /* ------------------------------------------------------------------ */
+        html { color-scheme: light; }
         :root {
             --color-primary:        #0F3460;
             --color-primary-hover:  #1A4A7A;
@@ -170,7 +315,28 @@ def apply_custom_styling():
         /* ------------------------------------------------------------------ */
         /* Main layout                                                          */
         /* ------------------------------------------------------------------ */
-        .main { padding: 1.5rem 2rem; background-color: var(--color-bg); }
+        /*
+         * Streamlit's theme (config.toml base=light) paints stAppViewContainer /
+         * header with solid colors. Without !important + these selectors, toggling
+         * --color-bg on <html> never visibly changes the page background.
+         */
+        html, body {
+            background-color: var(--color-bg) !important;
+        }
+        .stApp,
+        [data-testid="stAppViewContainer"],
+        [data-testid="stAppViewContainer"] > section,
+        [data-testid="stHeader"],
+        [data-testid="stToolbar"] {
+            background-color: var(--color-bg) !important;
+        }
+        .main {
+            padding: 1.5rem 2rem;
+            background-color: var(--color-bg) !important;
+        }
+        .main .block-container {
+            background-color: transparent !important;
+        }
 
         /* Replace thick hr separators with precise 1px rules */
         hr {
@@ -199,7 +365,8 @@ def apply_custom_styling():
             padding-bottom: 4px;
             margin-bottom: 6px;
         }
-        [data-testid="stSidebarNav"] { display: none; }
+        /* Belt-and-suspenders if config is missing; primary fix: client.showSidebarNavigation in config.toml */
+        [data-testid="stSidebarNav"] { display: none !important; }
 
         /* ------------------------------------------------------------------ */
         /* Buttons                                                              */
@@ -452,13 +619,126 @@ def apply_custom_styling():
             color: var(--color-text-muted) !important;
         }
 
+        /* Sidebar theme toggle (plain HTML button — no Streamlit rerun) */
+        .toolbox-theme-toggle-wrap {
+            display: flex;
+            justify-content: center;
+            margin: 0 0 0.65rem 0;
+        }
+        button.toolbox-theme-toggle-btn {
+            font-size: 1.35rem !important;
+            line-height: 1 !important;
+            padding: 0.4rem 0.65rem !important;
+            border-radius: var(--radius-md) !important;
+            border: 1px solid rgba(255, 255, 255, 0.22) !important;
+            background: rgba(255, 255, 255, 0.1) !important;
+            cursor: pointer !important;
+            font-family: var(--font-ui) !important;
+            transition: background var(--transition), border-color var(--transition) !important;
+        }
+        button.toolbox-theme-toggle-btn:hover {
+            background: rgba(255, 255, 255, 0.16) !important;
+            border-color: rgba(255, 255, 255, 0.35) !important;
+        }
+
+        /* Dark palette — activated only when JS sets data-toolbox-theme="dark" on <html> */
+        html[data-toolbox-theme="dark"] {
+            color-scheme: dark;
+            --color-primary:        #38BDF8;
+            --color-primary-hover:  #7DD3FC;
+            --color-accent:         #FBBF24;
+            --color-accent-hover:   #F59E0B;
+            --color-bg:             #0F172A;
+            --color-surface:        #1E293B;
+            --color-surface-raised: #334155;
+            --color-border:         #334155;
+            --color-border-strong:  #475569;
+            --color-text-primary:   #F8FAFC;
+            --color-text-secondary: #CBD5E1;
+            --color-text-muted:     #94A3B8;
+            --color-success:        #34D399;
+            --color-warning:        #FBBF24;
+            --color-error:          #F87171;
+            --color-info:           #38BDF8;
+            --color-sidebar-bg:     #0B1220;
+            --color-sidebar-text:   #F1F5F9;
+        }
+        html[data-toolbox-theme="dark"] .stTextInput input:focus,
+        html[data-toolbox-theme="dark"] .stNumberInput input:focus,
+        html[data-toolbox-theme="dark"] .stTextArea textarea:focus {
+            box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.22) !important;
+        }
+        html[data-toolbox-theme="dark"] [data-testid="stFileUploader"]:hover {
+            background: rgba(56, 189, 248, 0.06) !important;
+        }
+        html[data-toolbox-theme="dark"] .stButton button[kind="secondary"]:hover {
+            background: rgba(56, 189, 248, 0.12) !important;
+            box-shadow: 0 2px 6px rgba(56, 189, 248, 0.15) !important;
+        }
+        html[data-toolbox-theme="dark"] [data-testid="stInfo"] {
+            background: rgba(56, 189, 248, 0.12) !important;
+        }
+        html[data-toolbox-theme="dark"] [data-testid="stSuccess"] {
+            background: rgba(52, 211, 153, 0.12) !important;
+        }
+        html[data-toolbox-theme="dark"] [data-testid="stWarning"] {
+            background: rgba(251, 191, 36, 0.12) !important;
+        }
+        html[data-toolbox-theme="dark"] [data-testid="stError"] {
+            background: rgba(248, 113, 113, 0.12) !important;
+        }
+
         </style>
         """).strip()
-    inject = getattr(st, "html", None)
-    if inject is not None:
-        inject(_custom_theme_css)
-    else:
-        st.markdown(_custom_theme_css, unsafe_allow_html=True)
+
+    _st_html(_custom_theme_css, allow_js=True)
+
+
+_THEME_TOGGLE_HTML = textwrap.dedent("""
+    <div class="toolbox-theme-toggle-wrap">
+        <button type="button" class="toolbox-theme-toggle-btn" id="toolbox-theme-toggle"
+                title="Toggle dark mode" aria-label="Toggle light or dark mode">🌙</button>
+    </div>
+    <script>
+    (function () {
+        var k = "toolbox-theme";
+        var doc = window.top.document;
+        var root = doc.documentElement;
+        var btn = document.getElementById("toolbox-theme-toggle");
+        if (!btn) return;
+        function cur() {
+            return root.getAttribute("data-toolbox-theme") === "dark" ? "dark" : "light";
+        }
+        function applyFromStorage() {
+            var v = null;
+            try { v = window.top.localStorage.getItem(k); } catch (e) {}
+            if (v !== "dark" && v !== "light") { v = "light"; }
+            root.setAttribute("data-toolbox-theme", v);
+        }
+        function syncUi() {
+            var d = cur() === "dark";
+            btn.textContent = d ? "☀️" : "🌙";
+            btn.title = d ? "Switch to light mode" : "Switch to dark mode";
+            btn.setAttribute("aria-label", d ? "Switch to light mode" : "Switch to dark mode");
+        }
+        applyFromStorage();
+        if (window.top.__toolboxApplyShellTheme) { window.top.__toolboxApplyShellTheme(); }
+        syncUi();
+        btn.addEventListener("click", function () {
+            var next = cur() === "dark" ? "light" : "dark";
+            root.setAttribute("data-toolbox-theme", next);
+            try { window.top.localStorage.setItem(k, next); } catch (e) {}
+            if (window.top.__toolboxApplyShellTheme) { window.top.__toolboxApplyShellTheme(); }
+            syncUi();
+        });
+    })();
+    </script>
+    """).strip()
+
+
+def _inject_theme_toggle_sidebar():
+    """Sidebar theme control: no Streamlit widget → no script rerun; state in localStorage."""
+    _st_html(_THEME_TOGGLE_HTML, allow_js=True)
 
 
 def set_page_config(page_title: str, page_icon: str = "🔧", layout: str = "wide"):
@@ -748,6 +1028,8 @@ def get_layout_with_chat():
 def display_sidebar_navigation():
     """Display custom sidebar navigation with expandable sections"""
     with st.sidebar:
+        _inject_theme_toggle_sidebar()
+
         st.page_link("Home.py", label="🏠 Home")
         st.page_link("pages/1_Dashboard.py", label="📊 Dashboard")
         st.page_link("pages/9_Skills_Overview.py", label="🧠 Skills Overview")

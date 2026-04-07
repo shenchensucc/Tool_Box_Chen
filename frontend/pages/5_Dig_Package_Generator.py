@@ -514,7 +514,7 @@ way to prove: MDL parse → ILI match → Excel population → ZIP download.
                         "Status": f"⚠️ Skipped: {item.get('reason', '')}",
                     })
 
-                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+                st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
             col_stat1, col_stat2, col_stat3 = st.columns(3)
             col_stat1.metric("Generated", len(generated))

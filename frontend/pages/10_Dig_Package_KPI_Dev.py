@@ -109,7 +109,7 @@ with main:
             }
         )
     st.markdown("### By section")
-    st.dataframe(pd.DataFrame(sec_rows), use_container_width=True, hide_index=True, height=min(420, 48 + 36 * len(sec_rows)))
+    st.dataframe(pd.DataFrame(sec_rows), width="stretch", hide_index=True, height=min(420, 48 + 36 * len(sec_rows)))
 
     # --- Filters + full table ---
     st.markdown("### All KPI parameters")
@@ -135,7 +135,7 @@ with main:
     df = df[[c for c in cols if c in df.columns]]
 
     h = min(720, 80 + min(len(filtered), 40) * 35)
-    st.dataframe(df, use_container_width=True, hide_index=True, height=h)
+    st.dataframe(df, width="stretch", hide_index=True, height=h)
 
     # --- Manual mark ---
     st.markdown("### Manual mark")

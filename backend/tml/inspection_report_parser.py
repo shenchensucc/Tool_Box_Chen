@@ -985,7 +985,7 @@ _OCR_GRID_PAGE = re.compile(
 )
 
 
-def _extract_with_ocr(pdf_path: Path) -> Tuple[str, List[float], List[str], str]:
+def _extract_with_ocr(pdf_path: Path) -> Tuple[str, List[float], List[str], str, str]:
     """Fallback: render PDF pages to images and run Tesseract OCR.
     Skips grid-scan pages *before* rendering to avoid wasting time on large detailed-scan pages.
     Only runs dual-PSM when explicitly enabled via INSPECTION_REPORT_OCR_MULTI_PSM=1."""
@@ -1047,21 +1047,21 @@ def _extract_with_ocr(pdf_path: Path) -> Tuple[str, List[float], List[str], str]
     circuit = _extract_circuit_from_text(full_text)
     cml_ids = _extract_cml_ids_from_text(full_text)
 
-    return date or "", all_readings, cml_ids, circuit or ""
+    return date or "", all_readings, cml_ids, circuit or "", full_text
 
 
-def _extract_with_easyocr(pdf_path: Path) -> Tuple[str, List[float], List[str], str]:
+def _extract_with_easyocr(pdf_path: Path) -> Tuple[str, List[float], List[str], str, str]:
     """EasyOCR extraction — skips grid-scan pages before rendering to cut CPU time significantly."""
     try:
         import io
         import numpy as np
         from PIL import Image
     except ImportError:
-        return "", [], [], ""
+        return "", [], [], "", ""
 
     reader = _get_easyocr_reader()
     if reader is None:
-        return "", [], [], ""
+        return "", [], [], "", ""
     doc = pymupdf.open(pdf_path)
     full_text = ""
     all_readings = []
@@ -1106,7 +1106,7 @@ def _extract_with_easyocr(pdf_path: Path) -> Tuple[str, List[float], List[str], 
     date = _extract_date_from_text(full_text)
     circuit = _extract_circuit_from_text(full_text)
     cml_ids = _extract_cml_ids_from_text(full_text)
-    return date or "", all_readings, cml_ids, circuit or ""
+    return date or "", all_readings, cml_ids, circuit or "", full_text
 
 
 def _classify_pdf_for_ocr(
@@ -1835,6 +1835,102 @@ def _extract_structured_with_local_ocr(
     return out
 
 
+def ocr_dev_collect_ocr_text_preview(
+    pdf_path: Path,
+    *,
+    include_legacy_tesseract: bool = True,
+    include_legacy_easyocr: bool = True,
+    include_structured_snippets: bool = True,
+    max_structured_segments: int = 12,
+) -> dict[str, str]:
+    """
+    OCR Dev only: return raw OCR text samples for debugging (no pdfplumber).
+
+    Re-runs full-page and/or structured OCR — can duplicate work already done by
+    ``parse_inspection_report_pdf``. Respects current ``INSPECTION_REPORT_*`` env
+    (e.g. STRUCTURED_OCR_ENGINE, HIGH_DPI).
+    """
+    out: dict[str, str] = {
+        "legacy_tesseract": "",
+        "legacy_easyocr": "",
+        "structured": "",
+    }
+
+    if include_legacy_tesseract:
+        if not _is_tesseract_available():
+            out["legacy_tesseract"] = "(Tesseract not installed or not on PATH.)"
+        else:
+            try:
+                _d, _r, _c, _ci, t_full = _extract_with_ocr(pdf_path)
+                out["legacy_tesseract"] = t_full.strip() or "(empty — no text extracted)"
+            except Exception as exc:
+                out["legacy_tesseract"] = f"(error: {exc})"
+
+    if include_legacy_easyocr:
+        try:
+            _d, _r, _c, _ci, e_full = _extract_with_easyocr(pdf_path)
+            out["legacy_easyocr"] = e_full.strip() or "(empty — no text extracted)"
+        except Exception as exc:
+            out["legacy_easyocr"] = f"(error: {exc})"
+
+    if include_structured_snippets:
+        try:
+            import io
+
+            import numpy as np
+            from PIL import Image
+        except ImportError as exc:
+            out["structured"] = f"(import error: {exc})"
+            return out
+
+        chunks: List[str] = []
+        _, candidate_pages = _classify_pdf_for_ocr(pdf_path, "", max_pages=6)
+        if not candidate_pages:
+            out["structured"] = "(no candidate pages from classification)"
+            return out
+
+        doc = pymupdf.open(pdf_path)
+        n = 0
+        try:
+            for page_idx, _xref, segment_name, segment in _iter_candidate_image_segments(
+                doc, candidate_pages
+            ):
+                if n >= max_structured_segments:
+                    break
+                try:
+                    tokens, eng = _run_structured_ocr_on_image(np.array(segment))
+                    line = " ".join(str(t.get("text", "")) for t in (tokens or []))
+                    chunks.append(
+                        f"--- embedded p{page_idx + 1} {segment_name} [{eng or 'none'}] ---\n{line.strip()}\n"
+                    )
+                except Exception as exc:
+                    chunks.append(f"--- segment error p{page_idx + 1} ---\n{exc}\n")
+                n += 1
+
+            if n < max_structured_segments:
+                for page_idx, _name, _segname, pix in _iter_candidate_page_segments(
+                    doc, candidate_pages, dpi=300
+                ):
+                    if n >= max_structured_segments:
+                        break
+                    try:
+                        segment = Image.open(io.BytesIO(pix.tobytes(output="png"))).convert("RGB")
+                        tokens, eng = _run_structured_ocr_on_image(np.array(segment))
+                        line = " ".join(str(t.get("text", "")) for t in (tokens or []))
+                        chunks.append(
+                            f"--- full page render p{page_idx + 1} [{eng or 'none'}] ---\n{line.strip()}\n"
+                        )
+                    except Exception as exc:
+                        chunks.append(f"--- page render error p{page_idx + 1} ---\n{exc}\n")
+                    n += 1
+        finally:
+            doc.close()
+
+        out["structured"] = "\n".join(chunks).strip() or "(empty structured OCR)"
+
+    return out
+
+
 def _supplement_with_pdfplumber(
     pdf_path: Path,
     circuit_base: str,
@@ -1899,7 +1995,12 @@ def _supplement_with_pdfplumber(
     return _validate_and_dedupe_before_export(supplemented)
 
 
-def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> List[ExtractedReading]:
+def parse_inspection_report_pdf(
+    pdf_path: Path,
+    source_filename: str = "",
+    *,
+    skip_pdfplumber: bool = False,
+) -> List[ExtractedReading]:
     """
     Parse a single UT inspection report PDF.
 
@@ -1908,6 +2009,8 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
     Args:
         pdf_path: Path to the PDF file
         source_filename: Original filename for display
+        skip_pdfplumber: If True, do not use pdfplumber for text/tables/supplements/table parsers.
+            Intended for OCR Dev / speed tests (OCR + filename metadata only).
 
     Returns:
         List of ExtractedReading (one per zone/CML row; multi-zone reports may return one row per section)
@@ -1922,34 +2025,35 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
     readings_from_tables = []
     readings_from_text = []
 
-    def _extract_full_text_local(path: Path) -> str:
-        text = ""
-        try:
-            with pdfplumber.open(path) as _pdf:
-                for _page in _pdf.pages:
-                    _t = _page.extract_text()
-                    if _t:
-                        text += _t + "\n"
-        except Exception:
-            pass
-        return text
+    if not skip_pdfplumber:
+        def _extract_full_text_local(path: Path) -> str:
+            text = ""
+            try:
+                with pdfplumber.open(path) as _pdf:
+                    for _page in _pdf.pages:
+                        _t = _page.extract_text()
+                        if _t:
+                            text += _t + "\n"
+            except Exception:
+                pass
+            return text
 
-    with ThreadPoolExecutor(max_workers=3) as _pp_pool:
-        _f_text   = _pp_pool.submit(_extract_full_text_local, pdf_path)
-        _f_tables = _pp_pool.submit(_extract_readings_from_tables, pdf_path)
-        _f_txtrd  = _pp_pool.submit(_extract_readings_from_text, pdf_path)
-        try:
-            full_text = _f_text.result()
-        except Exception:
-            full_text = ""
-        try:
-            readings_from_tables = _f_tables.result()
-        except Exception:
-            readings_from_tables = []
-        try:
-            readings_from_text = _f_txtrd.result()
-        except Exception:
-            readings_from_text = []
+        with ThreadPoolExecutor(max_workers=3) as _pp_pool:
+            _f_text = _pp_pool.submit(_extract_full_text_local, pdf_path)
+            _f_tables = _pp_pool.submit(_extract_readings_from_tables, pdf_path)
+            _f_txtrd = _pp_pool.submit(_extract_readings_from_text, pdf_path)
+            try:
+                full_text = _f_text.result()
+            except Exception:
+                full_text = ""
+            try:
+                readings_from_tables = _f_tables.result()
+            except Exception:
+                readings_from_tables = []
+            try:
+                readings_from_text = _f_txtrd.result()
+            except Exception:
+                readings_from_text = []
 
     # Combine readings (prefer table extraction, fallback to text)
     all_readings = readings_from_tables if readings_from_tables else readings_from_text
@@ -1987,13 +2091,29 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
                 if found & expected:
                     # Supplement OCR results with pdfplumber for any zones OCR missed
                     # (e.g. zone 1 rows that appear very close to the header in the image).
-                    merged = _supplement_with_pdfplumber(
-                        pdf_path, _extract_circuit_base(circuit or "Unknown"), cml_ids, date or "", image_first_results
+                    merged = (
+                        image_first_results
+                        if skip_pdfplumber
+                        else _supplement_with_pdfplumber(
+                            pdf_path,
+                            _extract_circuit_base(circuit or "Unknown"),
+                            cml_ids,
+                            date or "",
+                            image_first_results,
+                        )
                     )
                     return _finalize_results(pdf_path, source_filename, merged)
             elif len(image_first_results) >= 3:
-                merged = _supplement_with_pdfplumber(
-                    pdf_path, _extract_circuit_base(circuit or "Unknown"), cml_ids, date or "", image_first_results
+                merged = (
+                    image_first_results
+                    if skip_pdfplumber
+                    else _supplement_with_pdfplumber(
+                        pdf_path,
+                        _extract_circuit_base(circuit or "Unknown"),
+                        cml_ids,
+                        date or "",
+                        image_first_results,
+                    )
                 )
                 return _finalize_results(pdf_path, source_filename, merged)
 
@@ -2012,6 +2132,8 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
         or _image_heavy_report
         or _multi_cml_vision
     )
+    # Aggregate fallback below defaults extraction_method to pdfplumber; set when legacy OCR supplied readings.
+    legacy_ocr_filled_readings = False
     if _try_ocr:
         if _image_heavy_report or _multi_cml_vision:
             structured_local_results = _extract_structured_with_local_ocr(
@@ -2024,8 +2146,12 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
             )
             if structured_local_results:
                 _circuit_base = _extract_circuit_base(circuit or "Unknown")
-                merged = _supplement_with_pdfplumber(
-                    pdf_path, _circuit_base, cml_ids, date or "", structured_local_results
+                merged = (
+                    structured_local_results
+                    if skip_pdfplumber
+                    else _supplement_with_pdfplumber(
+                        pdf_path, _circuit_base, cml_ids, date or "", structured_local_results
+                    )
                 )
                 return _finalize_results(pdf_path, source_filename, merged)
 
@@ -2034,7 +2160,7 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
         ocr_date, ocr_readings, ocr_cml_ids, ocr_circuit = "", [], [], ""
         if os.getenv("INSPECTION_REPORT_OCR_ENGINE") != "tesseract":
             try:
-                e_date, e_readings, e_cmls, e_circuit = _extract_with_easyocr(pdf_path)
+                e_date, e_readings, e_cmls, e_circuit, _e_txt = _extract_with_easyocr(pdf_path)
                 if e_readings:
                     ocr_date, ocr_readings, ocr_cml_ids, ocr_circuit = e_date, e_readings, e_cmls, e_circuit
             except Exception:
@@ -2042,7 +2168,7 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
         # Try Tesseract only when EasyOCR found nothing or insufficient readings
         if len(ocr_readings) < 4:
             try:
-                t_date, t_readings, t_cmls, t_circuit = _extract_with_ocr(pdf_path)
+                t_date, t_readings, t_cmls, t_circuit, _t_txt = _extract_with_ocr(pdf_path)
                 if len(t_readings) > len(ocr_readings):
                     ocr_date, ocr_readings, ocr_cml_ids, ocr_circuit = t_date, t_readings, t_cmls, t_circuit
             except Exception as e:
@@ -2051,6 +2177,7 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
                 )
         if ocr_readings:
             all_readings = ocr_readings
+            legacy_ocr_filled_readings = True
         if ocr_date:
             date = ocr_date
         if ocr_cml_ids:
@@ -2101,46 +2228,51 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
         if structured_late:
             _zone_level = any("-" in r.cml_id for r in structured_late)
             if _zone_level or len(structured_late) > len(cml_ids):
-                merged = _supplement_with_pdfplumber(
-                    pdf_path, circuit_base, cml_ids, date_str, structured_late
+                merged = (
+                    structured_late
+                    if skip_pdfplumber
+                    else _supplement_with_pdfplumber(
+                        pdf_path, circuit_base, cml_ids, date_str, structured_late
+                    )
                 )
                 return _finalize_results(pdf_path, source_filename, merged)
 
     # When 3+ CMLs, use generic zone table (multi-section format). Else try Acuren first.
-    if len(cml_ids) >= 3:
-        generic_results = _parse_generic_zone_table(pdf_path, circuit_base, cml_ids, date_str)
-        if generic_results:
-            return _finalize_results(pdf_path, source_filename, generic_results)
+    if not skip_pdfplumber:
+        if len(cml_ids) >= 3:
+            generic_results = _parse_generic_zone_table(pdf_path, circuit_base, cml_ids, date_str)
+            if generic_results:
+                return _finalize_results(pdf_path, source_filename, generic_results)
 
-    # Single CML with UT REPORT - TEE/ELBOW summary page: use dedicated summary table parser
-    if len(cml_ids) == 1 and _get_summary_page_indices(pdf_path):
-        ut_summary_results = _parse_ut_report_summary_table(pdf_path, circuit_base, cml_ids, date_str)
-        if ut_summary_results:
-            ut_summary_results = _dedupe_by_cml_keep_min(ut_summary_results)
-            ut_summary_results = _validate_and_dedupe_before_export(ut_summary_results)
-            return _finalize_results(pdf_path, source_filename, ut_summary_results)
+        # Single CML with UT REPORT - TEE/ELBOW summary page: use dedicated summary table parser
+        if len(cml_ids) == 1 and _get_summary_page_indices(pdf_path):
+            ut_summary_results = _parse_ut_report_summary_table(pdf_path, circuit_base, cml_ids, date_str)
+            if ut_summary_results:
+                ut_summary_results = _dedupe_by_cml_keep_min(ut_summary_results)
+                ut_summary_results = _validate_and_dedupe_before_export(ut_summary_results)
+                return _finalize_results(pdf_path, source_filename, ut_summary_results)
 
-    acuren_results = _parse_acuren_results_table(pdf_path, circuit_base, cml_ids, date_str)
-    if acuren_results:
-        # For single CML: also try permissive parser (catches tables without diameter column)
-        if len(cml_ids) == 1:
-            permissive = _parse_single_cml_permissive(pdf_path, circuit_base, cml_ids[0], date_str)
-            if len(permissive) > len(acuren_results):
-                acuren_results = permissive
-        acuren_results = _dedupe_by_cml_keep_min(acuren_results)
-        acuren_results = _validate_and_dedupe_before_export(acuren_results)
-        return _finalize_results(pdf_path, source_filename, acuren_results)
-    if len(cml_ids) < 3:
-        generic_results = _parse_generic_zone_table(pdf_path, circuit_base, cml_ids, date_str)
-        if generic_results:
-            # For single CML: try permissive if generic found few
-            if len(cml_ids) == 1 and len(generic_results) < 5:
+        acuren_results = _parse_acuren_results_table(pdf_path, circuit_base, cml_ids, date_str)
+        if acuren_results:
+            # For single CML: also try permissive parser (catches tables without diameter column)
+            if len(cml_ids) == 1:
                 permissive = _parse_single_cml_permissive(pdf_path, circuit_base, cml_ids[0], date_str)
-                if len(permissive) > len(generic_results):
-                    generic_results = permissive
-            generic_results = _dedupe_by_cml_keep_min(generic_results)
-            generic_results = _validate_and_dedupe_before_export(generic_results)
-            return _finalize_results(pdf_path, source_filename, generic_results)
+                if len(permissive) > len(acuren_results):
+                    acuren_results = permissive
+            acuren_results = _dedupe_by_cml_keep_min(acuren_results)
+            acuren_results = _validate_and_dedupe_before_export(acuren_results)
+            return _finalize_results(pdf_path, source_filename, acuren_results)
+        if len(cml_ids) < 3:
+            generic_results = _parse_generic_zone_table(pdf_path, circuit_base, cml_ids, date_str)
+            if generic_results:
+                # For single CML: try permissive if generic found few
+                if len(cml_ids) == 1 and len(generic_results) < 5:
+                    permissive = _parse_single_cml_permissive(pdf_path, circuit_base, cml_ids[0], date_str)
+                    if len(permissive) > len(generic_results):
+                        generic_results = permissive
+                generic_results = _dedupe_by_cml_keep_min(generic_results)
+                generic_results = _validate_and_dedupe_before_export(generic_results)
+                return _finalize_results(pdf_path, source_filename, generic_results)
 
     # Image-based reports often lose table structure with OCR — retry structured local OCR.
     if _image_heavy_report:
@@ -2226,6 +2358,11 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
             return _finalize_results(pdf_path, source_filename, _validate_and_dedupe_before_export(ocr_results))
 
     # Fallback: aggregate readings by CML (min per CML)
+    _agg_method = (
+        "ocr"
+        if (skip_pdfplumber or legacy_ocr_filled_readings)
+        else "pdfplumber"
+    )
     if len(cml_ids) == 1:
         min_reading = min(all_readings) if all_readings else 0.0
         cml_id = cml_ids[0]
@@ -2240,6 +2377,7 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
                 min_reading=min_reading,
                 all_readings=all_readings,
                 source_file=source_filename,
+                extraction_method=_agg_method,
             )
         )
     else:
@@ -2263,6 +2401,7 @@ def parse_inspection_report_pdf(pdf_path: Path, source_filename: str = "") -> Li
                     min_reading=min_reading,
                     all_readings=subset or all_readings,
                     source_file=source_filename,
+                    extraction_method=_agg_method,
                 )
             )
 

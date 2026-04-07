@@ -4,7 +4,8 @@
 # Core Web Framework
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
-streamlit>=1.39.0
+# >=1.52: st.html(..., unsafe_allow_javascript=True) for theme toggle without st.rerun()
+streamlit>=1.52.0
 
 # Data Processing
 pandas>=2.2.3
@@ -12,6 +13,9 @@ numpy>=1.26.0
 openpyxl>=3.1.5
 
 # API & Network
+# requests: explicit pin so transitive deps don't pull chardet 7.x (requests 2.32 requires chardet < 6 when chardet is installed)
+requests>=2.32.0,<3
+chardet>=3.0.2,<6
 httpx>=0.27.2
 openai>=1.0.0
 pydantic>=2.9.2
@@ -32,6 +36,9 @@ pdfplumber>=0.11.0
 pymupdf>=1.24.0
 pytesseract>=0.3.10
 Pillow>=10.0.0
+# surya-ocr pulls torch from PyPI (often CPU-only). For NVIDIA GPU on Windows/Linux, install CUDA wheels AFTER deps:
+#   pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cu128
+# (surya-ocr needs torch>=2.7; cu124 index only ships torch<=2.6 — use cu128 or newer.) Then optional: INSPECTION_REPORT_OCR_GPU=1
 surya-ocr>=0.6.0  # Fast document OCR (~1-2s/page CPU); primary engine in auto mode
 transformers>=4.56.1,<5  # surya-ocr: transformers 5.x breaks init (SuryaDecoderConfig.pad_token_id); see surya#484
 easyocr>=1.7.0  # Better table OCR; fallback when surya is unavailable

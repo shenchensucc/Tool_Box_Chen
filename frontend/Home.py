@@ -32,7 +32,7 @@ with main:
                     <h1 style="margin:0; font-size:2.5rem; letter-spacing:-0.03em;">
                         Chen's Engineer Toolbox
                     </h1>
-                    <p style="margin:0.25rem 0 0 0; font-size:1rem; color:#475569;">
+                    <p style="margin:0.25rem 0 0 0; font-size:1rem; color:var(--color-text-secondary);">
                         Pipeline &amp; facility integrity tools — ILI analysis, dig packages, metal loss assessment
                     </p>
                 </div>
@@ -48,16 +48,16 @@ with main:
     # System status strip
     # -----------------------------------------------------------------------
     backend_status = check_backend_health()
-    status_color = "#059669" if backend_status else "#DC2626"
+    status_color = "var(--color-success)" if backend_status else "var(--color-error)"
     status_dot = "●" if backend_status else "○"
     status_label = "Backend API online" if backend_status else "Backend API offline"
     st.markdown(
         f"""
         <div style="display:flex; align-items:center; gap:0.5rem; padding:0.6rem 1rem;
-                    background:#F1F5F9; border:1px solid #E2E8F0; border-radius:6px;
+                    background:var(--color-surface-raised); border:1px solid var(--color-border); border-radius:6px;
                     margin-bottom:1.5rem; font-size:0.875rem; font-weight:500;">
             <span style="color:{status_color}; font-size:1rem;">{status_dot}</span>
-            <span style="color:#475569;">{status_label}</span>
+            <span style="color:var(--color-text-secondary);">{status_label}</span>
         </div>
         """,
         unsafe_allow_html=True,
@@ -71,7 +71,7 @@ with main:
     # -----------------------------------------------------------------------
     st.markdown(
         "<p style='font-size:0.7rem; font-weight:600; text-transform:uppercase; "
-        "letter-spacing:0.1em; color:#94A3B8; margin-bottom:0.75rem;'>AVAILABLE TOOLS</p>",
+        "letter-spacing:0.1em; color:var(--color-text-muted); margin-bottom:0.75rem;'>AVAILABLE TOOLS</p>",
         unsafe_allow_html=True,
     )
 
@@ -128,15 +128,15 @@ with main:
         with cols[i % 3]:
             st.markdown(
                 f"""
-                <div style="background:#FFFFFF; border:1px solid #E2E8F0;
-                            border-left:3px solid #0F3460;
+                <div style="background:var(--color-surface); border:1px solid var(--color-border);
+                            border-left:3px solid var(--color-primary);
                             border-radius:6px; padding:1rem 1.1rem;
                             margin-bottom:0.75rem;
                             transition:box-shadow 0.15s;">
                     <div style="font-size:1.3rem; margin-bottom:0.4rem;">{tool['icon']}</div>
-                    <div style="font-weight:600; font-size:0.95rem; color:#0F172A;
+                    <div style="font-weight:600; font-size:0.95rem; color:var(--color-text-primary);
                                 margin-bottom:0.25rem;">{tool['title']}</div>
-                    <div style="font-size:0.82rem; color:#64748B; line-height:1.45;">{tool['desc']}</div>
+                    <div style="font-size:0.82rem; color:var(--color-text-secondary); line-height:1.45;">{tool['desc']}</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -154,7 +154,7 @@ with main:
     st.markdown(
         """
         <div style="display:flex; justify-content:space-between; align-items:center;
-                    color:#94A3B8; font-size:0.8rem; padding:0.5rem 0 1rem 0;">
+                    color:var(--color-text-muted); font-size:0.8rem; padding:0.5rem 0 1rem 0;">
             <span>Chen's Engineer Toolbox v0.1.0</span>
             <span style="font-family:'JetBrains Mono',monospace;">
                 Streamlit · FastAPI · Python 3.11
