@@ -206,6 +206,23 @@ def _build_feature_map_figure(
     joint_context_by_source = scatter_data.get("joint_context_by_source", {})
 
     fig = go.Figure()
+
+    nde_x_bounds: Optional[tuple[float, float]] = None
+    nde_reg = scatter_data.get("nde_region") if scatter_data else None
+    if nde_reg and nde_reg.get("x0") is not None and nde_reg.get("x1") is not None:
+        nx0 = float(nde_reg["x0"])
+        nx1 = float(nde_reg["x1"])
+        if nx0 > nx1:
+            nx0, nx1 = nx1, nx0
+        nde_x_bounds = (nx0, nx1)
+        fig.add_vrect(
+            x0=nx0,
+            x1=nx1,
+            fillcolor="rgba(100, 100, 100, 0.22)",
+            layer="below",
+            line_width=0,
+        )
+
     # Draw deselected first (lower layer), then selected (on top) for clearer overlap
     for layer_alpha, layer_features in [
         (0.2, [f for f in plot_features if not _is_selected(f)]),
@@ -236,6 +253,16 @@ def _build_feature_map_figure(
     for gw in girth_list:
         a = _alpha(gw)
         fig.add_vline(x=gw.get("chainage"), line_color=f"rgba(220,20,60,{a})", line_width=2.5)
+
+    if nde_x_bounds is not None:
+        nxa, nxb = nde_x_bounds
+        for xv in (nxa, nxb):
+            fig.add_vline(
+                x=xv,
+                line_width=2,
+                line_dash="dash",
+                line_color="rgba(45, 45, 45, 0.9)",
+            )
 
     def _feature_xaxis_range() -> Optional[tuple[float, float]]:
         """Defect boxes only: chainage ± half length."""
@@ -279,8 +306,18 @@ def _build_feature_map_figure(
         pad = max(span * 0.05, 0.3)
         return (lo - pad, hi + pad)
 
+    def _merge_nde_into_x_range(rng: Optional[tuple[float, float]]) -> Optional[tuple[float, float]]:
+        if nde_x_bounds is None:
+            return rng
+        nx0, nx1 = nde_x_bounds
+        pad = max(abs(nx1 - nx0) * 0.1, 0.25)
+        if rng is None:
+            return (nx0 - pad, nx1 + pad)
+        lo, hi = rng
+        return (min(lo, nx0 - pad), max(hi, nx1 + pad))
+
     # Default x view for initial render and Plotly "Reset axes" (needs fixed range + autorange off).
-    x_range_choice = (
+    x_range_choice = _merge_nde_into_x_range(
         _feature_xaxis_range()
         or _feature_centers_xaxis_range()
         or _scatter_xaxis_range()
@@ -327,6 +364,24 @@ def _build_feature_map_figure(
             hoverinfo="text",
         )
     )
+
+    if nde_x_bounds is not None:
+        fig.add_trace(
+            go.Scatter(
+                x=[float("nan")],
+                y=[float("nan")],
+                mode="markers",
+                marker=dict(
+                    size=12,
+                    color="rgba(100, 100, 100, 0.45)",
+                    symbol="square",
+                    line=dict(color="rgb(75, 75, 75)", width=1),
+                ),
+                name="NDE Area",
+                showlegend=True,
+                hoverinfo="skip",
+            )
+        )
 
     annotations = [
         dict(
@@ -394,6 +449,47 @@ def _build_feature_map_figure(
             )
         )
 
+    if nde_x_bounds is not None:
+        nxa, nxb = nde_x_bounds
+        x_mid_nde = (nxa + nxb) / 2.0
+        ann_y_title = min(y_max_plot, 11.15) if y_max_plot > y_min_plot else 6.0
+        annotations.append(
+            dict(
+                x=x_mid_nde,
+                y=ann_y_title,
+                xref="x",
+                yref="y",
+                text="NDE Area",
+                showarrow=False,
+                font=dict(size=10, color="rgb(38, 38, 38)"),
+                bgcolor="rgba(220, 220, 220, 0.88)",
+                bordercolor="rgba(95, 95, 95, 0.5)",
+                borderwidth=1,
+                borderpad=4,
+                xanchor="center",
+                yanchor="middle",
+            )
+        )
+        ann_y_dist = (
+            y_min_plot + 0.22 * (y_max_plot - y_min_plot) if y_max_plot > y_min_plot else 2.0
+        )
+        for i, xv in enumerate((nxa, nxb)):
+            is_left = i == 0
+            annotations.append(
+                dict(
+                    x=xv,
+                    y=ann_y_dist,
+                    xref="x",
+                    yref="y",
+                    text=f"{xv:.3f} m",
+                    showarrow=False,
+                    font=dict(size=9, color="rgb(42, 42, 42)"),
+                    xanchor="right" if is_left else "left",
+                    xshift=-8 if is_left else 8,
+                    yanchor="middle",
+                )
+            )
+
     x_axis_title = _get_x_axis_title(x_column)
     xaxis_kwargs = dict(
         showgrid=True,
@@ -413,6 +509,20 @@ def _build_feature_map_figure(
     _y_orient_tickvals = list(range(0, 14))
     _y_orient_ticktext = [f"{h:02d}:00" for h in range(0, 13)] + ["12:60"]
 
+    layout_extras = {}
+    if nde_x_bounds is not None:
+        layout_extras["showlegend"] = True
+        layout_extras["legend"] = dict(
+            x=1.02,
+            y=0.80,
+            xanchor="left",
+            yanchor="top",
+            bgcolor="rgba(255,255,255,0.92)",
+            bordercolor="rgba(0,0,0,0.18)",
+            borderwidth=1,
+            font=dict(size=10),
+        )
+
     fig.update_layout(
         title=title,
         xaxis_title=x_axis_title,
@@ -423,6 +533,7 @@ def _build_feature_map_figure(
         template="plotly_white",
         plot_bgcolor="white",
         xaxis=xaxis_kwargs,
+        **layout_extras,
         yaxis=dict(
             showgrid=True,
             gridcolor="rgba(0,0,0,0.2)",

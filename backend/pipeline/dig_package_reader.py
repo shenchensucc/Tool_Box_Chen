@@ -117,6 +117,138 @@ def _make_unique_headers(headers: List[str]) -> List[str]:
     return unique_headers
 
 
+def _parse_float_for_nde(val: Any) -> Optional[float]:
+    """Parse a numeric cell value for NDE distance rows (metres)."""
+    if val is None or (isinstance(val, str) and not _normalize_text(val)):
+        return None
+    if isinstance(val, bool):
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    try:
+        return float(_normalize_text(str(val)).replace(",", ""))
+    except (ValueError, TypeError):
+        return None
+
+
+def _row_label_and_value(ws, row_idx: int, max_col: int) -> Tuple[str, Optional[float]]:
+    """
+    Typical layout: label text in column A (or A+B), numeric value in the next non-empty cell.
+    Returns (lowercased label text, first numeric value that appears after at least one text cell).
+    """
+    label_parts: List[str] = []
+    for col_idx in range(1, max_col + 1):
+        raw = _get_effective_cell_value(ws, row_idx, col_idx)
+        if raw is None:
+            continue
+        s = _normalize_text(raw)
+        if not s:
+            continue
+        num = _parse_float_for_nde(raw)
+        looks_numeric = num is not None and (
+            isinstance(raw, (int, float))
+            or (isinstance(raw, str) and not any(c.isalpha() for c in s.replace("e", "").replace("E", "")))
+        )
+        if looks_numeric and label_parts:
+            return " ".join(label_parts).lower(), num
+        if looks_numeric and not label_parts:
+            continue
+        label_parts.append(s)
+    return " ".join(label_parts).lower(), None
+
+
+def parse_nde_limits_section(ws) -> Optional[Dict[str, Any]]:
+    """
+    Locate an \"NDE Limits\" title row and read TGW-relative assessment strip.
+
+    Expected labels (case-insensitive, flexible spacing):
+    - NDE Assessment Length (m)
+    - NDE Assessment Start from TGW (m)
+    - NDE Assessment End from TGW (m)
+
+    Optional: Target Girth Weld (U/S) with GWD number in an adjacent cell.
+
+    Returns dict with assessment_length_m, start_from_tgw_m, end_from_tgw_m, target_gwd_number (optional),
+    or None if start/end from TGW are missing.
+    """
+    max_scan = min(ws.max_row, 500)
+    anchor_row: Optional[int] = None
+    for row_idx in range(1, max_scan + 1):
+        for col_idx in range(1, 6):
+            cell = _get_effective_cell_value(ws, row_idx, col_idx)
+            t = _normalize_text(cell).lower()
+            if not t:
+                continue
+            if all(kw in t for kw in ("nde", "limit")):
+                anchor_row = row_idx
+                break
+        if anchor_row is not None:
+            break
+    if anchor_row is None:
+        return None
+
+    max_col = min(ws.max_column or 20, 25)
+    out: Dict[str, Any] = {}
+    stop_keywords = (
+        "feature summary",
+        "joint summary",
+        "ili feature summary",
+    )
+
+    for row_idx in range(anchor_row + 1, min(anchor_row + 50, ws.max_row + 1)):
+        label, value = _row_label_and_value(ws, row_idx, max_col)
+        if not label:
+            continue
+        if any(sk in label for sk in stop_keywords):
+            break
+
+        if "target" in label and "girth" in label and "weld" in label:
+            if value is not None:
+                try:
+                    gwd = int(round(float(value)))
+                    if 100 < gwd < 99999:
+                        out["target_gwd_number"] = gwd
+                except (TypeError, ValueError):
+                    pass
+            continue
+
+        # D/S NDE columns — not used for TGW-referenced grey band
+        if "from d/s" in label or "from ds " in label or "d/s gw" in label:
+            continue
+
+        if "nde assessment length" in label:
+            if value is not None:
+                out["assessment_length_m"] = value
+        elif "nde assessment start" in label and "tgw" in label:
+            if value is not None:
+                out["start_from_tgw_m"] = value
+        elif "nde assessment end" in label and "tgw" in label:
+            if value is not None:
+                out["end_from_tgw_m"] = value
+
+    s = out.get("start_from_tgw_m")
+    e = out.get("end_from_tgw_m")
+    if s is None or e is None:
+        return None
+
+    length = out.get("assessment_length_m")
+    if length is not None:
+        span = abs(float(e) - float(s))
+        if abs(span - float(length)) > 0.06:
+            logger.info(
+                "[NDE Limits] Length check: |end−start|=%.4f m vs stated length=%.4f m (using start/end for plot)",
+                span,
+                float(length),
+            )
+
+    return {
+        "assessment_length_m": out.get("assessment_length_m"),
+        "start_from_tgw_m": float(s),
+        "end_from_tgw_m": float(e),
+        "target_gwd_number": out.get("target_gwd_number"),
+    }
+
+
 def _read_section_as_dataframe(ws, header_row: int) -> pd.DataFrame:
     """Read data from header_row to end of contiguous data."""
     headers = [_get_effective_cell_value(ws, header_row, col_idx) for col_idx in range(1, ws.max_column + 1)]
@@ -385,7 +517,12 @@ def parse_dig_package_excel(file_content: bytes) -> Tuple[Optional[pd.DataFrame]
         - metadata: dict with section info, sheet used, etc.
     """
     wb = load_workbook(io.BytesIO(file_content), data_only=True, read_only=False)
-    metadata = {"sheets_searched": [], "feature_section_found": False, "joint_section_found": False}
+    metadata = {
+        "sheets_searched": [],
+        "feature_section_found": False,
+        "joint_section_found": False,
+        "nde_limits": None,
+    }
 
     feature_df = None
     joint_df = None
@@ -393,6 +530,18 @@ def parse_dig_package_excel(file_content: bytes) -> Tuple[Optional[pd.DataFrame]
     for sheet_name in wb.sheetnames:
         metadata["sheets_searched"].append(sheet_name)
         ws = wb[sheet_name]
+
+        if metadata.get("nde_limits") is None:
+            nde_parsed = parse_nde_limits_section(ws)
+            if nde_parsed:
+                metadata["nde_limits"] = nde_parsed
+                metadata["nde_sheet"] = sheet_name
+                logger.info(
+                    "[NDE Limits] Parsed TGW strip %.3f … %.3f m (sheet %s)",
+                    nde_parsed["start_from_tgw_m"],
+                    nde_parsed["end_from_tgw_m"],
+                    sheet_name,
+                )
 
         # Look for Feature summary section
         if feature_df is None:
@@ -1095,6 +1244,19 @@ def build_feature_map_from_dig_package(
 
     features, scatter_data, sources = build_feature_map_from_df(feature_df, ili_cols)
 
+    nde_meta = metadata.get("nde_limits")
+    if nde_meta and scatter_data:
+        x0_nde = float(nde_meta["start_from_tgw_m"])
+        x1_nde = float(nde_meta["end_from_tgw_m"])
+        if x0_nde > x1_nde:
+            x0_nde, x1_nde = x1_nde, x0_nde
+        scatter_data["nde_region"] = {
+            "x0": x0_nde,
+            "x1": x1_nde,
+            "length_m": nde_meta.get("assessment_length_m"),
+            "target_gwd_number": nde_meta.get("target_gwd_number"),
+        }
+
     girth_sorted = sorted(
         scatter_data.get("girth_welds", []) if scatter_data else [],
         key=lambda gw: gw.get("chainage", 0) or 0,
@@ -1379,6 +1541,8 @@ def build_feature_map_from_dig_package(
             feature_summary_raw["target_longseam_label"] = format_orientation_hours(target_longseam_hours)
         if joint_context_by_source:
             feature_summary_raw["joint_context_by_source"] = joint_context_by_source
+        if metadata.get("nde_limits"):
+            feature_summary_raw["nde_limits"] = metadata["nde_limits"]
 
     return features, scatter_data, sources, column_mapping, joint_summary_parsed, feature_summary_raw
 

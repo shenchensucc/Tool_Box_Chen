@@ -144,6 +144,25 @@ def apply_custom_styling():
             var K = "toolbox-theme";
             var doc = window.top.document;
             var root = doc.documentElement;
+            /* Inject global CSS rules into the TOP-LEVEL document so they apply even
+               when this script runs inside a sandboxed st.html() iframe.
+               Covers: hiding the auto-nav, making the PDF workbook column sticky.
+               Named so it can be called again after Streamlit hydration waves replace DOM nodes. */
+            function injectGlobalCSS() {
+                if (doc.getElementById("toolbox-global-css")) return;
+                var s = doc.createElement("style");
+                s.id = "toolbox-global-css";
+                s.textContent = [
+                    '[data-testid="stSidebarNav"] { display: none !important; }',
+                    '[data-testid="stHorizontalBlock"] > div:last-child { position: sticky !important; top: 1rem !important; align-self: flex-start !important; height: fit-content !important; }',
+                ].join("\n");
+                if (doc.head) {
+                    doc.head.appendChild(s);
+                } else {
+                    doc.addEventListener("DOMContentLoaded", function () { doc.head.appendChild(s); });
+                }
+            }
+            injectGlobalCSS();
             function readStored() {
                 var v = null;
                 try { v = window.top.localStorage.getItem(K); } catch (e) {}
@@ -251,7 +270,14 @@ def apply_custom_styling():
             root.setAttribute("data-toolbox-theme", readStored());
             applyShell();
             window.top.__toolboxApplyShellTheme = applyShell;
+            /* Re-inject global CSS after each hydration wave in case Streamlit replaced <head> children */
+            function reinjectCSS() {
+                if (!doc.getElementById("toolbox-global-css")) {
+                    injectGlobalCSS();
+                }
+            }
             [0, 50, 100, 200, 400, 800, 1500, 3000].forEach(function (ms) {
+                window.top.setTimeout(reinjectCSS, ms);
                 window.top.setTimeout(applyShell, ms);
             });
         })();

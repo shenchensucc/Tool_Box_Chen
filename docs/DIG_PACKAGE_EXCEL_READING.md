@@ -5,7 +5,7 @@
 | Piece | Location |
 |-------|----------|
 | Streamlit page | `frontend/pages/3_Dig_Package_Visual_Tool.py` |
-| UI + maps + workbook preview | `frontend/ili_visual_shared.py` — `render_dig_package_visual_tool`, `render_feature_map_fragment`, `_render_dig_package_source_preview` |
+| UI + maps + workbook preview | `frontend/ili_visual_shared.py` — `render_dig_package_visual_tool`, `render_feature_map_fragment`, `_render_dig_package_source_preview`, `_build_feature_map_figure` (2D), `_build_3d_pipeline_figure` (3D) |
 | API | `POST /api/ili/process-dig-package` → `build_feature_map_from_dig_package` in `backend/pipeline/dig_package_reader.py` |
 
 The page title and sidebar already identify the tool; the body uses a short caption only (no duplicate heading).
@@ -14,10 +14,11 @@ The page title and sidebar already identify the tool; the body uses a short capt
 
 ## Overview
 
-The dig package Excel has **two main sections** that we read:
+The dig package Excel has **two required table sections** plus an **optional NDE block**:
 
 1. **Feature Summary** — ILI features (defects, girth welds, etc.)
 2. **Joint Summary** — **Longseam orientation per GWD per ILI source**, optional **joint lengths** (metres), and metadata used to **match** Joint Summary GWDs to Feature Summary girth welds when needed
+3. **NDE Limits** (optional) — **TGW-referenced NDE assessment strip**: start/end chainage (m) and optional length / target GWD label row. Often appears **between** Joint Summary and Feature Summary on the same sheet; it is **not** a normal header+data table — see §1b below.
 
 **Key engineering insight:** Girth welds are circumferential (360°) — they carry no orientation.
 The **longseam orientation** is the angle of the pipe’s longitudinal weld seam and comes from the **Joint Summary** section (not from defect “orientation” columns in the Feature Summary).
@@ -33,8 +34,11 @@ Each source may report a slightly different longseam angle for the same joint.
 | Where are the **red GWD lines / span boundaries** on chainage (2D dig package)? | **Joint Summary** joint lengths + GWD order (**Step G**), when valid; otherwise **Feature Summary** girth-weld rows |
 | What **clock hour** is the longseam for GWD *N* for vendor *V*? | **Joint Summary** matrix (after `_parse_joint_summary_matrix`) |
 | Optional **joint length (m)** per GWD for labels / checks | **Joint Summary** “joint length” rows → `scatter_data["joint_lengths_by_gwd"]` |
+| Where is the **NDE assessment zone** (grey band, m from TGW)? | **NDE Limits** block → `scatter_data["nde_region"]` (`x0`, `x1`, optional `length_m`, `target_gwd_number`) |
 
 **3D ring positions** follow **`scatter_data["girth_welds"]`**: when Joint Summary **TGW layout (Step G)** runs, those chainages are synthetic from joint lengths (same list as 2D). If Step G is skipped, rings use **Feature Summary** girth-weld rows. Wrong **longseam** extraction misplaces coloured seam lines; wrong joint lengths (when Step G applies) move both 2D lines and 3D rings.
+
+**NDE band** uses the **same chainage axis** as Feature Summary when distance is **Distance from TGW (m)**: `nde_region.x0` / `x1` are drawn directly as vertical boundaries and shading in 2D, and as a cylindrical sleeve + boundary rings in 3D (clipped to the visible joint window).
 
 ---
 
@@ -47,11 +51,13 @@ parse_dig_package_excel(file_content: bytes)
     → (feature_df, joint_df, metadata)
 ```
 
+`metadata` includes **`nde_limits`** (parsed dict or `None`), **`nde_sheet`** when found, plus existing flags (`feature_section_found`, `joint_section_found`, etc.).
+
 ### How it works
 
 1. Load workbook with `openpyxl` (`data_only=True`). Merged cells are handled when reading: empty cells inside a merge inherit the **top-left** cell value (`_get_effective_cell_value`).
-2. Loop over all sheets until both sections are found (or sheets are exhausted).
-3. For each section:
+2. Loop over all sheets until both table sections are found (or sheets are exhausted). **On every sheet**, until NDE is found once, run **`parse_nde_limits_section`** (§1b); the first successful parse is kept.
+3. For each **Feature / Joint** section:
    - Find a **title row** whose text (first ~5 columns) matches the section keywords.
    - Find the **header row**: the first row *after* the title, within 20 rows, that has **≥3 non-empty** cells in columns 1–20 **and** ≥3 **distinct** non-empty values (this skips a wide merged title like “Joint Summary” repeated across the sheet).
    - Read **one header row** and all data rows below until a completely empty row (after data has started).
@@ -64,6 +70,31 @@ parse_dig_package_excel(file_content: bytes)
 |-----------------|------------------------------------------------------------------------|
 | Feature Summary | `"feature summary"`, `"feature summary table"`, `"ili feature summary"` |
 | Joint Summary   | `"joint summary"`, `"joint summary table"`, `"girth weld summary"`    |
+
+### 1b. NDE Limits block (`parse_nde_limits_section`)
+
+**Not** parsed as a header row + data matrix. The reader finds a **title row** where some cell in the first few columns contains both **“nde”** and **“limit”** (e.g. **NDE Limits**), then scans following rows for **label / value** pairs: label text in the leading cell(s), first **numeric** cell to the right is the value (`_row_label_and_value`, `_parse_float_for_nde`).
+
+**Rows used for the map (TGW-referenced strip)**
+
+| Label pattern (normalised, contains…) | Maps to |
+|---------------------------------------|---------|
+| `nde assessment start` + `tgw` | `start_from_tgw_m` → **`nde_region.x0`** |
+| `nde assessment end` + `tgw` | `end_from_tgw_m` → **`nde_region.x1`** |
+| `nde assessment length` | Optional check vs `x1 − x0` (info log on mismatch); stored as `length_m` |
+
+**Optional row:** label contains **`target`**, **`girth`**, **`weld`** and a numeric GWD in the value cell → `target_gwd_number` (metadata / `nde_region` / `feature_summary_raw`).
+
+**Ignored for this strip:** rows whose label indicates **downstream-only** NDE (`from d/s`, `d/s gw`, etc.) — only the **TGW** start/end drive the shared 2D/3D band.
+
+**Stop scanning** when a row label hits **feature summary** / **joint summary** keywords (avoids eating the next section).
+
+**Output wiring** (`build_feature_map_from_dig_package`)
+
+- If **both** TGW start and end are present: `scatter_data["nde_region"] = { "x0", "x1", "length_m"?, "target_gwd_number"? }` (with `x0 ≤ x1`).
+- Copy for tracing: `feature_summary_raw["nde_limits"]` (same fields as parsed from Excel).
+
+If start or end is missing, **no** `nde_region` is set (nothing drawn).
 
 ### Joint Summary reshape (`_reshape_joint_summary_dataframe`)
 
@@ -225,14 +256,21 @@ If any segment length is missing or fewer than four GWDs are available, this ste
 
 ## 4. Visualisation Behaviour
 
+**Implementation:** `frontend/ili_visual_shared.py` — `_build_feature_map_figure` (2D), `_build_3d_pipeline_figure` (3D).
+
 ### 2D Feature Map (orientation vs chainage)
 
 | Visual element            | Data source                         | Notes |
 |---------------------------|-------------------------------------|-------|
 | Feature boxes (defects)   | Feature Summary                     | Unchanged — chainage from distance column |
+| **NDE grey band**         | `scatter_data["nde_region"]`        | **`add_vrect`** between `x0` and `x1`, semi-transparent grey, **`layer="below"`** defect rectangles |
+| **NDE boundary lines**    | same                                | **Dashed vertical lines** at `x0` and `x1` (dark grey), drawn **after** red GWD lines so boundaries stay visible |
+| **NDE labels**            | same                                | **Annotation** “NDE Area” centred in the band (high on the clock axis); **distance text** `{x:.3f} m` beside each boundary (`xshift` + `xanchor` left/right); **Plotly legend** entry “NDE Area” via a NaN-point `Scatter` swatch (right margin `y≈0.80`) |
 | Red vertical lines        | **Joint Summary TGW layout** if Step G runs; else Feature Summary girth welds | Four lines at `0` and cumulative joint lengths when Step G applies |
 | Coloured horizontal lines | Joint Summary → `seam_welds`        | One line per ILI source per joint span; annotations include **GWD #** and clock + source when present |
 | Source labels (legend)    | Feature Summary                     | Each ILI run labelled |
+
+**X-axis default range:** if `nde_region` is present, the initial **x-axis range** is merged so both defect extents and **`[x0, x1]`** (with padding) are visible (`_merge_nde_into_x_range`).
 
 **Longseam line colours:** blue = first Joint Summary source alphabetically, purple = second, … (multiple vendors compare on the same span).
 
@@ -243,11 +281,14 @@ If any segment length is missing or fewer than four GWDs are available, this ste
 | Visual element     | Source                    | Notes                                                |
 |--------------------|---------------------------|------------------------------------------------------|
 | Cylinder surface   | Feature Summary features  | Depth % WT heatmap                                   |
+| **NDE sleeve**     | `nde_region`              | **Translucent grey `Surface`** on a **slightly larger radius** (~`pipe_r_m × 1.028`), chainage clipped to overlap **`[view_x_min, view_x_max]`** with `[x0, x1]` |
+| **NDE boundaries** | same                      | **Dashed circumferential rings** at `x0` and `x1` (when inside scene range), radius ~`× 1.032`, drawn **after** red GWD rings |
+| **Legend**         | NDE surface trace         | One entry: **“NDE assessment zone (TGW)”**; boundary lines use `showlegend=False` but share `legendgroup="nde_zone"` |
 | Red rings          | `girth_welds` in `scatter_data` (TGW from Joint Summary when Step G applies, else Feature Summary) | One ring per boundary in that list |
 | Coloured lines     | `seam_welds`              | One line per (span, Joint Summary source)           |
 | Clock labels       | Fixed                     | 12 o’clock = top of pipe                             |
 
-**Joint window:** `max_joints + 1` consecutive **girth-weld** chainages are chosen around the weld closest to **0**. With TGW layout, those chainages already include Joint Summary–derived welds; otherwise they come from Feature Summary rows.
+**Joint window:** `max_joints + 1` consecutive **girth-weld** chainages are chosen around the weld closest to **0**. With TGW layout, those chainages already include Joint Summary–derived welds; otherwise they come from Feature Summary rows. The NDE sleeve only covers the **intersection** of `[x0, x1]` with that window; if there is no overlap, the sleeve is omitted (boundaries still draw if `x0`/`x1` fall inside the scene).
 
 ---
 
@@ -264,6 +305,8 @@ Same rule as **Step C**: **“joint length”** row(s) → numeric cells per GWD
 3. **Reshape is pattern-gated** — Templates whose first two headers are not duplicate “Girth Weld No.” / “Source” will not get Metric/Source normalisation from reshape (matrix parse may still work).
 4. **Positional GWD mapping** — If Feature Summary omits GWD numbers, seam association depends on **sorted Joint Summary GWD order** and target anchoring; any mismatch vs real pipe order will skew longseam placement.
 5. **Ring / line count** — In **TGW layout (Step G)**, 2D uses exactly **four** red lines / **three** joints when data allows. Otherwise count follows **Feature Summary** girth welds. 3D still slices the available `girth_welds` list (four welds → full window when centred on target at 0).
+6. **NDE label/value layout** — Parser expects **leading text** then **first numeric** to the right on the same row. Rows where the value precedes the label, or multi-row merged values, may not match. **D/S-only** NDE rows are intentionally skipped for the TGW band.
+7. **3D NDE** — Grey sleeve uses a second `Surface` and may **z-fight** slightly with the main cylinder depending on angle; boundary **dash** style for `Scatter3d` depends on Plotly/WebGL support.
 
 ---
 
@@ -271,8 +314,12 @@ Same rule as **Step C**: **“joint length”** row(s) → numeric cells per GWD
 
 | Function | Role |
 |----------|------|
-| `parse_dig_package_excel` | Locate sections, read one header + data block, reshape joint DF when pattern matches |
+| `parse_dig_package_excel` | Locate Feature/Joint table sections; per sheet, first hit for **`parse_nde_limits_section`**; read one header + data block each; reshape joint DF when pattern matches |
+| `parse_nde_limits_section` | Find **NDE Limits** title; scan label/value rows → TGW start/end (and optional length, target GWD) |
+| `_row_label_and_value` / `_parse_float_for_nde` | Helpers: one row → label string + value cell |
 | `_reshape_joint_summary_dataframe` | Split merged metric+sources into Metric / Source columns |
 | `_parse_joint_summary_matrix` | Build `gwd_to_cols`, parse longseam + joint lengths, `by_source`, `target_gwd_from_header` |
-| `build_feature_map_from_dig_package` | Feature map + merge Joint Summary into `seam_welds`, `joint_context_by_source`, etc. |
+| `build_feature_map_from_dig_package` | Feature map + Joint Summary merge; sets **`scatter_data["nde_region"]`** and **`feature_summary_raw["nde_limits"]`** when Excel parse succeeds |
 | `build_feature_map_from_df` | Feature Summary → features, `girth_welds`, scatter axes |
+| `_build_feature_map_figure` | Plotly 2D: defects, NDE vrect/vlines, GWD vlines, seams, axis merge |
+| `_build_3d_pipeline_figure` | Plotly 3D: cylinder, NDE sleeve + rings, GWD rings, seams, clock labels |

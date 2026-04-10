@@ -425,6 +425,38 @@ def test_build_feature_map_tgw_layout_uses_joint_lengths_for_four_red_lines():
     assert _has_span(0.0, 17.5)
 
 
+def test_build_feature_map_from_dig_package_parses_nde_limits_tgw_strip():
+    """NDE Limits block (between Joint and Feature sections) → scatter_data.nde_region for the map."""
+    workbook = Workbook()
+    ws = workbook.active
+    ws.title = "Dig Package"
+    ws["A1"] = "NDE Limits"
+    ws["A2"] = "Target Girth Weld (U/S)"
+    ws["B2"] = 3180
+    ws["A3"] = "NDE Assessment Length (m)"
+    ws["B3"] = 9.304
+    ws["A4"] = "NDE Assessment Start from TGW (m)"
+    ws["B4"] = -0.5
+    ws["A5"] = "NDE Assessment End from TGW (m)"
+    ws["B5"] = 8.804
+
+    ws["A8"] = "Feature Summary"
+    ws["A9"] = "Distance from TGW (m)"
+    ws["B9"] = "Feature Type"
+    ws["A10"] = 1.0
+    ws["B10"] = "Metal Loss"
+
+    _, scatter_data, _, _, _, feature_summary_raw = build_feature_map_from_dig_package(_workbook_bytes(workbook))
+
+    nr = scatter_data.get("nde_region")
+    assert nr is not None
+    assert abs(nr["x0"] - (-0.5)) < 1e-6
+    assert abs(nr["x1"] - 8.804) < 1e-6
+    assert abs(nr["length_m"] - 9.304) < 1e-6
+    assert nr.get("target_gwd_number") == 3180
+    assert feature_summary_raw.get("nde_limits", {}).get("target_gwd_number") == 3180
+
+
 def test_find_header_row_after_skips_repeated_merged_section_title():
     workbook = Workbook()
     ws = workbook.active
