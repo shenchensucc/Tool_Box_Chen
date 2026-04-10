@@ -34,6 +34,63 @@ from frontend_utils import (
 )
 from chat_panel import render_floating_chat_shell
 
+
+@st.cache_data(show_spinner=False, max_entries=64)
+def _cached_parse_pdf(pdf_bytes: bytes, filename: str) -> dict:
+    """Parse one PDF and return a JSON-serializable result dict.
+
+    Decorated with @st.cache_data so that the same PDF bytes (same content hash)
+    are never re-parsed within a Streamlit session — Streamlit reruns triggered by
+    table edits or widget interactions skip this entirely and return the cached result.
+
+    max_entries=64: limits memory use; evicts LRU when exceeded.
+    """
+    from backend.tml.inspection_dataloader import generate_measurements_dataloader
+    from backend.tml.inspection_report_parser import parse_inspection_report_pdf
+
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as f:
+            f.write(pdf_bytes)
+            tmp_path = Path(f.name)
+        readings = parse_inspection_report_pdf(tmp_path, filename)
+        if not readings:
+            return {
+                "success": False,
+                "message": "No data extracted from PDFs.",
+                "summary": [],
+                "records_count": 0,
+                "error": "No Circuit, CML, or readings found in uploaded PDFs.",
+            }
+        records_count, summary = generate_measurements_dataloader(
+            readings,
+            circuit_to_equipment={},
+            output_path="",
+            use_placeholder_when_missing=True,
+        )
+        return {
+            "success": True,
+            "message": f"Read PDF(s), extracted **{len(summary)}** row(s).",
+            "records_count": records_count,
+            "summary": summary,
+        }
+    except Exception as exc:
+        import traceback as _tb2
+        return {
+            "success": False,
+            "message": str(exc),
+            "summary": [],
+            "records_count": 0,
+            "error": f"{type(exc).__name__}: {exc}\n\n```\n{_tb2.format_exc()}\n```",
+        }
+    finally:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
 set_page_config("Inspection Report Loader", "📄")
 apply_custom_styling()
 display_sidebar_navigation()
@@ -663,36 +720,15 @@ def _do_read(
         status_slots[i].progress(0.0, text=f"⏳ **{pf.name}**{pg_str} — {mode}")
 
     def _read_one_local(idx: int, pf):
-        """Mirror backend /api/tml/inspection-report/read for a single file without HTTP."""
-        from backend.tml.inspection_dataloader import generate_measurements_dataloader
-        from backend.tml.inspection_report_parser import parse_inspection_report_pdf
+        """Parse one PDF via the @st.cache_data wrapper.
 
-        tmp_path: Path | None = None
+        The wrapper handles temp-file lifecycle, parse, and dataloader generation.
+        Calling it with the same (bytes, filename) pair hits the Streamlit cache
+        and returns immediately — no re-parse on reruns or duplicate uploads.
+        """
         try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as f:
-                f.write(pf.getvalue())
-                tmp_path = Path(f.name)
-            readings = parse_inspection_report_pdf(tmp_path, pf.name)
-            if not readings:
-                return idx, pf.name, {
-                    "success": False,
-                    "message": "No data extracted from PDFs.",
-                    "summary": [],
-                    "records_count": 0,
-                    "error": "No Circuit, CML, or readings found in uploaded PDFs.",
-                }
-            records_count, summary = generate_measurements_dataloader(
-                readings,
-                circuit_to_equipment={},
-                output_path="",
-                use_placeholder_when_missing=True,
-            )
-            return idx, pf.name, {
-                "success": True,
-                "message": f"Read PDF(s), extracted **{len(summary)}** row(s).",
-                "records_count": records_count,
-                "summary": summary,
-            }
+            data = _cached_parse_pdf(pf.getvalue(), pf.name)
+            return idx, pf.name, data
         except Exception as exc:
             return idx, pf.name, {
                 "success": False,
@@ -701,12 +737,6 @@ def _do_read(
                 "records_count": 0,
                 "error": f"{type(exc).__name__}: {exc}\n\n```\n{_tb.format_exc()}\n```",
             }
-        finally:
-            if tmp_path is not None:
-                try:
-                    tmp_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
 
     def _read_one_http(idx: int, pf):
         data = pf.getvalue()
