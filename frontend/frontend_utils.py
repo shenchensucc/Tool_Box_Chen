@@ -125,6 +125,12 @@ def _st_html(body: str, *, allow_js: bool = False) -> None:
     html_fn(body)
 
 
+# Module-level cache so _inject_theme_toggle_sidebar() can combine the CSS/script
+# block with the toggle button HTML into one st.html() call (sidebar context + visible
+# element required for Streamlit 1.x to execute inline <script> blocks).
+_THEME_STYLE_HTML: str = ""
+
+
 def apply_custom_styling():
     """Apply custom CSS styling — Industrial-Precision design system (see DESIGN.md).
 
@@ -132,7 +138,14 @@ def apply_custom_styling():
     ``data-toolbox-theme`` on ``<html>``) so the app does **not** rerun and
     widget state (uploads, inputs) is preserved. Default is explicit **light**
     (see repo ``.streamlit/config.toml`` ``base = "light"`` for Streamlit chrome).
+
+    In Streamlit 1.x, <script> blocks in st.html() only execute when the stHtml
+    element has non-zero rendered height AND is in the sidebar context.  The actual
+    CSS/JS injection is therefore deferred to _inject_theme_toggle_sidebar(), which
+    combines this block with the visible toggle button (the button provides height).
+    apply_custom_styling() still builds the HTML and caches it in _THEME_STYLE_HTML.
     """
+    global _THEME_STYLE_HTML
     # Use st.html (not st.markdown) so <style> is injected as real CSS. Streamlit's markdown
     # path can strip <style> and leave the rules as visible text; then stSidebarNav never hides.
     _custom_theme_css = textwrap.dedent("""
@@ -152,17 +165,143 @@ def apply_custom_styling():
                 if (doc.getElementById("toolbox-global-css")) return;
                 var s = doc.createElement("style");
                 s.id = "toolbox-global-css";
-                s.textContent = [
-                    '[data-testid="stSidebarNav"] { display: none !important; }',
-                    '[data-testid="stHorizontalBlock"] > div:last-child { position: sticky !important; top: 1rem !important; align-self: flex-start !important; height: fit-content !important; }',
-                ].join("\n");
-                if (doc.head) {
-                    doc.head.appendChild(s);
-                } else {
-                    doc.addEventListener("DOMContentLoaded", function () { doc.head.appendChild(s); });
-                }
+                /* Full design-system CSS injected into the TOP-LEVEL document.
+                   CSS variables here become available to all Streamlit elements. */
+                s.textContent = `
+        [data-testid="stSidebarNav"] { display: none !important; }
+        [data-testid="stHorizontalBlock"] > div:last-child { position: sticky !important; top: 1rem !important; align-self: flex-start !important; height: fit-content !important; }
+        html { color-scheme: light; }
+        :root {
+            --color-primary:        #0F3460;
+            --color-primary-hover:  #1A4A7A;
+            --color-accent:         #F59E0B;
+            --color-accent-hover:   #D97706;
+            --color-bg:             #F8FAFC;
+            --color-surface:        #FFFFFF;
+            --color-surface-raised: #F1F5F9;
+            --color-border:         #E2E8F0;
+            --color-border-strong:  #CBD5E1;
+            --color-text-primary:   #0F172A;
+            --color-text-secondary: #475569;
+            --color-text-muted:     #94A3B8;
+            --color-success:        #059669;
+            --color-warning:        #D97706;
+            --color-error:          #DC2626;
+            --color-info:           #0369A1;
+            --color-sidebar-bg:     #1E293B;
+            --color-sidebar-text:   #F1F5F9;
+            --font-ui:     'DM Sans', system-ui, sans-serif;
+            --font-mono:   'JetBrains Mono', 'Consolas', monospace;
+            --radius-sm:   4px;
+            --radius-md:   6px;
+            --radius-lg:   8px;
+            --transition:  0.15s ease-out;
+        }
+        html, body, [class*="css"], .stMarkdown, .stText,
+        .stTextInput, .stSelectbox, .stMultiSelect,
+        button, label, p, div { font-family: var(--font-ui) !important; }
+        code, pre, .stCode, [data-testid="stMetricValue"], .mono, td, th { font-family: var(--font-mono) !important; }
+        h1 { font-size: 2.2rem !important; font-weight: 700 !important; color: var(--color-text-primary); letter-spacing: -0.02em; }
+        h2 { font-size: 1.5rem  !important; font-weight: 600 !important; color: var(--color-text-primary); }
+        h3 { font-size: 1.15rem !important; font-weight: 600 !important; color: var(--color-text-primary); }
+        h4 { font-size: 1rem    !important; font-weight: 600 !important; color: var(--color-text-secondary); text-transform: uppercase; letter-spacing: 0.05em; }
+        p, li { color: var(--color-text-secondary); line-height: 1.65; }
+        html, body { background-color: var(--color-bg) !important; }
+        .stApp, [data-testid="stAppViewContainer"], [data-testid="stAppViewContainer"] > section,
+        [data-testid="stHeader"], [data-testid="stToolbar"] { background-color: var(--color-bg) !important; }
+        .main { padding: 1.5rem 2rem; background-color: var(--color-bg) !important; }
+        .main .block-container { background-color: transparent !important; }
+        hr { border: none !important; border-top: 1px solid var(--color-border) !important; margin: 1.25rem 0 !important; }
+        [data-testid="stSidebar"] { background-color: var(--color-sidebar-bg) !important; padding-top: 1.5rem; }
+        [data-testid="stSidebar"] * { color: var(--color-sidebar-text) !important; }
+        [data-testid="stSidebar"] .stMarkdown h3, [data-testid="stSidebar"] .stMarkdown h4 {
+            color: var(--color-text-muted) !important; font-size: 0.7rem !important;
+            letter-spacing: 0.1em; text-transform: uppercase;
+            border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 4px; margin-bottom: 6px; }
+        .stButton button, .stDownloadButton button, .stFormSubmitButton button {
+            font-family: var(--font-ui) !important; font-weight: 500 !important;
+            border-radius: var(--radius-md) !important; border: 1.5px solid transparent !important;
+            padding: 0.45rem 1.25rem !important;
+            transition: background-color var(--transition), box-shadow var(--transition), transform var(--transition) !important;
+            letter-spacing: 0.01em; }
+        .stButton button[kind="primary"], .stDownloadButton button, .stFormSubmitButton button[kind="primary"] {
+            background: var(--color-accent) !important; color: #0F172A !important;
+            border-color: var(--color-accent) !important; font-weight: 600 !important; }
+        .stButton button[kind="primary"]:hover, .stDownloadButton button:hover {
+            background: var(--color-accent-hover) !important; border-color: var(--color-accent-hover) !important;
+            box-shadow: 0 2px 8px rgba(245, 158, 11, 0.35) !important; transform: translateY(-1px); }
+        .stButton button[kind="secondary"] {
+            background: transparent !important; color: var(--color-primary) !important; border-color: var(--color-primary) !important; }
+        .stButton button[kind="secondary"]:hover {
+            background: rgba(15, 52, 96, 0.06) !important; box-shadow: 0 2px 6px rgba(15, 52, 96, 0.12) !important; transform: translateY(-1px); }
+        [data-testid="stFileUploader"] {
+            border: 1.5px dashed var(--color-border-strong) !important; border-radius: var(--radius-lg) !important;
+            padding: 1.25rem !important; background: var(--color-surface) !important;
+            transition: border-color var(--transition), background var(--transition) !important; }
+        [data-testid="stFileUploader"]:hover { border-color: var(--color-primary) !important; background: rgba(15, 52, 96, 0.03) !important; }
+        [data-testid="stMetric"] {
+            background: var(--color-surface) !important; border: 1px solid var(--color-border) !important;
+            border-radius: var(--radius-lg) !important; padding: 1rem 1.25rem !important; border-left: 3px solid var(--color-primary) !important; }
+        [data-testid="stMetricLabel"] { font-size: 0.75rem !important; font-weight: 500 !important; text-transform: uppercase !important; letter-spacing: 0.06em !important; color: var(--color-text-muted) !important; }
+        [data-testid="stMetricValue"] { font-family: var(--font-mono) !important; font-size: 1.75rem !important; font-weight: 500 !important; color: var(--color-text-primary) !important; }
+        [data-testid="stMetricDelta"] { font-family: var(--font-mono) !important; font-size: 0.8rem !important; }
+        .stAlert { border-radius: var(--radius-md) !important; border-left-width: 3px !important; font-size: 0.9rem !important; }
+        [data-testid="stInfo"] { background: rgba(3, 105, 161, 0.07) !important; border-left-color: var(--color-info) !important; color: var(--color-info) !important; }
+        [data-testid="stSuccess"] { background: rgba(5, 150, 105, 0.07) !important; border-left-color: var(--color-success) !important; }
+        [data-testid="stWarning"] { background: rgba(217, 119, 6, 0.08) !important; border-left-color: var(--color-warning) !important; }
+        [data-testid="stError"] { background: rgba(220, 38, 38, 0.07) !important; border-left-color: var(--color-error) !important; }
+        .dataframe, [data-testid="stDataFrame"] { border-radius: var(--radius-lg) !important; overflow: hidden !important; border: 1px solid var(--color-border) !important; }
+        [data-testid="stDataFrame"] th { font-family: var(--font-ui) !important; font-size: 0.75rem !important; font-weight: 600 !important; text-transform: uppercase !important; letter-spacing: 0.05em !important; color: var(--color-text-secondary) !important; background: var(--color-surface-raised) !important; }
+        [data-testid="stDataFrame"] td { font-family: var(--font-mono) !important; font-size: 0.85rem !important; }
+        .stTabs [data-baseweb="tab-list"] { gap: 4px !important; border-bottom: 1px solid var(--color-border) !important; }
+        .stTabs [data-baseweb="tab"] { border-radius: var(--radius-md) var(--radius-md) 0 0 !important; padding: 0.5rem 1rem !important; font-weight: 500 !important; font-size: 0.9rem !important; color: var(--color-text-secondary) !important; }
+        .stTabs [aria-selected="true"] { color: var(--color-primary) !important; border-bottom: 2px solid var(--color-primary) !important; font-weight: 600 !important; }
+        .streamlit-expanderHeader { border-radius: var(--radius-md) !important; font-weight: 500 !important; font-size: 0.9rem !important; border: 1px solid var(--color-border) !important; padding: 0.6rem 1rem !important; background: var(--color-surface) !important; }
+        .streamlit-expanderContent { border: 1px solid var(--color-border) !important; border-top: none !important; border-radius: 0 0 var(--radius-md) var(--radius-md) !important; padding: 1rem !important; background: var(--color-surface) !important; }
+        [data-testid="stProgressBar"] > div { background: var(--color-surface-raised) !important; border-radius: 999px !important; height: 6px !important; }
+        [data-testid="stProgressBar"] > div > div { background: var(--color-accent) !important; border-radius: 999px !important; transition: width 0.4s ease-out !important; }
+        .stTextInput input, .stNumberInput input, .stTextArea textarea { border: 1px solid var(--color-border) !important; border-radius: var(--radius-md) !important; font-family: var(--font-ui) !important; font-size: 0.9rem !important; background: var(--color-surface) !important; color: var(--color-text-primary) !important; }
+        .stTextInput input:focus, .stNumberInput input:focus, .stTextArea textarea:focus { border-color: var(--color-primary) !important; box-shadow: 0 0 0 3px rgba(15, 52, 96, 0.1) !important; }
+        [data-testid="stSelectbox"] > div > div { border: 1px solid var(--color-border) !important; border-radius: var(--radius-md) !important; background: var(--color-surface) !important; }
+        .js-plotly-plot { border-radius: var(--radius-lg) !important; border: 1px solid var(--color-border) !important; }
+        .chat-header-row { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.5rem; }
+        .chat-header-row h4 { margin: 0; flex: 1; }
+        .chat-hide-btn { padding: 0.25rem 0.5rem !important; min-width: auto !important; font-size: 0.85rem !important; }
+        .mono { font-family: var(--font-mono) !important; }
+        .label-caps { font-size: 0.7rem !important; font-weight: 600 !important; text-transform: uppercase !important; letter-spacing: 0.08em !important; color: var(--color-text-muted) !important; }
+        .toolbox-theme-toggle-wrap { display: flex; justify-content: center; margin: 0 0 0.65rem 0; }
+        button.toolbox-theme-toggle-btn { font-size: 1.35rem !important; line-height: 1 !important; padding: 0.4rem 0.65rem !important; border-radius: var(--radius-md) !important; border: 1px solid rgba(255,255,255,0.22) !important; background: rgba(255,255,255,0.1) !important; cursor: pointer !important; font-family: var(--font-ui) !important; transition: background var(--transition), border-color var(--transition) !important; }
+        button.toolbox-theme-toggle-btn:hover { background: rgba(255,255,255,0.16) !important; border-color: rgba(255,255,255,0.35) !important; }
+        html[data-toolbox-theme="dark"] { color-scheme: dark;
+            --color-primary: #38BDF8; --color-primary-hover: #7DD3FC;
+            --color-accent: #FBBF24; --color-accent-hover: #F59E0B;
+            --color-bg: #0F172A; --color-surface: #1E293B; --color-surface-raised: #334155;
+            --color-border: #334155; --color-border-strong: #475569;
+            --color-text-primary: #F8FAFC; --color-text-secondary: #CBD5E1; --color-text-muted: #94A3B8;
+            --color-success: #34D399; --color-warning: #FBBF24; --color-error: #F87171; --color-info: #38BDF8;
+            --color-sidebar-bg: #0B1220; --color-sidebar-text: #F1F5F9; }
+        html[data-toolbox-theme="dark"] .stTextInput input:focus,
+        html[data-toolbox-theme="dark"] .stNumberInput input:focus,
+        html[data-toolbox-theme="dark"] .stTextArea textarea:focus { box-shadow: 0 0 0 3px rgba(56,189,248,0.22) !important; }
+        html[data-toolbox-theme="dark"] [data-testid="stFileUploader"]:hover { background: rgba(56,189,248,0.06) !important; }
+        html[data-toolbox-theme="dark"] .stButton button[kind="secondary"]:hover { background: rgba(56,189,248,0.12) !important; box-shadow: 0 2px 6px rgba(56,189,248,0.15) !important; }
+        html[data-toolbox-theme="dark"] [data-testid="stInfo"] { background: rgba(56,189,248,0.12) !important; }
+        html[data-toolbox-theme="dark"] [data-testid="stSuccess"] { background: rgba(52,211,153,0.12) !important; }
+        html[data-toolbox-theme="dark"] [data-testid="stWarning"] { background: rgba(251,191,36,0.12) !important; }
+        html[data-toolbox-theme="dark"] [data-testid="stError"] { background: rgba(248,113,113,0.12) !important; }
+        `;
+                (doc.head || doc.body || doc.documentElement).appendChild(s);
+            }
+            function injectFonts() {
+                if (doc.getElementById("toolbox-fonts")) return;
+                var l = doc.createElement("link");
+                l.id = "toolbox-fonts";
+                l.rel = "stylesheet";
+                l.href = "https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&family=JetBrains+Mono:wght@400;500&display=swap";
+                (doc.head || doc.body || doc.documentElement).appendChild(l);
             }
             injectGlobalCSS();
+            injectFonts();
             function readStored() {
                 var v = null;
                 try { v = window.top.localStorage.getItem(K); } catch (e) {}
@@ -270,20 +409,45 @@ def apply_custom_styling():
             root.setAttribute("data-toolbox-theme", readStored());
             applyShell();
             window.top.__toolboxApplyShellTheme = applyShell;
-            /* Re-inject global CSS after each hydration wave in case Streamlit replaced <head> children */
+            /* Re-inject CSS/fonts after each hydration wave (Streamlit may replace <head>) */
             function reinjectCSS() {
-                if (!doc.getElementById("toolbox-global-css")) {
-                    injectGlobalCSS();
-                }
+                if (!doc.getElementById("toolbox-global-css")) { injectGlobalCSS(); }
+                if (!doc.getElementById("toolbox-fonts")) { injectFonts(); }
             }
             [0, 50, 100, 200, 400, 800, 1500, 3000].forEach(function (ms) {
                 window.top.setTimeout(reinjectCSS, ms);
                 window.top.setTimeout(applyShell, ms);
             });
+            /* Toggle button handler — poll until button is in DOM (script runs in hidden
+               iframe before st.html button div is fully mounted by React). */
+            function attachToggle() {
+                var btn = doc.getElementById("toolbox-theme-toggle");
+                if (!btn) { window.top.setTimeout(attachToggle, 50); return; }
+                if (btn._toolboxToggleAttached) return;
+                btn._toolboxToggleAttached = true;
+                function cur() { return root.getAttribute("data-toolbox-theme") === "dark" ? "dark" : "light"; }
+                function syncUi() {
+                    var d = cur() === "dark";
+                    btn.textContent = d ? "☀️" : "🌙";
+                    btn.title = d ? "Switch to light mode" : "Switch to dark mode";
+                    btn.setAttribute("aria-label", d ? "Switch to light mode" : "Switch to dark mode");
+                }
+                syncUi();
+                btn.addEventListener("click", function () {
+                    var next = cur() === "dark" ? "light" : "dark";
+                    root.setAttribute("data-toolbox-theme", next);
+                    try { window.top.localStorage.setItem(K, next); } catch (e) {}
+                    applyShell();
+                    syncUi();
+                });
+            }
+            attachToggle();
         })();
         </script>
-        <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-        <style>
+        <!-- CSS and Google Fonts are injected into window.top.document.head by
+             injectGlobalCSS() and injectFonts() above; no <style>/<link> needed here.
+             Streamlit 1.x strips everything after the first </script> tag anyway.  -->
+        <!--REMOVED_STYLE_BLOCK_START
         /* ------------------------------------------------------------------ */
         /* Design tokens (DESIGN.md)                                           */
         /* ------------------------------------------------------------------ */
@@ -710,14 +874,12 @@ def apply_custom_styling():
         html[data-toolbox-theme="dark"] [data-testid="stWarning"] {
             background: rgba(251, 191, 36, 0.12) !important;
         }
-        html[data-toolbox-theme="dark"] [data-testid="stError"] {
-            background: rgba(248, 113, 113, 0.12) !important;
-        }
-
-        </style>
+        REMOVED_STYLE_BLOCK_END-->
         """).strip()
 
-    _st_html(_custom_theme_css, allow_js=True)
+    # Cache for _inject_theme_toggle_sidebar(); it combines this with the toggle button
+    # so the combined stHtml has non-zero height (the button) and executes scripts.
+    _THEME_STYLE_HTML = _custom_theme_css
 
 
 _THEME_TOGGLE_HTML = textwrap.dedent("""
@@ -725,46 +887,23 @@ _THEME_TOGGLE_HTML = textwrap.dedent("""
         <button type="button" class="toolbox-theme-toggle-btn" id="toolbox-theme-toggle"
                 title="Toggle dark mode" aria-label="Toggle light or dark mode">🌙</button>
     </div>
-    <script>
-    (function () {
-        var k = "toolbox-theme";
-        var doc = window.top.document;
-        var root = doc.documentElement;
-        var btn = document.getElementById("toolbox-theme-toggle");
-        if (!btn) return;
-        function cur() {
-            return root.getAttribute("data-toolbox-theme") === "dark" ? "dark" : "light";
-        }
-        function applyFromStorage() {
-            var v = null;
-            try { v = window.top.localStorage.getItem(k); } catch (e) {}
-            if (v !== "dark" && v !== "light") { v = "light"; }
-            root.setAttribute("data-toolbox-theme", v);
-        }
-        function syncUi() {
-            var d = cur() === "dark";
-            btn.textContent = d ? "☀️" : "🌙";
-            btn.title = d ? "Switch to light mode" : "Switch to dark mode";
-            btn.setAttribute("aria-label", d ? "Switch to light mode" : "Switch to dark mode");
-        }
-        applyFromStorage();
-        if (window.top.__toolboxApplyShellTheme) { window.top.__toolboxApplyShellTheme(); }
-        syncUi();
-        btn.addEventListener("click", function () {
-            var next = cur() === "dark" ? "light" : "dark";
-            root.setAttribute("data-toolbox-theme", next);
-            try { window.top.localStorage.setItem(k, next); } catch (e) {}
-            if (window.top.__toolboxApplyShellTheme) { window.top.__toolboxApplyShellTheme(); }
-            syncUi();
-        });
-    })();
-    </script>
     """).strip()
 
 
 def _inject_theme_toggle_sidebar():
-    """Sidebar theme control: no Streamlit widget → no script rerun; state in localStorage."""
-    _st_html(_THEME_TOGGLE_HTML, allow_js=True)
+    """Sidebar theme control: no Streamlit widget → no script rerun; state in localStorage.
+
+    Uses two separate calls:
+    1. st.html() — renders the toggle button (no JS needed, just HTML).
+    2. st.components.v1.html(height=0) — runs the theme script in a hidden real iframe.
+       components.html() creates an actual <iframe> which executes <script> tags, unlike
+       st.html() which uses React innerHTML (scripts silently dropped by the browser).
+       The script uses window.top.document to reach the parent page's DOM/CSS.
+    """
+    _st_html(_THEME_TOGGLE_HTML)
+    if _THEME_STYLE_HTML:
+        import streamlit.components.v1 as components
+        components.html(_THEME_STYLE_HTML, height=0, scrolling=False)
 
 
 def set_page_config(page_title: str, page_icon: str = "🔧", layout: str = "wide"):

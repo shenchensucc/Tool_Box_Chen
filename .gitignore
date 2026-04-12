@@ -55,3 +55,4 @@ dev/dig_package_inspection/generated/
 
 # Backend runtime logs
 backend/logs/
+.gstack/

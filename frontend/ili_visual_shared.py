@@ -1237,6 +1237,304 @@ def _stable_dig_pdf_dom_id(filename: str) -> str:
     return f"pdf{h}"
 
 
+# ── Dig Package Floating PDF Panel ─────────────────────────────────────────────
+_DIG_PANEL_WIDTH_VW  = 40
+_DIG_PANEL_STYLE_ID  = "dig-pdf-panel-style"
+_DIG_PANEL_DATA_ATTR = "data-dig-pdf-panel"
+_DIG_PANEL_HTML_VER  = 1
+
+
+def _dig_pdf_floating_panel_html(panel_id: str, pdfjs_base: str, filename: str, b64: str) -> str:
+    """Build the floating panel HTML — mirrors the Inspection Report panel design."""
+    pw = _DIG_PANEL_WIDTH_VW
+    short = filename.rsplit(".", 1)[0] if "." in filename else filename
+    short_js = short[:20] + "\u2026" if len(short) > 22 else short
+    return f"""<!DOCTYPE html>
+<html><head><style>html,body{{margin:0;padding:0;background:transparent;overflow:hidden;}}</style></head>
+<body><script>
+(function() {{
+  var pid     = {repr(panel_id)};
+  var pjsBase = {repr(pdfjs_base)};
+  var b64data = {repr(b64)};
+  var fname   = {repr(filename)};
+  var shortName = {repr(short_js)};
+  var pw      = {pw};
+  var P       = window.parent.document;
+
+  /* ── Layout CSS — push main content left ── */
+  var styleId = {repr(_DIG_PANEL_STYLE_ID)};
+  if (!P.getElementById(styleId)) {{
+    var st = P.createElement('style');
+    st.id  = styleId;
+    st.textContent =
+      'div[data-testid="stMainBlockContainer"],' +
+      'div[data-testid="stAppViewBlockContainer"] {{' +
+      '  max-width:none !important;' +
+      '  padding-right:calc(' + pw + 'vw + 28px) !important;' +
+      '  box-sizing:border-box !important;' +
+      '  transition:padding-right .2s ease;' +
+      '}}';
+    P.head.appendChild(st);
+  }}
+
+  /* ── Guard: remove stale panels, skip if same panel already visible ── */
+  P.querySelectorAll('[{_DIG_PANEL_DATA_ATTR}]').forEach(function(el) {{
+    if (el.id !== pid) el.remove();
+  }});
+  if (P.getElementById(pid)) {{
+    P.getElementById(pid).style.display = '';
+    return;
+  }}
+
+  /* ══════════════════ BUILD PANEL ══════════════════ */
+  var panel = P.createElement('div');
+  panel.id  = pid;
+  panel.setAttribute('{_DIG_PANEL_DATA_ATTR}', '1');
+  panel.style.cssText = [
+    'position:fixed','right:0','top:58px',
+    'width:' + pw + 'vw','height:calc(100vh - 58px)',
+    'z-index:9000','background:#1e1e1e',
+    'border-left:2px solid #3c3c3c',
+    'display:flex','flex-direction:column','overflow:hidden',
+    'box-shadow:-4px 0 20px rgba(0,0,0,.6)'
+  ].join(';');
+
+  /* ── Tab bar ── */
+  var tabBar = P.createElement('div');
+  tabBar.style.cssText = [
+    'display:flex','align-items:flex-end',
+    'background:#252526','border-bottom:1px solid #3c3c3c',
+    'overflow-x:auto','flex-shrink:0',
+    'scrollbar-width:thin','padding-top:4px'
+  ].join(';');
+
+  var tab = P.createElement('div');
+  tab.title = fname;
+  tab.style.cssText = [
+    'display:flex','align-items:center','gap:5px',
+    'padding:5px 12px 6px','cursor:default',
+    'border-right:1px solid #3c3c3c',
+    'font:12px system-ui,sans-serif',
+    'white-space:nowrap','flex-shrink:0',
+    'background:#1e1e1e','color:#ffffff',
+    'border-top:2px solid #007acc'
+  ].join(';');
+  var ico = P.createElement('span'); ico.textContent = '\uD83D\uDCC4';
+  var lbl = P.createElement('span'); lbl.textContent = shortName;
+  tab.append(ico, lbl);
+  tabBar.appendChild(tab);
+
+  var closeBtn = P.createElement('button');
+  closeBtn.style.cssText = [
+    'margin-left:auto','flex-shrink:0',
+    'background:transparent','border:none',
+    'color:#858585','cursor:pointer',
+    'font-size:18px','line-height:1',
+    'padding:4px 10px','align-self:center'
+  ].join(';');
+  closeBtn.title = 'Dismiss';
+  closeBtn.textContent = '\u00d7';
+  tabBar.appendChild(closeBtn);
+
+  /* ── Zoom toolbar (drag to resize) ── */
+  var zoomBar = P.createElement('div');
+  zoomBar.style.cssText = [
+    'padding:4px 12px','background:#2d2d2d',
+    'border-bottom:1px solid #3c3c3c',
+    'display:flex','align-items:center','gap:8px','flex-shrink:0',
+    'user-select:none'
+  ].join(';');
+  var zpct = P.createElement('span');
+  zpct.style.cssText = 'color:#ccc;min-width:42px;font:12px ui-monospace,monospace;';
+  zpct.textContent = '130%';
+  function mkBtn(t) {{
+    var b = P.createElement('button');
+    b.textContent = t;
+    b.style.cssText = 'padding:1px 9px;border-radius:4px;border:1px solid #666;background:#444;color:#fff;cursor:pointer;font-size:13px;';
+    return b;
+  }}
+  var zOut = mkBtn('\u2212'), zIn = mkBtn('+'), zRst = mkBtn('Reset');
+  zRst.style.fontSize = '11px';
+  var zLabel = P.createElement('span');
+  Object.assign(zLabel, {{style:'color:#aaa;font:600 11px system-ui;', textContent:'Zoom'}});
+  zoomBar.append(zLabel, zOut, zpct, zIn, zRst);
+
+  /* ── Scrollable PDF area ── */
+  var wrap = P.createElement('div');
+  wrap.style.cssText = 'flex:1;overflow:auto;background:#3c3c3c;padding:8px;';
+  var pages = P.createElement('div');
+  pages.style.cssText = 'width:max-content;min-width:100%;';
+  var errEl = P.createElement('div');
+  errEl.style.cssText = 'display:none;color:#f88;padding:12px;font:13px system-ui;';
+  wrap.append(pages, errEl);
+
+  panel.append(tabBar, zoomBar, wrap);
+  P.body.appendChild(panel);
+
+  /* ══════════════════ ZOOM & RENDER ══════════════════ */
+  var baseScale = 1.1, curScale = baseScale * 1.3;
+  var pdfDoc = null;
+  function zPct() {{ return Math.round((curScale / baseScale) * 100); }}
+  function updZ() {{ zpct.textContent = zPct() + '%'; }}
+
+  function renderDoc(preserveScroll) {{
+    if (!pdfDoc) return;
+    var saved = preserveScroll ? wrap.scrollTop : 0;
+    pages.innerHTML = '';
+    errEl.style.display = 'none';
+    var chain = Promise.resolve();
+    for (var p = 1; p <= pdfDoc.numPages; p++) {{
+      (function(n) {{
+        chain = chain.then(function() {{
+          return pdfDoc.getPage(n).then(function(page) {{
+            var vp  = page.getViewport({{scale: curScale}});
+            var cv  = P.createElement('canvas');
+            var ctx = cv.getContext('2d');
+            var dpr = window.parent.devicePixelRatio || 1;
+            cv.width  = Math.floor(vp.width  * dpr);
+            cv.height = Math.floor(vp.height * dpr);
+            cv.style.cssText = 'display:block;margin:0 auto 10px;box-shadow:0 1px 6px rgba(0,0,0,.5);' +
+              'width:' + Math.floor(vp.width) + 'px;height:' + Math.floor(vp.height) + 'px;';
+            pages.appendChild(cv);
+            return page.render({{
+              canvasContext: ctx, viewport: vp,
+              transform: dpr !== 1 ? [dpr,0,0,dpr,0,0] : null
+            }}).promise;
+          }});
+        }});
+      }})(p);
+    }}
+    chain.then(function() {{ if (saved) wrap.scrollTop = saved; }});
+  }}
+
+  zOut.onclick = function() {{ curScale = Math.max(baseScale*.35, curScale/1.2); updZ(); renderDoc(true); }};
+  zIn.onclick  = function() {{ curScale = Math.min(baseScale*12,  curScale*1.2); updZ(); renderDoc(true); }};
+  zRst.onclick = function() {{ curScale = baseScale*1.3; updZ(); renderDoc(false); }};
+  updZ();
+
+  /* ══════════════════ DRAG-TO-RESIZE ══════════════════ */
+  var EDGE = 14;
+  function beginResize(e) {{
+    if (e.button !== 0) return;
+    e.preventDefault();
+    var startX = e.clientX, startW = panel.getBoundingClientRect().width;
+    function onMove(ev) {{
+      var newW = Math.max(280, startW - (ev.clientX - startX));
+      var pct  = Math.round((newW / window.parent.innerWidth) * 100);
+      panel.style.width = pct + 'vw';
+      var st2 = P.getElementById({repr(_DIG_PANEL_STYLE_ID)});
+      if (st2) st2.textContent =
+        'div[data-testid="stMainBlockContainer"],' +
+        'div[data-testid="stAppViewBlockContainer"] {{' +
+        'max-width:none !important;padding-right:calc(' + pct + 'vw + 28px) !important;' +
+        'box-sizing:border-box !important;}}';
+    }}
+    function onUp() {{
+      P.removeEventListener('mousemove', onMove);
+      P.removeEventListener('mouseup', onUp);
+      wrap.style.cursor = '';
+    }}
+    P.addEventListener('mousemove', onMove);
+    P.addEventListener('mouseup', onUp);
+  }}
+  zoomBar.addEventListener('mousedown', function(e) {{
+    if (e.target.closest && e.target.closest('button')) return;
+    beginResize(e);
+  }});
+  wrap.addEventListener('mousedown', function(e) {{
+    if (e.clientX - panel.getBoundingClientRect().left > EDGE) return;
+    beginResize(e);
+  }});
+  wrap.addEventListener('mousemove', function(e) {{
+    wrap.style.cursor = (e.clientX - panel.getBoundingClientRect().left <= EDGE) ? 'ew-resize' : '';
+  }});
+  wrap.addEventListener('mouseleave', function() {{ wrap.style.cursor = ''; }});
+
+  /* ══════════════════ CLOSE ══════════════════ */
+  closeBtn.onclick = function() {{
+    panel.style.display = 'none';
+    var st2 = P.getElementById({repr(_DIG_PANEL_STYLE_ID)});
+    if (st2) st2.remove();
+  }};
+
+  /* ══════════════════ LOAD PDF ══════════════════ */
+  function loadPdf() {{
+    var lib = window.parent.pdfjsLib;
+    if (!lib) {{
+      errEl.style.display = 'block';
+      errEl.textContent = 'PDF.js not loaded — ensure the backend is running.';
+      return;
+    }}
+    lib.GlobalWorkerOptions.workerSrc = pjsBase + '/pdf.worker.min.js';
+    pages.innerHTML = '<div style="color:#aaa;padding:16px;font:13px system-ui;">Loading\u2026</div>';
+    var raw = atob(b64data), bytes = new Uint8Array(raw.length);
+    for (var i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+    lib.getDocument({{data: bytes}}).promise.then(function(pdf) {{
+      pdfDoc = pdf;
+      renderDoc(false);
+    }}).catch(function(e) {{
+      errEl.style.display = 'block';
+      errEl.textContent = 'PDF error: ' + (e && e.message || String(e));
+    }});
+  }}
+
+  if (window.parent.pdfjsLib) {{
+    loadPdf();
+  }} else {{
+    var s = P.createElement('script');
+    s.src    = pjsBase + '/pdf.min.js';
+    s.onload = loadPdf;
+    s.onerror = function() {{
+      errEl.style.display = 'block';
+      errEl.textContent = 'Failed to load PDF.js from the backend.';
+    }};
+    P.head.appendChild(s);
+  }}
+}})();
+</script></body></html>"""
+
+
+def _render_dig_pdf_floating_panel(filename: str, pdf_bytes: bytes) -> None:
+    """Inject the floating workbook PDF panel into the parent DOM."""
+    pdfjs_base = f"{BACKEND_URL.rstrip('/')}/static/pdfjs"
+    fp = hashlib.md5(pdf_bytes[:16384], usedforsecurity=False).hexdigest()[:16]
+    panel_id = "dig-pdf-" + fp
+
+    b64_key = f"dig_pdf_b64_{fp}"
+    if b64_key not in st.session_state:
+        st.session_state[b64_key] = base64.b64encode(pdf_bytes).decode()
+    b64 = st.session_state[b64_key]
+
+    html_key = f"dig_pdf_panel_html_{fp}_v{_DIG_PANEL_HTML_VER}"
+    done_key = f"dig_pdf_panel_done_{fp}_v{_DIG_PANEL_HTML_VER}"
+
+    if html_key not in st.session_state:
+        st.session_state[html_key] = _dig_pdf_floating_panel_html(
+            panel_id, pdfjs_base, filename, b64
+        )
+
+    if not st.session_state.get(done_key):
+        st_components.html(st.session_state[html_key], height=0, scrolling=False)
+        st.session_state[done_key] = True
+
+
+def _cleanup_dig_pdf_panel() -> None:
+    """Remove the floating dig package PDF panel and layout CSS from the parent DOM."""
+    for key in list(st.session_state.keys()):
+        if key.startswith("dig_pdf_panel_done_"):
+            del st.session_state[key]
+    st_components.html(
+        f"""<script>
+        var P = window.parent.document;
+        P.querySelectorAll('[{_DIG_PANEL_DATA_ATTR}]').forEach(function(el){{el.remove();}});
+        var st = P.getElementById({repr(_DIG_PANEL_STYLE_ID)});
+        if (st) st.remove();
+        </script>""",
+        height=0,
+        scrolling=False,
+    )
+
+
 def _dig_pdf_js_viewer_html(
     vid: str,
     pdfjs_base: str,
@@ -1514,54 +1812,65 @@ def render_dig_package_visual_tool() -> None:
 
         if maps_ok and raw_bytes:
             st.markdown("---")
-            st.markdown("##### Maps + original workbook")
-            st.caption(
-                "2D / 3D on the left; workbook on the right when shown. "
-                "Drag the **narrow bar** between the two sides to change the split (release to apply). "
-                "Use **− / +** on the PDF to zoom; scroll if the page is wider than the column."
-            )
-            panel_on = st.toggle(
-                "Show workbook beside maps",
-                value=bool(st.session_state.get("dig_pdf_panel_visible", True)),
-                key="dig_pdf_panel_visible_toggle",
-            )
-            st.session_state.dig_pdf_panel_visible = panel_on
 
-            if panel_on:
-                try:
-                    from dig_split_grip import dig_split_grip as _split_grip
-                except ImportError:
-                    _split_grip = None
+            # ── Convert Excel → PDF (cached) ──────────────────────────────────
+            fname = dig_file.name
+            stem  = fname.rsplit(".", 1)[0] if "." in fname else fname
+            pdf_key = f"dig_pkg_pdf_{fname}"
+            if pdf_key not in st.session_state:
+                with st.spinner("Converting workbook to PDF for preview…"):
+                    _pdf = asyncio.run(call_excel_to_pdf_api(raw_bytes, fname))
+                st.session_state[pdf_key] = _pdf
+            pdf_bytes = st.session_state.get(pdf_key)
 
-                ratio = float(st.session_state.get("dig_split_left_frac", 0.5))
-                if _split_grip is not None:
-                    rem = 99
-                    lw = max(15, min(84, int(ratio * rem)))
-                    rw = rem - lw
-                    col_maps, col_grip, col_book = st.columns(
-                        [lw, 1, rw], gap="small", vertical_alignment="top"
-                    )
-                    with col_grip:
-                        split_out = _split_grip(
-                            default_ratio=ratio, key="dig_split_grip_widget"
+            # ── Downloads + PDF preview toggle (side by side) ─────────────────
+            col_dl, col_tog, _ = st.columns([2, 2, 3])
+            with col_dl:
+                if pdf_bytes:
+                    with st.popover("⬇ Downloads", help="Download Excel or PDF"):
+                        st.download_button(
+                            "⬇ Excel",
+                            data=raw_bytes,
+                            file_name=fname,
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key=f"dig_pkg_download_{fname}",
                         )
-                    if split_out is not None:
-                        st.session_state["dig_split_left_frac"] = float(split_out)
+                        st.download_button(
+                            "PDF",
+                            data=pdf_bytes,
+                            file_name=f"{stem}.pdf",
+                            mime="application/pdf",
+                            key=f"dig_pkg_download_pdf_{fname}",
+                        )
                 else:
-                    col_maps, col_book = st.columns(
-                        [50, 50], gap="large", vertical_alignment="top"
+                    st.download_button(
+                        "⬇ Excel",
+                        data=raw_bytes,
+                        file_name=fname,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key=f"dig_pkg_download_{fname}",
                     )
+            with col_tog:
+                if pdf_bytes:
+                    panel_on = st.toggle(
+                        "📄 PDF Preview",
+                        value=bool(st.session_state.get("dig_pdf_panel_visible", True)),
+                        key="dig_pdf_panel_visible_toggle",
+                        help="Show/hide the workbook PDF panel",
+                    )
+                    st.session_state.dig_pdf_panel_visible = panel_on
+                else:
+                    panel_on = False
 
-                with col_maps:
-                    render_feature_map_fragment(**_dig_package_feature_map_kwargs(fm))
-                with col_book:
-                    with st.container(border=True):
-                        st.markdown("**📄 Original workbook**")
-                        _render_dig_package_source_preview(
-                            dig_file, raw_bytes, compact=True
-                        )
+            # ── Floating panel inject / cleanup ───────────────────────────────
+            if panel_on and pdf_bytes:
+                _render_dig_pdf_floating_panel(fname, pdf_bytes)
             else:
-                render_feature_map_fragment(**_dig_package_feature_map_kwargs(fm))
+                _cleanup_dig_pdf_panel()
+
+            # ── Maps — always full-width ──────────────────────────────────────
+            render_feature_map_fragment(**_dig_package_feature_map_kwargs(fm))
+
         elif maps_ok:
             st.markdown("---")
             render_feature_map_fragment(**_dig_package_feature_map_kwargs(fm))

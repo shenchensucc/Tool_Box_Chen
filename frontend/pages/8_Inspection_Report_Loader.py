@@ -711,7 +711,10 @@ def _do_read(
     page_counts = [_pdf_page_count(pf.getvalue()) for pf in pdf_files]
 
     def _estimate_secs(pages: int) -> float:
-        return max(14.0, 6.0 + max(pages, 1) * 8.0)
+        # Most PDFs finish via pdfplumber table parsers in 2-5 s.
+        # OCR-heavy PDFs (genuinely scanned, no embedded text) take 15-30 s.
+        # Use a conservative middle estimate so the bar moves smoothly either way.
+        return max(5.0, 3.0 + max(pages, 1) * 2.5)
 
     for i, pf in enumerate(pdf_files):
         pages = page_counts[i]

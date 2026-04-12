@@ -8,7 +8,7 @@ echo The app will open automatically in your browser
 echo.
 
 cd /d "%~dp0\frontend"
-python -m streamlit run Home.py
+python -m streamlit run Home.py --server.headless true
 
 if %ERRORLEVEL% NEQ 0 (
     echo.
