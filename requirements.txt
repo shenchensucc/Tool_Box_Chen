@@ -36,6 +36,7 @@ pdfplumber>=0.11.0
 pymupdf>=1.24.0
 pytesseract>=0.3.10
 Pillow>=10.0.0
+azure-ai-documentintelligence>=1.0.0  # Cloud OCR (highest accuracy); set AZURE_DOCUMENT_INTELLIGENCE_* env vars
 # surya-ocr pulls torch from PyPI (often CPU-only). For NVIDIA GPU on Windows/Linux, install CUDA wheels AFTER deps:
 #   pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cu128
 # (surya-ocr needs torch>=2.7; cu124 index only ships torch<=2.6 — use cu128 or newer.) Then optional: INSPECTION_REPORT_OCR_GPU=1

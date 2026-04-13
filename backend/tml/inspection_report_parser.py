@@ -46,16 +46,24 @@ _TESSERACT_AVAILABLE: Optional[bool] = None
 # Cached Tesseract cmd configuration: True once pytesseract.tesseract_cmd has been set.
 # Avoids repeated Path(...).exists() filesystem stats on every OCR call.
 _TESSERACT_CMD_CONFIGURED = False
+# Azure Document Intelligence: None = not yet checked, True/False = result cached
+_AZURE_DI_AVAILABLE: Optional[bool] = None
 
 # Protect singleton initialization: two threads must not race to create the same reader.
 _EASYOCR_INIT_LOCK = threading.Lock()
 _SURYA_INIT_LOCK = threading.Lock()
 _TESSERACT_INIT_LOCK = threading.Lock()
+_AZURE_DI_INIT_LOCK = threading.Lock()
 
 # In-process cache for OCR results: {(pdf_path_str, mtime_ns) -> List[ExtractedReading]}
 # Avoids re-running expensive EasyOCR on a file that hasn't changed.
 _STRUCT_OCR_CACHE: dict = {}
 _STRUCT_OCR_CACHE_LOCK = threading.Lock()
+
+# Debug cache: {filename -> {"pages": [{"page": N, "text": str, "token_count": N}], "total_tokens": N}}
+# Populated by _run_azure_di_on_pdf so the Streamlit UI can display raw OCR output for diagnostics.
+_AZURE_DI_DEBUG_CACHE: dict = {}
+_AZURE_DI_DEBUG_CACHE_LOCK = threading.Lock()
 
 # Allow up to 2 simultaneous OCR (CPU-bound) threads.
 # pytesseract shells out to the tesseract.exe binary — each call is a separate OS process,
@@ -311,6 +319,15 @@ def _validate_and_dedupe_before_export(results: List[ExtractedReading]) -> List[
 
 
 # Page filtering: prefer "UT REPORT - TEE/ELBOW/CONNECTIONS" summary tables, skip "UT Grid" detailed readings
+# Acuren "Readings, Grids & Photos on attached pages" cover page: the readings are in scan/photo
+# images, not in a structured table. Structured OCR (Surya) will find only area diagrams; the
+# correct path is flat OCR (Tesseract). Match spaced/fragmented text produced by pdfplumber.
+_READINGS_GRIDS_PHOTOS = re.compile(
+    r"R\s*e\s*a\s*d\s*i\s*n\s*g\s*s\s*,?\s+G\s*r\s*i\s*d\s*s\s*&\s*P\s*h\s*o\s*t\s*o\s*s\s+"
+    r"o\s*n\s*\s*a\s*t\s*t\s*a\s*c\s*h\s*e\s*d\s*\s*p\s*a\s*g\s*e\s*s",
+    re.I,
+)
+
 # Summary table has final thickness readings; grid pages (6"x6", 3"x3", 1"x1", 2"x2") are detailed scans - do not read
 # Fragmented PDFs may have "U T R E P O R T - T E E" (spaces between letters)
 _UT_REPORT_SUMMARY = re.compile(
@@ -323,7 +340,7 @@ _UT_REPORT_SUMMARY = re.compile(
 _UT_GRID_SECTION = re.compile(
     r"UT\s+Grid|GRID\s+Reading|Grid\s+Readings|UT\s+Grid\s+|"
     r"GRID\s+STARTS|NOTE:.*GRID\s+STARTS|"
-    r'[12]\s*["\']?\s*[xX]\s*[12]\s*["\']?',  # 1"x1" or 2"x2" grid cell size
+    r'(?<![0-9A-Za-z])[12]\s*["\']?\s*[xX]\s*[12]\s*["\']?',  # 1"x1" or 2"x2" grid cell size
     re.I,
 )
 
@@ -485,8 +502,8 @@ def _parse_ut_report_summary_table(
                     row_text = " ".join(cells)
                     collapsed = re.sub(r"\s+", "", row_text)
 
-                    # Skip N/A FLANGE rows
-                    if re.search(r"N/?A|FLANGE", row_text, re.I):
+                    # Skip rows where Comments indicate no reading (N/A or FLANGE)
+                    if re.search(r"\bN/?A\b|\bFLANGE\b", row_text, re.I):
                         continue
 
                     # Section/zone number (1-9) - from SECTION column (before DIAM column)
@@ -867,7 +884,7 @@ def _parse_generic_zone_table(
                         except (ValueError, IndexError):
                             pass
 
-                    if re.search(r"N/A|FLANGE", row_text, re.I) and not readings_in_row:
+                    if re.search(r"\bN/?A\b|\bFLANGE\b", row_text, re.I) and not readings_in_row:
                         continue
 
                     # Explicit CML value in the row (Format B: CIRCUIT CML ZONE DIAM columns).
@@ -1012,27 +1029,56 @@ def _extract_readings_from_text_pdf(pdf) -> List[float]:
     return all_readings
 
 
-def _preprocess_for_ocr(img):
+def _preprocess_for_ocr(img, *, neural: bool = False):
     """Enhance image for better OCR on inspection report tables.
 
-    Pipeline: grayscale → autocontrast → unsharp mask.
-    Grayscale removes color noise from scanned pages.
-    Autocontrast normalises exposure across different scan qualities.
-    UnsharpMask clarifies digit edges (0.285 vs 0.28, 0.358 vs 0.35) without
-    introducing halation artefacts that a simple SHARPEN filter can cause.
+    Args:
+        img:    PIL Image (any mode).
+        neural: When True, use a lighter pipeline suitable for neural OCR engines
+                (Surya, EasyOCR) that were trained on natural images.  Heavy
+                binarisation can destroy the gradient features these models rely on.
+                When False (Tesseract default), apply full binarisation.
+
+    Pipeline (neural=False, Tesseract):
+        grayscale → autocontrast → unsharp mask → adaptive threshold (binarise)
+        Binarisation converts the image to pure black-and-white which Tesseract
+        handles best; eliminates grey backgrounds common in scanned PDFs.
+
+    Pipeline (neural=True, Surya/EasyOCR):
+        grayscale → autocontrast → mild unsharp mask
+        Keeps grey tones so the neural model retains contrast cues.
+        Skips binarisation which can erase thin strokes at small font sizes.
     """
     try:
-        from PIL import ImageEnhance, ImageFilter, ImageOps
+        from PIL import ImageFilter, ImageOps
+        import numpy as np
 
-        # Grayscale gives a uniform, noise-reduced base for both Tesseract and EasyOCR/Surya
         gray = img.convert("L")
-        # Autocontrast: stretches histogram to [0, 255]; cutoff=1 clips 1% of dark/light pixels
-        # to avoid a single dark border or white glare dominating the normalisation.
+        # Autocontrast: clip 1% of dark/light extremes to normalise scanned exposure.
         gray = ImageOps.autocontrast(gray, cutoff=1)
-        # UnsharpMask: radius controls the blur kernel; percent is the boost strength;
-        # threshold avoids sharpening already-sharp edges twice.
-        gray = gray.filter(ImageFilter.UnsharpMask(radius=1, percent=180, threshold=3))
-        # Return RGB so pytesseract / EasyOCR / Surya all accept it without conversion.
+        # Unsharp mask clarifies digit edges (e.g. distinguishes "0.285" from "0.28").
+        # Lighter radius for neural engines to avoid over-sharpening thin strokes.
+        radius = 0.8 if neural else 1
+        gray = gray.filter(ImageFilter.UnsharpMask(radius=radius, percent=150, threshold=3))
+
+        if not neural:
+            # Adaptive threshold: converts to black-and-white using a local neighbourhood
+            # mean. Better than global threshold for uneven lighting across a scanned page.
+            # block_size must be odd; C is the constant subtracted from the mean.
+            try:
+                import cv2
+                gray_np = np.array(gray)
+                binary = cv2.adaptiveThreshold(
+                    gray_np, 255,
+                    cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                    cv2.THRESH_BINARY,
+                    blockSize=31,  # neighbourhood size; larger = handles broader gradients
+                    C=10,          # subtract 10 from local mean; removes light-grey backgrounds
+                )
+                gray = type(gray).fromarray(binary)
+            except ImportError:
+                pass  # cv2 not available; skip adaptive threshold, proceed with grayscale
+
         return gray.convert("RGB")
     except Exception:
         return img
@@ -1087,9 +1133,10 @@ def _run_ocr_on_page(page_image: bytes, dpi: int = 300, psm: int = 6) -> str:
 
 
 # OCR: detect grid pages (6"x6", 3"x3", 1"x1", 2"x2" etc.) - do not extract readings from these
+# (?<![0-9A-Za-z]) prevents false matches on circuit IDs like "53-001X 1-1" where "1X 1" would match.
 _OCR_GRID_PAGE = re.compile(
     r"grid\s+scan|grid\s+letters|grid\s+number|"
-    r'[1236]\s*["\']?\s*[xX]\s*[1236]\s*["\']?|'
+    r'(?<![0-9A-Za-z])[1236]\s*["\']?\s*[xX]\s*[1236]\s*["\']?|'
     r"letters\s+[A-Z]\s+to\s+[A-Z]|go\s+with\s+flow",
     re.I,
 )
@@ -1236,7 +1283,7 @@ def _extract_with_easyocr(pdf_path: Path) -> Tuple[str, List[float], List[str], 
         img_bytes = pix.tobytes(output="png")
         img = Image.open(io.BytesIO(img_bytes))
         if os.getenv("INSPECTION_REPORT_OCR_PREPROCESS", "1") != "0":
-            img = _preprocess_for_ocr(img)
+            img = _preprocess_for_ocr(img, neural=True)
         img = np.array(img)
         result = reader.readtext(img)
         page_text = ""
@@ -1382,6 +1429,256 @@ def _iter_candidate_page_segments(doc, candidate_pages: List[int], dpi: int = 30
             continue
 
 
+def _is_azure_di_available() -> bool:
+    """Cached check: True if AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT + KEY are set and SDK is installed."""
+    global _AZURE_DI_AVAILABLE
+    if _AZURE_DI_AVAILABLE is not None:
+        return _AZURE_DI_AVAILABLE
+    with _AZURE_DI_INIT_LOCK:
+        if _AZURE_DI_AVAILABLE is not None:
+            return _AZURE_DI_AVAILABLE
+        endpoint = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT", "").strip()
+        key = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_KEY", "").strip()
+        if not endpoint or not key:
+            _AZURE_DI_AVAILABLE = False
+            return False
+        try:
+            from azure.ai.documentintelligence import DocumentIntelligenceClient  # noqa: F401
+            from azure.core.credentials import AzureKeyCredential  # noqa: F401
+            _AZURE_DI_AVAILABLE = True
+        except ImportError:
+            _logger.warning(
+                "azure-ai-documentintelligence not installed; Azure DI unavailable. "
+                "Run: pip install azure-ai-documentintelligence"
+            )
+            _AZURE_DI_AVAILABLE = False
+    return _AZURE_DI_AVAILABLE
+
+
+def _azure_di_call_with_retry(client, body, content_type: str, pages: Optional[str] = None):
+    """Submit a document to Azure DI prebuilt-layout and return the AnalyzeResult.
+
+    body must be an IO[bytes] object (e.g. BytesIO).  On 429 retries the stream
+    is rewound with seek(0) before each attempt so the full content is re-sent.
+    Retries up to 3 times, honouring the "retry after N seconds" hint when present.
+    Raises on non-429 errors or if all retries are exhausted.
+
+    pages: optional page-range string (e.g. "1-2") passed to the API to work around
+           the F0 free-tier 2-page-per-call limit.
+    """
+    import time as _time_di
+    import re as _re_di
+    _retries = 3
+    _delay = 20.0
+    _kwargs = {"content_type": content_type}
+    if pages:
+        _kwargs["pages"] = pages
+    for _attempt in range(_retries):
+        # Rewind the stream so each attempt sends the full content.
+        if hasattr(body, "seek"):
+            body.seek(0)
+        try:
+            poller = client.begin_analyze_document(
+                "prebuilt-layout",
+                body=body,
+                **_kwargs,
+            )
+            return poller.result()
+        except Exception as _exc:
+            _exc_str = str(_exc)
+            if "429" in _exc_str and _attempt < _retries - 1:
+                _m = _re_di.search(r"retry after (\d+) second", _exc_str, _re_di.IGNORECASE)
+                _wait = int(_m.group(1)) + 1 if _m else _delay
+                _logger.warning(
+                    "Azure DI rate limit (attempt %d/%d), retrying in %.1fs",
+                    _attempt + 1, _retries, _wait,
+                )
+                _time_di.sleep(_wait)
+                _delay = max(_delay * 2, _wait + 5)
+            else:
+                raise
+
+
+def _normalize_azure_di_page(page) -> List[dict]:
+    """Normalize one Azure DI DocumentPage into a list of positioned token dicts.
+
+    Handles both image mode (unit="pixel") and PDF mode (unit="inch").
+    PDF inch coordinates are converted to points (×72) so all token positions
+    use the same relative scale expected by _extract_structured_rows_from_easyocr_tokens.
+    """
+    # page.unit is a LengthUnit enum in the azure-ai-documentintelligence SDK,
+    # so str(page.unit) yields "LengthUnit.INCH", not "inch".  Use .value when
+    # available so the comparison works regardless of SDK version.
+    _unit_raw = getattr(page, "unit", None)
+    unit = getattr(_unit_raw, "value", str(_unit_raw or "pixel")).lower()
+    scale = 72.0 if unit == "inch" else 1.0  # inch → points (72 pt/in); pixel stays as-is
+    tokens: List[dict] = []
+    _words = page.words or []
+    _skipped_no_polygon = 0
+    for word in _words:
+        text = (word.content or "").strip()
+        if not text:
+            continue
+        polygon = word.polygon  # [x0,y0, x1,y1, x2,y2, x3,y3]
+        if not polygon or len(polygon) < 8:
+            _skipped_no_polygon += 1
+            continue
+        xs = [polygon[i] * scale for i in range(0, len(polygon), 2)]
+        ys = [polygon[i] * scale for i in range(1, len(polygon), 2)]
+        left, right = min(xs), max(xs)
+        top, bottom = min(ys), max(ys)
+        height = max(1.0, bottom - top)
+        conf = float(word.confidence) if word.confidence is not None else 0.9
+        tokens.append({
+            "text": text,
+            "conf": conf,
+            "left": left,
+            "right": right,
+            "top": top,
+            "bottom": bottom,
+            "cy": top + height / 2.0,
+            "height": height,
+        })
+    if _skipped_no_polygon and not tokens:
+        _logger.debug(
+            "Azure DI page (unit=%s): %d words, all skipped (no valid polygon). "
+            "First word polygon sample: %r",
+            unit, len(_words),
+            (_words[0].polygon if _words else None),
+        )
+    return tokens
+
+
+def _run_azure_di_on_pdf(pdf_path: Path, source_filename: str = "") -> List[List[dict]]:
+    """Send the PDF to Azure Document Intelligence in paginated batches.
+
+    The Azure DI F0 free tier silently limits processing to the first 2 pages
+    of a document per API call.  To work around this, we determine the PDF page
+    count and issue one call per 2-page batch (pages "1-2", "3-4", …), then
+    combine the results into a single per-page token list.
+
+    Returns a list of token-lists, one per PDF page (1-based page index − 1).
+    Returns empty list on any error.
+    """
+    try:
+        from azure.ai.documentintelligence import DocumentIntelligenceClient
+        from azure.core.credentials import AzureKeyCredential
+    except ImportError:
+        return []
+
+    endpoint = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT", "").strip()
+    key = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_KEY", "").strip()
+    if not endpoint or not key:
+        return []
+
+    try:
+        pdf_bytes = pdf_path.read_bytes()
+    except Exception as exc:
+        _logger.warning("Azure DI: could not read PDF %s: %s", pdf_path, exc)
+        return []
+
+    # Determine the PDF page count so we can build the page batches.
+    try:
+        _doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+        _total_pages = len(_doc)
+        _doc.close()
+    except Exception:
+        _total_pages = 0  # unknown; attempt a single call without pages param
+
+    # Batch size of 2 keeps each call within the F0 free-tier page limit.
+    _BATCH = 2
+    try:
+        import io as _io
+        client = DocumentIntelligenceClient(endpoint=endpoint, credential=AzureKeyCredential(key))
+
+        # Build page-range strings: "1-2", "3-4", …
+        if _total_pages > 0:
+            batches = [
+                f"{start}-{min(start + _BATCH - 1, _total_pages)}"
+                for start in range(1, _total_pages + 1, _BATCH)
+            ]
+        else:
+            batches = [None]  # no pages param → let API decide
+
+        # per_page_map: 1-based page_number → token list
+        per_page_map: dict = {}
+        for batch_pages in batches:
+            result = _azure_di_call_with_retry(
+                client, _io.BytesIO(pdf_bytes),
+                content_type="application/pdf",
+                pages=batch_pages,
+            )
+            for page in result.pages or []:
+                per_page_map[page.page_number] = _normalize_azure_di_page(page)
+
+        # Build the final list ordered by 1-based page number.
+        if not per_page_map:
+            return []
+        max_page = max(per_page_map)
+        per_page = [per_page_map.get(p, []) for p in range(1, max_page + 1)]
+        _total_tokens = sum(len(p) for p in per_page)
+        _logger.info(
+            "Azure DI PDF %s: %d pages processed (%d batches), %d total tokens",
+            pdf_path.name, len(per_page), len(batches), _total_tokens,
+        )
+        # Store human-readable debug snapshot for UI diagnostics.
+        _debug_pages = []
+        for _pi, _page_tokens in enumerate(per_page, start=1):
+            _debug_pages.append({
+                "page": _pi,
+                "text": _tokens_to_readable_text(_page_tokens),
+                "token_count": len(_page_tokens),
+            })
+        _cache_key = source_filename or pdf_path.name
+        with _AZURE_DI_DEBUG_CACHE_LOCK:
+            _AZURE_DI_DEBUG_CACHE[_cache_key] = {
+                "pages": _debug_pages,
+                "total_tokens": _total_tokens,
+            }
+        return per_page
+    except Exception as exc:
+        _logger.warning("Azure Document Intelligence PDF failed (%s): %s", pdf_path.name, exc)
+        return []
+
+
+def _tokens_to_readable_text(tokens: List[dict]) -> str:
+    """Reconstruct reading-order text from a list of positioned token dicts.
+
+    Groups tokens into rows by approximate y-coordinate, sorts each row left-to-right,
+    then joins rows with newlines.  Used only for debug display — not for parsing.
+    """
+    if not tokens:
+        return ""
+    rows: dict = {}
+    for t in tokens:
+        cy = t["cy"]
+        h = t.get("height", 10.0)
+        row_tol = max(4.0, h * 0.6)
+        matched = None
+        for ry in rows:
+            if abs(cy - ry) <= row_tol:
+                matched = ry
+                break
+        if matched is None:
+            rows[cy] = [t]
+        else:
+            rows[matched].append(t)
+    lines = []
+    for ry in sorted(rows):
+        row_tokens = sorted(rows[ry], key=lambda t: t["left"])
+        lines.append("  ".join(t["text"] for t in row_tokens))
+    return "\n".join(lines)
+
+
+def get_azure_di_debug_data(filename: str) -> Optional[dict]:
+    """Return the most-recent Azure DI debug snapshot for *filename*, or None.
+
+    Returns: {"pages": [{"page": N, "text": str, "token_count": N}, ...], "total_tokens": N}
+    """
+    with _AZURE_DI_DEBUG_CACHE_LOCK:
+        return _AZURE_DI_DEBUG_CACHE.get(filename)
+
+
 def _normalize_easyocr_tokens(ocr_result) -> List[dict]:
     """Convert EasyOCR output into simple positioned tokens."""
     tokens = []
@@ -1463,6 +1760,10 @@ def _get_surya_models():
             det_predictor = DetectionPredictor()
             foundation_predictor = FoundationPredictor()
             rec_predictor = RecognitionPredictor(foundation_predictor)
+            # Suppress surya's tqdm progress bars ("Detecting bboxes", "Recognizing Text")
+            # so they don't appear as noise in the Streamlit console / log output.
+            det_predictor.disable_tqdm = True
+            rec_predictor.disable_tqdm = True
             _SURYA_MODELS = (det_predictor, rec_predictor)
         except Exception as exc:
             _logger.warning("surya init failed: %s", exc)
@@ -1600,32 +1901,30 @@ def _normalize_tesseract_tokens(img_np) -> List[dict]:
 
 def _run_structured_ocr_on_image(img_np):
     """
-    Return (normalized OCR tokens, engine id) from the preferred structured OCR engine.
+    Return (normalized OCR tokens, engine id) from the local structured OCR engine.
 
-    Engine order (auto mode):
-    1. Surya — document OCR, fast on CPU
-    2. EasyOCR — neural fallback
-    3. Tesseract — last resort; per-word bboxes via image_to_data
+    Used as fallback when Azure Document Intelligence is not configured. Azure DI
+    is now handled at the PDF level via _run_azure_di_on_pdf (one call per document).
+
+    Engine order (auto mode): Surya → EasyOCR → Tesseract
 
     Override with INSPECTION_REPORT_STRUCTURED_OCR_ENGINE:
-    - tesseract: Tesseract only
-    - surya:     Surya only
-    - easyocr:   EasyOCR only
-    - auto:      Surya → EasyOCR → Tesseract (default)
+    - surya:      Surya only
+    - easyocr:    EasyOCR only
+    - tesseract:  Tesseract only
+    - auto:       Surya → EasyOCR → Tesseract (default)
 
-    Legacy value ``paddle`` is treated as ``auto`` (PaddleOCR support removed).
+    Legacy values ``paddle`` and ``azure`` are treated as ``auto``.
 
     Returns:
         (list of token dicts, engine name). Engine is \"surya\"|\"easyocr\"|\"tesseract\"
         or \"\" if no tokens were produced.
     """
     engine = os.getenv("INSPECTION_REPORT_STRUCTURED_OCR_ENGINE", "auto").strip().lower()
-    if engine == "paddle":
-        _logger.debug("INSPECTION_REPORT_STRUCTURED_OCR_ENGINE=paddle ignored (removed); using auto")
+    if engine in ("paddle", "azure"):
         engine = "auto"
 
     # Serialize CPU-bound OCR calls so parallel threads don't thrash each other.
-    # pdfplumber threads never reach this point and remain truly parallel.
     with _OCR_SEMAPHORE:
         if engine in ("surya", "auto"):
             models = _get_surya_models()
@@ -1708,20 +2007,27 @@ def _extract_structured_rows_from_easyocr_tokens(
             cml_base = expected
             break
     if not cml_base:
-        cml_match = re.search(r"\b\d+\.\d+\b", joined_text)
+        # CML IDs have integer part ≥ 1 (e.g. "2.05", "1.01").
+        # Readings are always "0.NNN" — the leading-zero requirement avoids
+        # matching a reading that appears before the CML label in sorted text.
+        cml_match = re.search(r"\b[1-9]\d*\.\d{1,2}\b", joined_text)
         if cml_match:
             cml_base = cml_match.group(0)
     if not cml_base:
         return []
 
     avg_height = sum(t["height"] for t in tokens) / max(1, len(tokens))
-    # Two separate tolerances:
-    # - cluster_tolerance: used when building row_centers so that closely-spaced data rows
-    #   (e.g. elbow/tee reports with ~25 px between zones) are not merged into one.
-    # - row_tolerance: wider band used when collecting all tokens that belong to a row, so
-    #   OCR tokens with slightly different baselines still join the same logical row.
-    cluster_tolerance = max(14.0, avg_height * 0.7)
-    row_tolerance = max(30.0, avg_height * 1.2)
+    # Two separate tolerances scaled purely by avg character height.
+    # Old code used pixel-floor constants (14 / 30) that break when coordinates
+    # are in points (72 pt/in) — row spacing ~13 pt is smaller than the 14 pt floor,
+    # causing adjacent data rows to be merged into a single cluster center.
+    # Removing the hard-coded floors makes both pixel and point modes work correctly.
+    # - cluster_tolerance: half a character height → rows further apart than 0.5 heights
+    #   are kept as separate centers.  At 300 DPI ~40 px/char → 20 px; at 72 dpi ~10 pt → 5 pt.
+    # - row_tolerance: 1.8 heights → wide enough to gather all tokens on a slightly
+    #   ragged OCR baseline without bleeding into the next row.
+    cluster_tolerance = avg_height * 0.5
+    row_tolerance = avg_height * 1.8
     header_tokens = [t for t in tokens if re.fullmatch(r"(?:CIRCUIT|CML|SECTION|ZONE|DIAM\.?|NORTH|SOUTH|EAST|WEST|TOP|BOTTOM|CENTER|HIGH|COMMENTS|A|B|C|D|E)", t["text"], re.I)]
     header_row = None
     for token in header_tokens:
@@ -1748,7 +2054,7 @@ def _extract_structured_rows_from_easyocr_tokens(
 
     sorted_tokens = sorted(tokens, key=lambda t: (t["cy"], t["left"]))
     row_centers: List[float] = []
-    header_cutoff = max(t["cy"] for t in header_row) + max(12.0, avg_height * 0.4)
+    header_cutoff = max(t["cy"] for t in header_row) + avg_height * 0.3
     for token in sorted_tokens:
         if token["cy"] <= header_cutoff:
             continue
@@ -1766,14 +2072,37 @@ def _extract_structured_rows_from_easyocr_tokens(
         if abs(_t["cy"] - _nearest) <= row_tolerance:
             _token_by_center[_nearest].append(_t)
 
+    # Pre-scan: find rows that are CML label rows (CML value near cml_x but no section number).
+    # In Acuren-style tables, the CML column is a merged cell spanning all sections; the CML value
+    # appears at the visual midpoint (typically between sections 2 and 3). This means sections 1-2
+    # are processed BEFORE the label is seen and would be misattributed to the previous CML.
+    # Solution: build a list of (cy, cml_val) positions; assign each data row to the nearest label.
+    _cml_label_positions: List[Tuple[float, str]] = []
+    if cml_x is not None and len(fallback_cml_ids or []) > 1:
+        for _center in row_centers:
+            _rtoks = sorted(_token_by_center.get(_center, []), key=lambda t: t["left"])
+            _cml_cands = [
+                t for t in _rtoks
+                if re.fullmatch(r"\d+\.\d+", t["text"])
+                and abs(t["left"] - cml_x) < 80
+                and (not fallback_cml_ids or t["text"] in fallback_cml_ids)
+            ]
+            _sec_cands = [
+                t for t in _rtoks
+                if re.fullmatch(r"\d{1,2}", t["text"]) and 1 <= int(t["text"]) <= 40
+            ]
+            if _cml_cands and not _sec_cands:
+                _cml_label_positions.append((_center, _cml_cands[0]["text"]))
+
     results: List[ExtractedReading] = []
     active_cml_base = cml_base
     _row_seq = 0  # fallback sequential zone counter when section column is absent
-    _explicit_sections_used: set = set()  # track explicitly-read section numbers
+    _explicit_sections_used: set = set()  # track explicitly-read section numbers for current CML
+    _seq_cml = cml_base  # which CML the sequential counter belongs to
     for center in row_centers:
         row_tokens = sorted(_token_by_center.get(center, []), key=lambda t: t["left"])
         row_text = " ".join(t["text"] for t in row_tokens)
-        if re.search(r"N/?A|FLANGE", row_text, re.I):
+        if re.search(r"\bN/?A\b|\bFLANGE\b", row_text, re.I):
             continue
 
         row_cml_base = active_cml_base
@@ -1781,7 +2110,9 @@ def _extract_structured_rows_from_easyocr_tokens(
         if cml_x is not None:
             cml_candidates = []
             for token in row_tokens:
-                if re.fullmatch(r"\d+\.\d+", token["text"]):
+                # Same integer-part-≥-1 guard as cml_base search: readings are
+                # always "0.NNN" and must never be treated as CML identifiers.
+                if re.fullmatch(r"[1-9]\d*\.\d+", token["text"]):
                     cml_candidates.append((abs(token["left"] - cml_x), token["left"], token["text"]))
             if cml_candidates:
                 cml_candidates.sort(key=lambda item: (item[0], item[1]))
@@ -1790,8 +2121,23 @@ def _extract_structured_rows_from_easyocr_tokens(
                     row_cml_base = candidate
                     active_cml_base = candidate
                     row_has_explicit_cml = True
+        # When CML labels appear at the midpoint of merged cells (between sections 2 and 3),
+        # sections 1-2 get processed before the label is seen and take the wrong CML base.
+        # Use nearest CML label position to override the active_cml_base for these early rows.
+        if _cml_label_positions and not row_has_explicit_cml:
+            nearest_label = min(_cml_label_positions, key=lambda lp: abs(lp[0] - center))
+            row_cml_base = nearest_label[1]
         if not row_cml_base:
             continue
+
+        # Reset per-CML sequential counter when the active CML changes.
+        # _explicit_sections_used tracks sections seen for the CURRENT CML only;
+        # carrying it across CMLs causes the fallback counter to skip valid numbers
+        # (e.g. CML 1.32 used sections 1-4, so CML 1.34's fallback would start at 5).
+        if row_cml_base != _seq_cml:
+            _row_seq = 0
+            _explicit_sections_used = set()
+            _seq_cml = row_cml_base
 
         if section_x is None:
             continue
@@ -1806,14 +2152,18 @@ def _extract_structured_rows_from_easyocr_tokens(
                 except ValueError:
                     continue
                 if 1 <= section_num <= 40:
-                    section_candidates.append((token["left"], section_text))
+                    # Distance to the SECTION column header x — used to rank candidates.
+                    section_candidates.append((abs(token["left"] - section_x), token["left"], section_text))
+        # Pick the candidate closest to the SECTION column x position.
+        # Using the rightmost token (old code: unique_sections[-1]) backfires when
+        # the diameter column token (e.g. "8" from a split "8\"") sits to the right
+        # of the true section number and gets chosen instead.
         unique_sections = []
         seen_sections = set()
-        for left, section_text in sorted(section_candidates, key=lambda item: item[0]):
+        for _dist, _left, section_text in sorted(section_candidates):
             if section_text not in seen_sections:
                 unique_sections.append(section_text)
                 seen_sections.add(section_text)
-
         # Minimum OCR confidence for numeric reading tokens.
         # 0.6 rejects clear noise while allowing marginally blurry scans.
         # Set INSPECTION_REPORT_OCR_MIN_CONF=0 to disable confidence gating.
@@ -1859,7 +2209,7 @@ def _extract_structured_rows_from_easyocr_tokens(
             )
             continue
 
-        section = unique_sections[-1]
+        section = unique_sections[0]  # closest to section_x (sorted above)
         _explicit_sections_used.add(section)
         min_value = min(readings_in_row)
         results.append(
@@ -1886,36 +2236,73 @@ def _extract_structured_with_local_ocr(
     candidate_pages: Optional[List[int]] = None,
     content_hash: Optional[str] = None,
 ) -> List[ExtractedReading]:
-    """Local structured OCR for image-heavy reports using embedded summary images.
+    """Structured OCR for inspection report PDFs.
+
+    Azure DI path (preferred): sends the entire PDF in one API call, processes
+    all returned pages locally with _extract_structured_rows_from_easyocr_tokens.
+
+    Local fallback (when Azure DI is not configured): renders candidate pages as
+    images and runs Surya / EasyOCR / Tesseract on each segment.
 
     Args:
-        candidate_pages: Pre-computed page indices from _classify_pdf_for_ocr().
-                         When provided, skips the redundant PDF open for page selection.
-        content_hash: Pre-computed MD5 hex digest of the PDF bytes.
-                      When provided, avoids reading the file again just for the cache key.
-                      Callers that already read the bytes (parse_inspection_report_pdf) should
-                      pass this to avoid redundant full-file reads on every OCR call site.
+        candidate_pages: Used only by the local fallback path to limit which pages
+                         are rendered. Ignored when Azure DI is available.
+        content_hash: Pre-computed MD5 of the PDF bytes for cache keying.
     """
     # ── Cache check (keyed on content hash, not temp-file path) ───────────────
-    # Temp files have unique UUID paths, so path+mtime never hits across requests.
-    # MD5 of file bytes hits whenever the same PDF is uploaded again.
-    # Use the pre-computed hash when available to avoid reading the full file again.
     if content_hash:
         _cache_key = content_hash
         with _STRUCT_OCR_CACHE_LOCK:
             if _cache_key in _STRUCT_OCR_CACHE:
-                _logger.debug("OCR cache hit (pre-computed hash) for %s", pdf_path.name)
+                _logger.debug("OCR cache hit for %s", pdf_path.name)
                 return _STRUCT_OCR_CACHE[_cache_key]
     else:
         try:
             _cache_key = hashlib.md5(pdf_path.read_bytes(), usedforsecurity=False).hexdigest()
             with _STRUCT_OCR_CACHE_LOCK:
                 if _cache_key in _STRUCT_OCR_CACHE:
-                    _logger.debug("OCR cache hit (content hash) for %s", pdf_path.name)
+                    _logger.debug("OCR cache hit for %s", pdf_path.name)
                     return _STRUCT_OCR_CACHE[_cache_key]
         except Exception:
             _cache_key = None
 
+    def _cache_and_return(result_list: List[ExtractedReading]) -> List[ExtractedReading]:
+        if _cache_key:
+            with _STRUCT_OCR_CACHE_LOCK:
+                _STRUCT_OCR_CACHE[_cache_key] = result_list
+        return result_list
+
+    # ── Azure Document Intelligence: one call for the entire PDF ──────────────
+    if _is_azure_di_available():
+        per_page_tokens = _run_azure_di_on_pdf(pdf_path, source_filename=source_filename)
+        _total_az_tokens = sum(len(p) for p in per_page_tokens) if per_page_tokens else 0
+        if per_page_tokens and _total_az_tokens > 0:
+            results: List[ExtractedReading] = []
+            for page_tokens in per_page_tokens:
+                if not page_tokens:
+                    continue
+                page_results = _extract_structured_rows_from_easyocr_tokens(
+                    page_tokens,
+                    source_filename=source_filename or pdf_path.name,
+                    fallback_circuit=fallback_circuit,
+                    fallback_date=fallback_date,
+                    fallback_cml_ids=fallback_cml_ids,
+                    structured_ocr_engine="azure_di",
+                )
+                results.extend(page_results)
+            finalized = _validate_and_dedupe_before_export(results) if results else []
+            # Require at least a few rows unless we have explicit CML context
+            out = [] if (finalized and len(finalized) < 3 and not fallback_cml_ids) else finalized
+            return _cache_and_return(out)
+        elif per_page_tokens is not None and _total_az_tokens == 0:
+            # Azure DI returned pages but extracted zero word tokens.
+            # Do NOT cache this — fall through to local OCR engines instead.
+            _logger.warning(
+                "Azure DI returned %d pages with 0 tokens for %s — falling back to local OCR",
+                len(per_page_tokens) if per_page_tokens else 0, pdf_path.name,
+            )
+
+    # ── Local OCR fallback: Surya / EasyOCR / Tesseract ───────────────────────
     try:
         import io
         import numpy as np
@@ -1928,7 +2315,6 @@ def _extract_structured_with_local_ocr(
     if not candidate_pages:
         return []
 
-    # Require at least one OCR backend to proceed.
     if (_get_surya_models() is None and _get_easyocr_reader() is None
             and not _is_tesseract_available()):
         return []
@@ -1936,8 +2322,6 @@ def _extract_structured_with_local_ocr(
     doc = pymupdf.open(pdf_path)
     results: List[ExtractedReading] = []
     try:
-        import io
-
         # Pass 1: embedded report images (high precision on image-based summary tables).
         for page_idx, xref, segment_name, segment in _iter_candidate_image_segments(doc, candidate_pages):
             try:
@@ -1960,10 +2344,9 @@ def _extract_structured_with_local_ocr(
                 found_bases = {r.cml_id.split("-", 1)[0] for r in results if "-" in r.cml_id}
                 min_expected_rows = max(5, len(expected_bases) * 2 + 1) if expected_bases else 5
                 if expected_bases and expected_bases.issubset(found_bases) and len(results) >= min_expected_rows:
-                    return _validate_and_dedupe_before_export(results)
+                    return _cache_and_return(_validate_and_dedupe_before_export(results))
 
-        # Pass 2: full page rendered as image (helps when table is vector PDF text and not embedded image).
-        # Skip if Pass 1 already returned structured rows — pdfplumber can fill gaps.
+        # Pass 2: full page rendered as image (vector-text PDFs without embedded images).
         if not results:
             for page_idx, xref, segment_name, pix in _iter_candidate_page_segments(doc, candidate_pages):
                 try:
@@ -1983,113 +2366,14 @@ def _extract_structured_with_local_ocr(
                 )
                 if page_results:
                     results.extend(page_results)
-                    break  # First successful page is sufficient; pdfplumber supplements gaps
+                    break
     finally:
         doc.close()
 
     finalized = _validate_and_dedupe_before_export(results) if results else []
-    # Guard against weak OCR matches: require at least a few row-level readings.
     out = [] if (finalized and len(finalized) < 3) else finalized
-    if _cache_key:
-        with _STRUCT_OCR_CACHE_LOCK:
-            _STRUCT_OCR_CACHE[_cache_key] = out
-    return out
+    return _cache_and_return(out)
 
-
-def ocr_dev_collect_ocr_text_preview(
-    pdf_path: Path,
-    *,
-    include_legacy_tesseract: bool = True,
-    include_legacy_easyocr: bool = True,
-    include_structured_snippets: bool = True,
-    max_structured_segments: int = 12,
-) -> dict[str, str]:
-    """
-    OCR Dev only: return raw OCR text samples for debugging (no pdfplumber).
-
-    Re-runs full-page and/or structured OCR — can duplicate work already done by
-    ``parse_inspection_report_pdf``. Respects current ``INSPECTION_REPORT_*`` env
-    (e.g. STRUCTURED_OCR_ENGINE, HIGH_DPI).
-    """
-    out: dict[str, str] = {
-        "legacy_tesseract": "",
-        "legacy_easyocr": "",
-        "structured": "",
-    }
-
-    if include_legacy_tesseract:
-        if not _is_tesseract_available():
-            out["legacy_tesseract"] = "(Tesseract not installed or not on PATH.)"
-        else:
-            try:
-                _d, _r, _c, _ci, t_full = _extract_with_ocr(pdf_path)
-                out["legacy_tesseract"] = t_full.strip() or "(empty — no text extracted)"
-            except Exception as exc:
-                out["legacy_tesseract"] = f"(error: {exc})"
-
-    if include_legacy_easyocr:
-        try:
-            _d, _r, _c, _ci, e_full = _extract_with_easyocr(pdf_path)
-            out["legacy_easyocr"] = e_full.strip() or "(empty — no text extracted)"
-        except Exception as exc:
-            out["legacy_easyocr"] = f"(error: {exc})"
-
-    if include_structured_snippets:
-        try:
-            import io
-
-            import numpy as np
-            from PIL import Image
-        except ImportError as exc:
-            out["structured"] = f"(import error: {exc})"
-            return out
-
-        chunks: List[str] = []
-        _, candidate_pages = _classify_pdf_for_ocr(pdf_path, "", max_pages=6)
-        if not candidate_pages:
-            out["structured"] = "(no candidate pages from classification)"
-            return out
-
-        doc = pymupdf.open(pdf_path)
-        n = 0
-        try:
-            for page_idx, _xref, segment_name, segment in _iter_candidate_image_segments(
-                doc, candidate_pages
-            ):
-                if n >= max_structured_segments:
-                    break
-                try:
-                    tokens, eng = _run_structured_ocr_on_image(np.array(segment))
-                    line = " ".join(str(t.get("text", "")) for t in (tokens or []))
-                    chunks.append(
-                        f"--- embedded p{page_idx + 1} {segment_name} [{eng or 'none'}] ---\n{line.strip()}\n"
-                    )
-                except Exception as exc:
-                    chunks.append(f"--- segment error p{page_idx + 1} ---\n{exc}\n")
-                n += 1
-
-            if n < max_structured_segments:
-                for page_idx, _name, _segname, pix in _iter_candidate_page_segments(
-                    doc, candidate_pages, dpi=300
-                ):
-                    if n >= max_structured_segments:
-                        break
-                    try:
-                        segment = Image.open(io.BytesIO(pix.tobytes(output="png"))).convert("RGB")
-                        tokens, eng = _run_structured_ocr_on_image(np.array(segment))
-                        line = " ".join(str(t.get("text", "")) for t in (tokens or []))
-                        chunks.append(
-                            f"--- full page render p{page_idx + 1} [{eng or 'none'}] ---\n{line.strip()}\n"
-                        )
-                    except Exception as exc:
-                        chunks.append(f"--- page render error p{page_idx + 1} ---\n{exc}\n")
-                    n += 1
-        finally:
-            doc.close()
-
-        out["structured"] = "\n".join(chunks).strip() or "(empty structured OCR)"
-
-    return out
 
 
 def _supplement_with_pdfplumber(
@@ -2162,8 +2446,6 @@ def _supplement_with_pdfplumber(
 def parse_inspection_report_pdf(
     pdf_path: Path,
     source_filename: str = "",
-    *,
-    skip_pdfplumber: bool = False,
 ) -> List[ExtractedReading]:
     """
     Parse a single UT inspection report PDF.
@@ -2173,8 +2455,6 @@ def parse_inspection_report_pdf(
     Args:
         pdf_path: Path to the PDF file
         source_filename: Original filename for display
-        skip_pdfplumber: If True, do not use pdfplumber for text/tables/supplements/table parsers.
-            Intended for OCR Dev / speed tests (OCR + filename metadata only).
 
     Returns:
         List of ExtractedReading (one per zone/CML row; multi-zone reports may return one row per section)
@@ -2186,6 +2466,10 @@ def parse_inspection_report_pdf(
     date = ""
     circuit = ""
     cml_ids: List[str] = []
+
+    # Azure DI only mode: skip all pdfplumber reading extraction and local OCR engines.
+    # Only pdfplumber text extraction (for metadata) and Azure DI OCR are used.
+    _azure_di_only = os.getenv("INSPECTION_REPORT_AZURE_DI_ONLY", "0") == "1"
 
     # Compute MD5 once here and pass it through to all _extract_structured_with_local_ocr
     # call sites below. Avoids reading the full file bytes 2-3 additional times per OCR'd PDF.
@@ -2204,15 +2488,15 @@ def parse_inspection_report_pdf(
     readings_from_tables = []
     readings_from_text = []
 
-    if not skip_pdfplumber:
-        _t_plumber = _time.monotonic()
-        try:
-            with pdfplumber.open(pdf_path) as _pdf:
-                # Text extraction
-                for _page in _pdf.pages:
-                    _t = _page.extract_text()
-                    if _t:
-                        full_text += _t + "\n"
+    _t_plumber = _time.monotonic()
+    try:
+        with pdfplumber.open(pdf_path) as _pdf:
+            # Text extraction (always — needed for metadata: date, circuit, CML IDs)
+            for _page in _pdf.pages:
+                _t = _page.extract_text()
+                if _t:
+                    full_text += _t + "\n"
+            if not _azure_di_only:
                 # Table readings (previously _extract_readings_from_tables)
                 try:
                     readings_from_tables = _extract_readings_from_tables_pdf(_pdf)
@@ -2223,11 +2507,11 @@ def parse_inspection_report_pdf(
                     readings_from_text = _extract_readings_from_text_pdf(_pdf)
                 except Exception:
                     readings_from_text = []
-        except Exception:
-            full_text = ""
-            readings_from_tables = []
-            readings_from_text = []
-        _perf(_fname, "pdfplumber", _t_plumber)
+    except Exception:
+        full_text = ""
+        readings_from_tables = []
+        readings_from_text = []
+    _perf(_fname, "pdfplumber", _t_plumber)
 
     # Combine readings (prefer table extraction, fallback to text)
     all_readings = readings_from_tables if readings_from_tables else readings_from_text
@@ -2247,9 +2531,9 @@ def parse_inspection_report_pdf(
     if not cml_ids:
         cml_ids = _extract_cml_ids_from_filename(source_filename)
 
-    # Image-first strategy: try structured OCR from page images before PDF table parsing.
-    # Default OFF — pdfplumber is tried first (fast, works for text-based PDFs).
-    # Set INSPECTION_REPORT_IMAGE_FIRST=1 to enable for scanned/image-heavy reports.
+    # Image-first strategy: try structured OCR before PDF table parsing.
+    # With Azure DI, _extract_structured_with_local_ocr sends the full PDF in one call
+    # so this is cheap and populates the cache for any later calls in this function.
     if os.getenv("INSPECTION_REPORT_IMAGE_FIRST", "0") == "1":
         _t_ocr_if = _time.monotonic()
         image_first_results = _extract_structured_with_local_ocr(
@@ -2270,7 +2554,7 @@ def parse_inspection_report_pdf(
                     # (e.g. zone 1 rows that appear very close to the header in the image).
                     merged = (
                         image_first_results
-                        if skip_pdfplumber
+                        if _azure_di_only
                         else _supplement_with_pdfplumber(
                             pdf_path,
                             _extract_circuit_base(circuit or "Unknown"),
@@ -2283,7 +2567,7 @@ def parse_inspection_report_pdf(
             elif len(image_first_results) >= 3:
                 merged = (
                     image_first_results
-                    if skip_pdfplumber
+                    if _azure_di_only
                     else _supplement_with_pdfplumber(
                         pdf_path,
                         _extract_circuit_base(circuit or "Unknown"),
@@ -2298,12 +2582,14 @@ def parse_inspection_report_pdf(
     # Always classify first so _image_heavy_report is available for the late fallback path too.
     _suspicious_readings = all_readings and all(r == 0.0 for r in all_readings)
     _image_heavy_report, _precomputed_candidate_pages = _classify_pdf_for_ocr(pdf_path, full_text)
-    # Include multi-CML + vision candidates so structured OCR (Surya/EasyOCR/Tesseract) runs
-    # even when pdfplumber already found numeric noise — otherwise we skip straight to generic
-    # table / chunk fallback and lose zone-level rows (same PDF differs from OCR Dev).
+    # Include multi-CML + vision candidates so structured OCR runs even when pdfplumber
+    # already found numeric noise — otherwise we skip straight to generic table / chunk
+    # fallback and lose zone-level rows.
     _multi_cml_vision = len(cml_ids) >= 3 and bool(_precomputed_candidate_pages)
+
     _try_ocr = (
-        not all_readings
+        _azure_di_only  # always run Azure DI when in azure_di_only mode
+        or not all_readings
         or len(full_text) < 100
         or _suspicious_readings
         or _image_heavy_report
@@ -2314,9 +2600,9 @@ def parse_inspection_report_pdf(
     # For image-heavy or multi-CML reports that would otherwise run Surya/OCR (30-120 s),
     # first try the zone-level table parsers.  They run in 1-2 s and often extract the
     # complete structured result without any OCR.
-    # Guard: only when we have the metadata needed, skip_pdfplumber is off, and OCR
-    # is actually about to be triggered (avoid redundant work on normal text PDFs).
-    if not skip_pdfplumber and (_image_heavy_report or _multi_cml_vision) and cml_ids and circuit:
+    # Guard: only when we have the metadata needed, azure_di_only is off, and OCR is
+    # actually about to be triggered (avoid redundant work on normal text PDFs).
+    if not _azure_di_only and (_image_heavy_report or _multi_cml_vision) and cml_ids and circuit:
         _t_early = _time.monotonic()
         _early_circuit_base = _extract_circuit_base(circuit)
         _early_date = date or ""
@@ -2358,8 +2644,12 @@ def parse_inspection_report_pdf(
 
     # Aggregate fallback below defaults extraction_method to pdfplumber; set when legacy OCR supplied readings.
     legacy_ocr_filled_readings = False
+    # "Readings, Grids & Photos on attached pages" — Acuren scan/photo reports where readings are
+    # stored in NDE area grid images, not in a structured table. Surya structured OCR will only see
+    # area diagrams (not tables) and waste 20-30 s; skip straight to flat Tesseract OCR instead.
+    _is_grids_photos_report = bool(_READINGS_GRIDS_PHOTOS.search(full_text))
     if _try_ocr:
-        if _image_heavy_report or _multi_cml_vision:
+        if _azure_di_only or _image_heavy_report or _multi_cml_vision:
             _t_ocr = _time.monotonic()
             structured_local_results = _extract_structured_with_local_ocr(
                 pdf_path,
@@ -2376,7 +2666,7 @@ def parse_inspection_report_pdf(
                 _t_supp = _time.monotonic()
                 merged = (
                     structured_local_results
-                    if skip_pdfplumber
+                    if _azure_di_only
                     else _supplement_with_pdfplumber(
                         pdf_path, _circuit_base, cml_ids, date or "", structured_local_results
                     )
@@ -2384,39 +2674,56 @@ def parse_inspection_report_pdf(
                 _perf(_fname, "supplement", _t_supp)
                 return _finalize_results(pdf_path, source_filename, merged)
 
-        # OCR fallback order: EasyOCR first (usually more accurate on tables, no external install),
-        # then Tesseract. Each engine is called at most once to avoid doubling the OCR time.
-        ocr_date, ocr_readings, ocr_cml_ids, ocr_circuit = "", [], [], ""
-        if os.getenv("INSPECTION_REPORT_OCR_ENGINE") != "tesseract":
-            _t_easyocr = _time.monotonic()
-            try:
-                e_date, e_readings, e_cmls, e_circuit, _e_txt = _extract_with_easyocr(pdf_path)
-                if e_readings:
-                    ocr_date, ocr_readings, ocr_cml_ids, ocr_circuit = e_date, e_readings, e_cmls, e_circuit
-            except Exception:
-                pass
-            _perf(_fname, "ocr_easyocr", _t_easyocr)
-        # Try Tesseract only when EasyOCR found nothing or insufficient readings
-        if len(ocr_readings) < 4:
-            _t_tess = _time.monotonic()
-            try:
-                t_date, t_readings, t_cmls, t_circuit, _t_txt = _extract_with_ocr(pdf_path)
-                if len(t_readings) > len(ocr_readings):
-                    ocr_date, ocr_readings, ocr_cml_ids, ocr_circuit = t_date, t_readings, t_cmls, t_circuit
-            except Exception as e:
-                _logger.debug(
-                    "Tesseract OCR fallback failed (install Tesseract for image-based reports): %s", e
+        # Legacy flat OCR fallback (EasyOCR / Tesseract) — skipped in azure_di_only mode.
+        if not _azure_di_only:
+            # OCR fallback order: EasyOCR first (usually more accurate on tables, no external
+            # install), then Tesseract. Each engine is called at most once to avoid doubling
+            # the OCR time. Skip EasyOCR when Surya has already run for structured extraction
+            # on this PDF — Surya is the preferred neural engine; EasyOCR flat OCR on
+            # whole-page renders is 10-50× slower and rarely adds value when Surya already had
+            # a chance at the images. Tesseract (3-4 s) covers the flat-reading fallback.
+            # Skip EasyOCR when Surya already ran structured extraction, or when this is a
+            # "Readings, Grids & Photos" scan report (Surya was skipped intentionally but
+            # EasyOCR on full-page renders of area diagrams is also ineffective and very slow).
+            # In both cases Tesseract flat OCR (3-4 s) is the correct fallback.
+            _skip_easyocr = (
+                _is_grids_photos_report
+                or (
+                    (_image_heavy_report or _multi_cml_vision)
+                    and _get_surya_models() is not None
                 )
-            _perf(_fname, "ocr_tesseract", _t_tess)
-        if ocr_readings:
-            all_readings = ocr_readings
-            legacy_ocr_filled_readings = True
-        if ocr_date:
-            date = ocr_date
-        if ocr_cml_ids:
-            cml_ids = ocr_cml_ids
-        if ocr_circuit:
-            circuit = ocr_circuit
+            )
+            ocr_date, ocr_readings, ocr_cml_ids, ocr_circuit = "", [], [], ""
+            if not _skip_easyocr and os.getenv("INSPECTION_REPORT_OCR_ENGINE") != "tesseract":
+                _t_easyocr = _time.monotonic()
+                try:
+                    e_date, e_readings, e_cmls, e_circuit, _e_txt = _extract_with_easyocr(pdf_path)
+                    if e_readings:
+                        ocr_date, ocr_readings, ocr_cml_ids, ocr_circuit = e_date, e_readings, e_cmls, e_circuit
+                except Exception:
+                    pass
+                _perf(_fname, "ocr_easyocr", _t_easyocr)
+            # Try Tesseract only when EasyOCR found nothing or insufficient readings
+            if len(ocr_readings) < 4:
+                _t_tess = _time.monotonic()
+                try:
+                    t_date, t_readings, t_cmls, t_circuit, _t_txt = _extract_with_ocr(pdf_path)
+                    if len(t_readings) > len(ocr_readings):
+                        ocr_date, ocr_readings, ocr_cml_ids, ocr_circuit = t_date, t_readings, t_cmls, t_circuit
+                except Exception as e:
+                    _logger.debug(
+                        "Tesseract OCR fallback failed (install Tesseract for image-based reports): %s", e
+                    )
+                _perf(_fname, "ocr_tesseract", _t_tess)
+            if ocr_readings:
+                all_readings = ocr_readings
+                legacy_ocr_filled_readings = True
+            if ocr_date:
+                date = ocr_date
+            if ocr_cml_ids:
+                cml_ids = ocr_cml_ids
+            if ocr_circuit:
+                circuit = ocr_circuit
 
     # Use pdfplumber/full_text only when OCR didn't provide values
     date = date or _extract_date_from_text(full_text)
@@ -2448,7 +2755,7 @@ def parse_inspection_report_pdf(
     date_str = date or ""
 
     # Finalized CML list may only appear after filename fallback — retry structured OCR here
-    # so production (API) matches OCR Dev when the early pass had len(cml_ids) < 3.
+    # so the late pass has complete cml_ids when the early pass had len(cml_ids) < 3.
     # The content_hash passed here avoids re-reading file bytes; cache hit is near-instant.
     if len(cml_ids) >= 3 and _precomputed_candidate_pages:
         _t_late = _time.monotonic()
@@ -2468,7 +2775,7 @@ def parse_inspection_report_pdf(
                 _t_supp_late = _time.monotonic()
                 merged = (
                     structured_late
-                    if skip_pdfplumber
+                    if _azure_di_only
                     else _supplement_with_pdfplumber(
                         pdf_path, circuit_base, cml_ids, date_str, structured_late
                     )
@@ -2478,7 +2785,7 @@ def parse_inspection_report_pdf(
 
     # When 3+ CMLs, use generic zone table (multi-section format). Else try Acuren first.
     # Open pdfplumber ONCE for the entire fallback table parse block (was one open per call).
-    if not skip_pdfplumber:
+    if not _azure_di_only:
         _t_fallback = _time.monotonic()
         try:
             with pdfplumber.open(pdf_path) as _fallback_pdf:
@@ -2610,10 +2917,15 @@ def parse_inspection_report_pdf(
                     idx += 1
             return _finalize_results(pdf_path, source_filename, _validate_and_dedupe_before_export(ocr_results))
 
-    # Fallback: aggregate readings by CML (min per CML)
+    # Fallback: aggregate readings by CML (min per CML).
+    # Skip in azure_di_only mode — all_readings is empty (pdfplumber readings were disabled),
+    # so this path would emit a fake 0.0 row instead of returning empty.
+    if _azure_di_only:
+        return results
+
     _agg_method = (
         "ocr"
-        if (skip_pdfplumber or legacy_ocr_filled_readings)
+        if (_azure_di_only or legacy_ocr_filled_readings)
         else "pdfplumber"
     )
     if len(cml_ids) == 1:

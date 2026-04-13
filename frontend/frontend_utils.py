@@ -2,10 +2,18 @@ import inspect
 import os
 import re
 import textwrap
+from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 import httpx
 import streamlit as st
+
+# Load .env from project root so in-process parsers (e.g. Azure DI keys) get credentials
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+except ImportError:
+    pass
 
 # Backend URL configuration
 BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
@@ -1215,4 +1223,3 @@ def display_sidebar_navigation():
 
         with st.expander("🛠️ Development", expanded=False):
             st.page_link("pages/10_Dig_Package_KPI_Dev.py", label="🧪 Dig Package KPI (dev)")
-            st.page_link("pages/11_OCR_Dev.py", label="🔬 OCR Dev (facility parser)")

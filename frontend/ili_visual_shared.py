@@ -1241,7 +1241,7 @@ def _stable_dig_pdf_dom_id(filename: str) -> str:
 _DIG_PANEL_WIDTH_VW  = 40
 _DIG_PANEL_STYLE_ID  = "dig-pdf-panel-style"
 _DIG_PANEL_DATA_ATTR = "data-dig-pdf-panel"
-_DIG_PANEL_HTML_VER  = 1
+_DIG_PANEL_HTML_VER  = 2
 
 
 def _dig_pdf_floating_panel_html(panel_id: str, pdfjs_base: str, filename: str, b64: str) -> str:
@@ -1347,6 +1347,8 @@ def _dig_pdf_floating_panel_html(panel_id: str, pdfjs_base: str, filename: str, 
   var zpct = P.createElement('span');
   zpct.style.cssText = 'color:#ccc;min-width:42px;font:12px ui-monospace,monospace;';
   zpct.textContent = '130%';
+  var pgInfo = P.createElement('span');
+  pgInfo.style.cssText = 'color:#888;font:11px system-ui;margin-left:auto;white-space:nowrap;';
   function mkBtn(t) {{
     var b = P.createElement('button');
     b.textContent = t;
@@ -1357,11 +1359,30 @@ def _dig_pdf_floating_panel_html(panel_id: str, pdfjs_base: str, filename: str, 
   zRst.style.fontSize = '11px';
   var zLabel = P.createElement('span');
   Object.assign(zLabel, {{style:'color:#aaa;font:600 11px system-ui;', textContent:'Zoom'}});
-  zoomBar.append(zLabel, zOut, zpct, zIn, zRst);
+  zoomBar.append(zLabel, zOut, zpct, zIn, zRst, pgInfo);
+
+  /* ── Brighter scrollbar CSS for the PDF wrap area ── */
+  (function() {{
+    var sbId = pid + '-sb';
+    if (!P.getElementById(sbId)) {{
+      var sbStyle = P.createElement('style');
+      sbStyle.id = sbId;
+      sbStyle.textContent =
+        '#' + pid + ' div[style*="overflow:auto"]::-webkit-scrollbar {{' +
+        '  width:10px;height:10px;}}' +
+        '#' + pid + ' div[style*="overflow:auto"]::-webkit-scrollbar-track {{' +
+        '  background:#1e1e1e;}}' +
+        '#' + pid + ' div[style*="overflow:auto"]::-webkit-scrollbar-thumb {{' +
+        '  background:#6b7280;border-radius:5px;border:2px solid #1e1e1e;}}' +
+        '#' + pid + ' div[style*="overflow:auto"]::-webkit-scrollbar-thumb:hover {{' +
+        '  background:#9ca3af;}}';
+      P.head.appendChild(sbStyle);
+    }}
+  }})();
 
   /* ── Scrollable PDF area ── */
   var wrap = P.createElement('div');
-  wrap.style.cssText = 'flex:1;overflow:auto;background:#3c3c3c;padding:8px;';
+  wrap.style.cssText = 'flex:1;overflow:auto;background:#3c3c3c;padding:8px;scrollbar-color:#6b7280 #1e1e1e;scrollbar-width:thin;';
   var pages = P.createElement('div');
   pages.style.cssText = 'width:max-content;min-width:100%;';
   var errEl = P.createElement('div');
@@ -1471,6 +1492,8 @@ def _dig_pdf_floating_panel_html(panel_id: str, pdfjs_base: str, filename: str, 
     for (var i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
     lib.getDocument({{data: bytes}}).promise.then(function(pdf) {{
       pdfDoc = pdf;
+      var n = pdf.numPages;
+      pgInfo.textContent = n === 1 ? '1 page' : n + ' pages';
       renderDoc(false);
     }}).catch(function(e) {{
       errEl.style.display = 'block';
@@ -1546,14 +1569,21 @@ def _dig_pdf_js_viewer_html(
 ) -> str:
     """Self-contained PDF.js viewer HTML: zoom buttons + reset; scroll panes when zoom exceeds column width."""
     return f"""<div id="pdf-shell-{vid}" style="border:1px solid #5a5f66;border-radius:8px;padding:8px;background:#3a3d42;box-sizing:border-box;">
+<style>
+#pdf-wrap-{vid}::-webkit-scrollbar{{width:10px;height:10px;}}
+#pdf-wrap-{vid}::-webkit-scrollbar-track{{background:#2d2f33;}}
+#pdf-wrap-{vid}::-webkit-scrollbar-thumb{{background:#6b7280;border-radius:5px;border:2px solid #2d2f33;}}
+#pdf-wrap-{vid}::-webkit-scrollbar-thumb:hover{{background:#9ca3af;}}
+</style>
 <div id="pdf-toolbar-{vid}" style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
   <span style="color:#e8eaed;font:600 12px system-ui,sans-serif;">Zoom</span>
   <button type="button" id="pdf-zout-{vid}" style="padding:4px 12px;border-radius:6px;border:1px solid #888;background:#555;color:#fff;cursor:pointer;">−</button>
   <span id="pdf-zpct-{vid}" style="color:#e8eaed;min-width:44px;font:13px ui-monospace,monospace;">{int(default_zoom_pct)}%</span>
   <button type="button" id="pdf-zin-{vid}" style="padding:4px 12px;border-radius:6px;border:1px solid #888;background:#555;color:#fff;cursor:pointer;">+</button>
   <button type="button" id="pdf-zreset-{vid}" style="padding:4px 10px;border-radius:6px;border:1px solid #888;background:#444;color:#ddd;cursor:pointer;font-size:11px;">Reset</button>
+  <span id="pdf-pginfo-{vid}" style="color:#9ca3af;font:11px system-ui;margin-left:auto;white-space:nowrap;"></span>
 </div>
-<div id="pdf-wrap-{vid}" style="max-height:{wrap_max_h};overflow:auto;border-radius:4px;background:#525659;padding:8px;width:100%;box-sizing:border-box;">
+<div id="pdf-wrap-{vid}" style="max-height:{wrap_max_h};overflow:auto;border-radius:4px;background:#525659;padding:8px;width:100%;box-sizing:border-box;scrollbar-color:#6b7280 #2d2f33;scrollbar-width:thin;">
 <div id="pdf-pages-{vid}" style="width:max-content;min-width:100%;box-sizing:border-box;"></div>
 <div id="pdf-err-{vid}" style="display:none;color:#fff;padding:12px;font-family:sans-serif;"></div>
 </div>
@@ -1620,6 +1650,11 @@ def _dig_pdf_js_viewer_html(
     pdfjsLib.getDocument({{ data: bytes }}).promise.then(function(pdf) {{
       pdfDoc = pdf;
       updateZLabel();
+      var pgInfoEl = document.getElementById("pdf-pginfo-{vid}");
+      if (pgInfoEl) {{
+        var n = pdf.numPages;
+        pgInfoEl.textContent = n === 1 ? "1 page" : n + " pages";
+      }}
       document.getElementById("pdf-zout-{vid}").addEventListener("click", function() {{
         currentScale = Math.max(baseScale * 0.35, currentScale / 1.2);
         updateZLabel();

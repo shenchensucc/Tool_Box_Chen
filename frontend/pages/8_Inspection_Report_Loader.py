@@ -106,7 +106,7 @@ _PANEL_WIDTH_VW  = 40          # percent of viewport width
 _PANEL_STYLE_ID  = "insp-pdf-panel-style"
 _PANEL_DATA_ATTR = "data-insp-pdf-panel"
 # Bump when `_insp_pdf_floating_panel_html` script changes (invalidates session cache).
-_PANEL_HTML_VER  = 2
+_PANEL_HTML_VER  = 3
 
 
 def _insp_pdf_floating_panel_html(panel_id: str, pdfjs_base: str,
@@ -200,6 +200,9 @@ def _insp_pdf_floating_panel_html(panel_id: str, pdfjs_base: str,
   var zpct = P.createElement('span');
   zpct.style.cssText = 'color:#ccc;min-width:42px;font:12px ui-monospace,monospace;';
   zpct.textContent = '130%';
+  var pgInfo = P.createElement('span');
+  pgInfo.style.cssText = 'color:#888;font:11px system-ui;margin-left:auto;white-space:nowrap;';
+  pgInfo.textContent = '';
   function mkZBtn(lbl) {{
     var b = P.createElement('button');
     b.textContent = lbl;
@@ -210,8 +213,32 @@ def _insp_pdf_floating_panel_html(panel_id: str, pdfjs_base: str,
   zRst.style.fontSize = '11px';
   zoomBar.append(
     Object.assign(P.createElement('span'), {{style:'color:#aaa;font:600 11px system-ui;', textContent:'Zoom'}}),
-    zOut, zpct, zIn, zRst
+    zOut, zpct, zIn, zRst, pgInfo
   );
+
+  /* ── Brighter scrollbar CSS for the PDF wrap area ── */
+  (function() {{
+    var sbId = pid + '-sb';
+    if (!P.getElementById(sbId)) {{
+      var sbStyle = P.createElement('style');
+      sbStyle.id = sbId;
+      sbStyle.textContent =
+        '#' + pid + ' div[style*="overflow:auto"]::-webkit-scrollbar {{' +
+        '  width:10px;height:10px;}}' +
+        '#' + pid + ' div[style*="overflow:auto"]::-webkit-scrollbar-track {{' +
+        '  background:#1e1e1e;}}' +
+        '#' + pid + ' div[style*="overflow:auto"]::-webkit-scrollbar-thumb {{' +
+        '  background:#6b7280;border-radius:5px;border:2px solid #1e1e1e;}}' +
+        '#' + pid + ' div[style*="overflow:auto"]::-webkit-scrollbar-thumb:hover {{' +
+        '  background:#9ca3af;}}' +
+        /* tab bar scrollbar */
+        '#' + pid + ' div[style*="overflow-x:auto"]::-webkit-scrollbar {{' +
+        '  height:4px;}}' +
+        '#' + pid + ' div[style*="overflow-x:auto"]::-webkit-scrollbar-thumb {{' +
+        '  background:#6b7280;border-radius:2px;}}';
+      P.head.appendChild(sbStyle);
+    }}
+  }})();
 
   /* ── Scrollable PDF area ── */
   var wrap = P.createElement('div');
@@ -310,16 +337,23 @@ def _insp_pdf_floating_panel_html(panel_id: str, pdfjs_base: str,
     chain.then(function() {{ if (saved) wrap.scrollTop = saved; }});
   }}
 
+  function updatePgInfo(doc) {{
+    var n = doc ? doc.numPages : 0;
+    pgInfo.textContent = n ? (n === 1 ? '1 page' : n + ' pages') : '';
+  }}
+
   function loadAndShow(idx, preserveScroll) {{
-    if (pdfCache[idx]) {{ renderDoc(pdfCache[idx], preserveScroll); return; }}
+    if (pdfCache[idx]) {{ renderDoc(pdfCache[idx], preserveScroll); updatePgInfo(pdfCache[idx]); return; }}
     var lib = window.parent.pdfjsLib;
     if (!lib) {{ errEl.style.display='block'; errEl.textContent='PDF.js not loaded'; return; }}
     lib.GlobalWorkerOptions.workerSrc = pjsBase + '/pdf.worker.min.js';
     var raw = atob(pdfList[idx].b64), bytes = new Uint8Array(raw.length);
     for (var i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
     pages.innerHTML = '<div style="color:#aaa;padding:16px;font:13px system-ui;">Loading\u2026</div>';
+    pgInfo.textContent = '';
     lib.getDocument({{data: bytes}}).promise.then(function(doc) {{
       pdfCache[idx] = doc;
+      updatePgInfo(doc);
       renderDoc(doc, false);
     }}).catch(function(e) {{
       errEl.style.display = 'block';
@@ -452,20 +486,22 @@ def _cleanup_pdf_panel() -> None:
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _clear_insp_results():
-    """Called on file-uploader change — clear stale results.
-    Auto-read is scheduled only on the very first upload (no prior results).
-    Subsequent adds/changes require the user to click Read Reports manually."""
-    first_upload = "insp_result" not in st.session_state
+    """Called on file-uploader change — clear stale results and schedule auto-read.
+
+    Always schedules auto-read so new/changed files are read without requiring
+    a manual button click. Also clears PDF panel done-keys so the panel is
+    re-injected with the new file list (fixes stale panel when fingerprint
+    matches a previously-seen set that was already removed from the DOM).
+    """
     st.session_state.pop("insp_result", None)
     st.session_state.pop("insp_gen_from_table_result", None)
     st.session_state.pop("insp_result_id", None)
     st.session_state.pop("insp_df_ver", None)
     st.session_state.pop(_LIVE_EDITOR_KEY, None)
     for k in list(st.session_state.keys()):
-        if k.startswith("insp_working_df_"):
+        if k.startswith("insp_working_df_") or k.startswith("insp_pdf_done_"):
             st.session_state.pop(k, None)
-    if first_upload:
-        st.session_state["insp_auto_read_pending"] = True
+    st.session_state["insp_auto_read_pending"] = True
 
 
 def _pdf_page_count(pdf_bytes: bytes) -> int:
@@ -696,7 +732,7 @@ def _do_read(
     status_slots: list,
     table_ph,
 ) -> None:
-    """Parse PDFs in-process (same stack as OCR Dev). Optional HTTP fallback via env."""
+    """Parse PDFs in-process. Optional HTTP fallback via env."""
     import concurrent.futures
     import time
 
@@ -719,7 +755,7 @@ def _do_read(
     for i, pf in enumerate(pdf_files):
         pages = page_counts[i]
         pg_str = f" ({pages} pages)" if pages else ""
-        mode = "HTTP API" if use_http else "in-process (same as OCR Dev)"
+        mode = "HTTP API" if use_http else "in-process"
         status_slots[i].progress(0.0, text=f"⏳ **{pf.name}**{pg_str} — {mode}")
 
     def _read_one_local(idx: int, pf):
@@ -905,6 +941,54 @@ def _sanitize_rows_for_json(df: pd.DataFrame) -> list:
         {k: (None if isinstance(v, float) and math.isnan(v) else v) for k, v in row.items()}
         for row in raw
     ]
+
+
+def _render_azure_di_debug_section(pdf_files) -> None:
+    """Show a collapsible section with raw Azure DI OCR output per uploaded PDF.
+
+    Useful for diagnosing missing CML zones — shows exactly what text Azure DI
+    read from each page, in reading order, before any parsing logic runs.
+    """
+    try:
+        from backend.tml.inspection_report_parser import get_azure_di_debug_data
+    except ImportError:
+        return
+
+    with st.expander("Developing OCR Raw", expanded=False):
+        st.caption(
+            "Raw text extracted by Azure Document Intelligence before any parsing logic. "
+            "Use this to diagnose missing CML zones — if a zone isn't in this output, "
+            "Azure DI didn't read it from the PDF."
+        )
+
+        debug_by_name = {pf.name: get_azure_di_debug_data(pf.name) for pf in pdf_files}
+        if not any(debug_by_name.values()):
+            st.info("Run **Read Reports** to populate this section.")
+            return
+
+        for pf in pdf_files:
+            debug = debug_by_name.get(pf.name)
+            if not debug:
+                st.markdown(f"**{pf.name}** — no Azure DI data (may have used local OCR fallback)")
+                continue
+
+            pages = debug.get("pages", [])
+            total = debug.get("total_tokens", 0)
+            st.markdown(f"**{pf.name}** — {len(pages)} page(s), {total} total tokens")
+
+            for page_info in pages:
+                pg_num = page_info.get("page", "?")
+                pg_text = page_info.get("text", "")
+                pg_tokens = page_info.get("token_count", 0)
+                label = f"Page {pg_num}  ({pg_tokens} tokens)"
+                with st.expander(label, expanded=False):
+                    if pg_text:
+                        st.code(pg_text, language=None)
+                    else:
+                        st.caption("(no text extracted from this page)")
+
+            if len(pdf_files) > 1:
+                st.divider()
 
 
 @st.fragment
@@ -1138,6 +1222,12 @@ with main:
     st.markdown("**Step 3 — Review, Edit & Generate Dataloader**")
     table_ph = st.empty()
 
+    # Manual button click: set flag + rerun so the button visually disables before blocking read starts.
+    # This gives immediate UI feedback ("⏳ Reading…") instead of a frozen-looking page.
+    if read_btn and pdf_files and not _is_reading and not _auto_read:
+        st.session_state["insp_auto_read_pending"] = True
+        st.rerun()
+
     if (read_btn or _auto_read) and pdf_files and not _is_reading:
         # Clear previous results so the new read is always fresh
         st.session_state.pop("insp_result", None)
@@ -1159,10 +1249,17 @@ with main:
             table_ph.empty()
             status_host.empty()
         if "insp_read_error" in st.session_state:
-            err = st.session_state.pop("insp_read_error")
-            st.error(f"❌ {err}")
+            st.session_state["insp_read_error_display"] = st.session_state.pop("insp_read_error")
+        st.rerun()
+
+    if st.session_state.get("insp_read_error_display"):
+        st.error(f"❌ {st.session_state.pop('insp_read_error_display')}")
 
     _render_results_section()
+
+    # ── Azure DI debug section ──────────────────────────────────────────────────
+    if pdf_files:
+        _render_azure_di_debug_section(pdf_files)
 
     st.divider()
     with st.expander("ℹ️ Help & OCR"):
@@ -1177,13 +1274,13 @@ with main:
         4. **PDF panel**: fixed to the right edge, 40 % wide — content shifts left, nothing is covered.
            Drag the header to resize. Use × to dismiss; toggle the **📄 PDF Preview** switch to re-open.
 
-        ### Parsing (same as OCR Dev)
+        ### Parsing
         **Read Reports** runs the PDF parser **in this Python process** (not the HTTP API), so results
-        match the **OCR Dev** page and your `.env` / `INSPECTION_REPORT_*` variables for Streamlit.
+        reflect your `.env` / `INSPECTION_REPORT_*` variables for Streamlit.
         Set `INSPECTION_REPORT_READ_VIA_HTTP=1` only if you need the legacy behavior (parse on the backend server).
 
-        OCR notes: pdfplumber runs first where possible; structured OCR (Surya / EasyOCR / Tesseract) is used
-        for image-heavy or multi-CML summaries. Set `INSPECTION_REPORT_IMAGE_FIRST=1` to force OCR-first.
+        OCR notes: Azure Document Intelligence is used for all pages when `INSPECTION_REPORT_AZURE_DI_ONLY=1`.
+        In mixed mode, pdfplumber runs first where possible; structured OCR is the fallback for image-heavy reports.
         """)
 
     st.caption("Inspection Report Loader | Chen's Engineer Toolbox")
