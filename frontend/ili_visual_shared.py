@@ -362,8 +362,27 @@ def _build_feature_map_figure(
             marker=dict(size=4, color="rgba(0,0,0,0)"),
             text=hover_texts,
             hoverinfo="text",
+            showlegend=False,
         )
     )
+
+    # Depth colour legend entries — always shown so users know the colour scale
+    _DEPTH_LEGEND = [
+        ("0–20% depth",  "rgba(34,139,34,1.0)"),
+        ("20–40% depth", "rgba(255,210,0,1.0)"),
+        ("40–60% depth", "rgba(255,140,0,1.0)"),
+        (">60% depth",   "rgba(180,0,0,1.0)"),
+    ]
+    for _lbl, _clr in _DEPTH_LEGEND:
+        fig.add_trace(go.Scatter(
+            x=[float("nan")], y=[float("nan")],
+            mode="markers",
+            marker=dict(size=12, color=_clr, symbol="square",
+                        line=dict(color="rgba(0,0,0,0.4)", width=1)),
+            name=_lbl,
+            showlegend=True,
+            hoverinfo="skip",
+        ))
 
     if nde_x_bounds is not None:
         fig.add_trace(
@@ -387,16 +406,6 @@ def _build_feature_map_figure(
         dict(
             x=1.02,
             y=0.98,
-            xref="paper",
-            yref="paper",
-            text="Depth: 0-20% green, 20-40% yellow, 40-60% orange, >60% red",
-            showarrow=False,
-            font=dict(size=9),
-            xanchor="left",
-        ),
-        dict(
-            x=1.02,
-            y=0.88,
             xref="paper",
             yref="paper",
             text="Box size: length (mm) × width (mm)",
@@ -452,13 +461,12 @@ def _build_feature_map_figure(
     if nde_x_bounds is not None:
         nxa, nxb = nde_x_bounds
         x_mid_nde = (nxa + nxb) / 2.0
-        ann_y_title = min(y_max_plot, 11.15) if y_max_plot > y_min_plot else 6.0
         annotations.append(
             dict(
-                x=x_mid_nde,
-                y=ann_y_title,
+                x=nxb,
+                y=0.5,
                 xref="x",
-                yref="y",
+                yref="paper",
                 text="NDE Area",
                 showarrow=False,
                 font=dict(size=10, color="rgb(38, 38, 38)"),
@@ -466,8 +474,9 @@ def _build_feature_map_figure(
                 bordercolor="rgba(95, 95, 95, 0.5)",
                 borderwidth=1,
                 borderpad=4,
-                xanchor="center",
+                xanchor="left",
                 yanchor="middle",
+                xshift=6,
             )
         )
         ann_y_dist = (
@@ -509,19 +518,19 @@ def _build_feature_map_figure(
     _y_orient_tickvals = list(range(0, 14))
     _y_orient_ticktext = [f"{h:02d}:00" for h in range(0, 13)] + ["12:60"]
 
-    layout_extras = {}
-    if nde_x_bounds is not None:
-        layout_extras["showlegend"] = True
-        layout_extras["legend"] = dict(
+    layout_extras = dict(
+        showlegend=True,
+        legend=dict(
             x=1.02,
-            y=0.80,
+            y=0.95,
             xanchor="left",
             yanchor="top",
             bgcolor="rgba(255,255,255,0.92)",
             bordercolor="rgba(0,0,0,0.18)",
             borderwidth=1,
             font=dict(size=10),
-        )
+        ),
+    )
 
     fig.update_layout(
         title=title,
@@ -797,6 +806,37 @@ def _build_3d_pipeline_figure(
             hoverinfo="skip",
             showlegend=False,
         ))
+
+    # ── 8b. NDE grey cylindrical overlay ─────────────────────────────────────
+    # Mirrors the 2D grey band: a semi-transparent grey sleeve over the NDE zone.
+    nde_reg_3d = scatter_data.get("nde_region") if scatter_data else None
+    if nde_reg_3d and nde_reg_3d.get("x0") is not None and nde_reg_3d.get("x1") is not None:
+        nx0_3d = float(nde_reg_3d["x0"])
+        nx1_3d = float(nde_reg_3d["x1"])
+        if nx0_3d > nx1_3d:
+            nx0_3d, nx1_3d = nx1_3d, nx0_3d
+        # Clamp to the visible range so the overlay never floats outside the cylinder
+        nx0_vis = max(nx0_3d, view_x_min)
+        nx1_vis = min(nx1_3d, view_x_max)
+        if nx0_vis < nx1_vis:
+            nde_x_arr_3d = np.linspace(nx0_vis, nx1_vis, 40)
+            nde_theta_3d = np.linspace(0, 2.0 * np.pi, N_THETA, endpoint=False)
+            NDE_THETA_3D, NDE_X_3D = np.meshgrid(nde_theta_3d, nde_x_arr_3d)
+            NDE_Y_3D = pipe_r_m * np.sin(NDE_THETA_3D)
+            NDE_Z_3D = pipe_r_m * np.cos(NDE_THETA_3D)
+            fig.add_trace(go.Surface(
+                x=NDE_X_3D,
+                y=NDE_Y_3D,
+                z=NDE_Z_3D,
+                surfacecolor=np.ones_like(NDE_X_3D),
+                colorscale=[[0, "rgb(130,130,130)"], [1, "rgb(130,130,130)"]],
+                cmin=0, cmax=1,
+                showscale=False,
+                opacity=0.35,
+                name="NDE Area",
+                showlegend=True,
+                hovertemplate="NDE Area<extra></extra>",
+            ))
 
     # ── 9. Longseam welds (drawn last so end caps / surface do not bury them) ─
     # Same colours and source-filter dimming as 2D; skip rows without both chainages.
@@ -1319,7 +1359,7 @@ def _dig_pdf_floating_panel_html(panel_id: str, pdfjs_base: str, filename: str, 
     'background:#1e1e1e','color:#ffffff',
     'border-top:2px solid #007acc'
   ].join(';');
-  var ico = P.createElement('span'); ico.textContent = '\uD83D\uDCC4';
+  var ico = P.createElement('span'); ico.textContent = '\U0001F4C4';
   var lbl = P.createElement('span'); lbl.textContent = shortName;
   tab.append(ico, lbl);
   tabBar.appendChild(tab);
