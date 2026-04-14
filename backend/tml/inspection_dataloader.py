@@ -175,6 +175,7 @@ def generate_measurements_dataloader_from_rows(
     rows: List[Dict],
     output_path: str = "",
     cmms_system: str = "P1R-100",
+    template_path: Optional[str] = None,
 ) -> Tuple[int, List[Dict]]:
     """
     Generate APM Measurements dataloader from pre-parsed / user-edited table rows.
@@ -225,13 +226,28 @@ def generate_measurements_dataloader_from_rows(
     if output_path:
         df = pd.DataFrame(dl_rows)
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-        with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-            df.to_excel(writer, sheet_name="Measurements", index=False)
-        wb = load_workbook(output_path)
-        if "Measurements" in wb.sheetnames:
-            sheet = wb["Measurements"]
-            for col in sheet.columns:
-                sheet.column_dimensions[col[0].column_letter].width = 20
-        wb.save(output_path)
+
+        # Resolve template: user-supplied → system default → standalone
+        _default_template = (
+            Path(__file__).parent.parent / "static" / "templates" / "tml" / "TM_Loader_Template.xlsx"
+        )
+        _tpl = template_path if (template_path and os.path.exists(template_path)) else (
+            str(_default_template) if _default_template.exists() else None
+        )
+
+        if _tpl:
+            import shutil
+            shutil.copy(_tpl, output_path)
+            with pd.ExcelWriter(output_path, engine="openpyxl", mode="a", if_sheet_exists="replace") as writer:
+                df.to_excel(writer, sheet_name="Measurements", index=False)
+        else:
+            with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+                df.to_excel(writer, sheet_name="Measurements", index=False)
+            wb = load_workbook(output_path)
+            if "Measurements" in wb.sheetnames:
+                sheet = wb["Measurements"]
+                for col in sheet.columns:
+                    sheet.column_dimensions[col[0].column_letter].width = 20
+            wb.save(output_path)
 
     return len(dl_rows), summary_rows

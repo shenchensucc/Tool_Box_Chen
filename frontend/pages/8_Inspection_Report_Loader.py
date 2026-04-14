@@ -97,6 +97,21 @@ display_sidebar_navigation()
 
 main = get_layout_main()
 
+
+@st.cache_data(ttl=300)
+def _fetch_insp_template() -> dict:
+    """Fetch the system TM_Loader template from the backend (cached 5 min)."""
+    try:
+        resp = httpx.get(
+            f"{BACKEND_URL}/api/tml/download-template/tm_loader",
+            timeout=10.0,
+        )
+        if resp.status_code == 200:
+            return {"success": True, "content": resp.content}
+        return {"success": False, "content": None}
+    except Exception:
+        return {"success": False, "content": None}
+
 # ── Floating PDF panel ─────────────────────────────────────────────────────────
 # The panel is injected into Streamlit's parent DOM via window.parent.
 # A companion <style> tag adds padding-right to the main content block so the
@@ -1104,11 +1119,17 @@ def _render_results_section() -> None:
             with st.spinner("⏳ Building dataloader from table…"):
                 try:
                     url = f"{BACKEND_URL}/api/tml/inspection-report/generate-from-table"
+                    _tpl_file = st.session_state.get(fu_key("insp", "template"))
+                    _form_data = {
+                        "rows_json": json.dumps(rows_payload),
+                        "cmms_system": "P1R-100",
+                    }
+                    _files: list = []
+                    if _tpl_file is not None:
+                        _files = [("template_file", (_tpl_file.name, _tpl_file.getvalue(),
+                                   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))]
                     with httpx.Client(timeout=60.0) as client:
-                        response = client.post(
-                            url,
-                            json={"rows": rows_payload, "cmms_system": "P1R-100"},
-                        )
+                        response = client.post(url, data=_form_data, files=_files if _files else None)
                     if response.status_code == 200:
                         st.session_state.insp_gen_from_table_result = response.json()
                     else:
@@ -1189,6 +1210,31 @@ with main:
             help="Sheet 'Source_Data' with Circuit ID and Equipment ID columns",
             key=fu_key("insp", "source"),
             on_change=_clear_insp_results,
+            disabled=_uploading_locked,
+        )
+
+    with st.expander("📎 Optional: Dataloader Template (TM_Loader)", expanded=False):
+        st.caption(
+            "The system includes a default TM_Loader template. "
+            "Upload a custom one here to override it — useful if your APM instance uses a modified template. "
+            "Download the system default below to inspect or customise it."
+        )
+        _tpl_result = _fetch_insp_template()
+        if _tpl_result["success"]:
+            st.download_button(
+                label="📥 Download System TM_Loader Template",
+                data=_tpl_result["content"],
+                file_name="TM_Loader_Template.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                help="Download the default TM_Loader template used when no custom template is uploaded",
+            )
+        else:
+            st.warning("⚠️ System template not available — backend may be starting up.")
+        template_file = st.file_uploader(
+            "Custom TM_Loader Template (optional)",
+            type=["xlsx", "xls"],
+            help="Leave empty to use the system default TM_Loader_Template.xlsx",
+            key=fu_key("insp", "template"),
             disabled=_uploading_locked,
         )
 

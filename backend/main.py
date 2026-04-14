@@ -1516,12 +1516,24 @@ async def process_inspection_reports(
 
 
 @app.post("/api/tml/inspection-report/generate-from-table", response_model=InspectionReportResponse)
-async def generate_inspection_dataloader_from_table(request: GenerateFromTableRequest):
+async def generate_inspection_dataloader_from_table(
+    rows_json: str = Form(...),
+    cmms_system: str = Form("P1R-100"),
+    template_file: Optional[UploadFile] = File(None),
+):
     """
-    Generate APM dataloader from pre-parsed / user-edited table rows (JSON body).
-    Accepts rows with Circuit, CML, Min Reading, Date, Equipment ID.
+    Generate APM dataloader from pre-parsed / user-edited table rows.
+
+    Accepts multipart form: rows_json (JSON-encoded list), cmms_system, optional template_file.
+    Falls back to system TM_Loader_Template.xlsx when no template is uploaded.
     """
-    if not request.rows:
+    import json as _json
+    try:
+        rows = _json.loads(rows_json)
+    except Exception:
+        raise HTTPException(status_code=400, detail="rows_json is not valid JSON.")
+
+    if not rows:
         return InspectionReportResponse(
             success=False,
             message="No rows provided.",
@@ -1530,14 +1542,23 @@ async def generate_inspection_dataloader_from_table(request: GenerateFromTableRe
 
     temp_dir = tempfile.mkdtemp()
     output_path = Path(temp_dir) / "Inspection_Report_Dataloader.xlsx"
+    temp_template_path: Optional[str] = None
+
+    if template_file and template_file.filename:
+        validate_excel_file(template_file)
+        tpl_bytes = await template_file.read()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(template_file.filename).suffix) as f:
+            f.write(tpl_bytes)
+            temp_template_path = f.name
 
     try:
         from backend.tml.inspection_dataloader import generate_measurements_dataloader_from_rows
 
         records_count, summary = generate_measurements_dataloader_from_rows(
-            request.rows,
+            rows,
             str(output_path),
-            cmms_system=request.cmms_system,
+            cmms_system=cmms_system,
+            template_path=temp_template_path,
         )
 
         if records_count == 0:
@@ -1567,6 +1588,12 @@ async def generate_inspection_dataloader_from_table(request: GenerateFromTableRe
     except Exception as e:
         log_error(logger, "tml/inspection-report/generate-from-table", e)
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {str(e)}")
+    finally:
+        if temp_template_path:
+            try:
+                os.unlink(temp_template_path)
+            except OSError:
+                pass
 
 
 @app.get("/api/tml/download/{file_token}")
