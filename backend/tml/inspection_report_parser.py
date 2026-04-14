@@ -2188,8 +2188,6 @@ def _extract_structured_rows_from_easyocr_tokens(
         for token in row_tokens:
             if re.fullmatch(r"\d{1,2}", token["text"]):
                 section_text = token["text"]
-                if section_text == "11":
-                    section_text = "1"
                 try:
                     section_num = int(section_text)
                 except ValueError:
