@@ -16,6 +16,40 @@ from .excel_reader import _find_canonical_column
 from .inspection_report_parser import ExtractedReading
 
 
+def _write_measurements_sheet(output_path: str, df: pd.DataFrame) -> None:
+    """Write *df* into the 'Measurements' sheet of an existing workbook at *output_path*.
+
+    Opens the workbook with openpyxl directly so that every other sheet in the
+    file is left completely untouched.  Using pd.ExcelWriter in append mode is
+    intentionally avoided: it can silently drop sheets it does not write to,
+    depending on the pandas / openpyxl version.
+    """
+    wb = load_workbook(output_path)
+
+    # Reuse existing sheet or create a new one at the front.
+    if "Measurements" in wb.sheetnames:
+        ws = wb["Measurements"]
+        ws.delete_rows(1, ws.max_row)          # wipe content, keep formatting / column widths
+    else:
+        ws = wb.create_sheet("Measurements", 0)
+
+    # Write header row.
+    headers = list(df.columns)
+    for col_idx, header in enumerate(headers, 1):
+        ws.cell(row=1, column=col_idx, value=header)
+
+    # Write data rows.
+    for row_idx, row in enumerate(df.itertuples(index=False), 2):
+        for col_idx, value in enumerate(row, 1):
+            ws.cell(row=row_idx, column=col_idx, value=value)
+
+    # Auto-width: 20 chars for every column so values are readable.
+    for col in ws.columns:
+        ws.column_dimensions[col[0].column_letter].width = 20
+
+    wb.save(output_path)
+
+
 # Source Excel: Circuit ID -> Equipment ID mapping
 # Column aliases for source file
 CIRCUIT_ALIASES = ["Circuit ID", "Circuit", "Circuit #", "CircuitID", "Circuit Number"]
@@ -152,21 +186,22 @@ def generate_measurements_dataloader(
         df = pd.DataFrame(rows)
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
-        if template_path and os.path.exists(template_path):
-            import shutil
-            shutil.copy(template_path, output_path)
-            with pd.ExcelWriter(output_path, engine="openpyxl", mode="a", if_sheet_exists="replace") as writer:
-                df.to_excel(writer, sheet_name="Measurements", index=False)
-        else:
-            with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-                df.to_excel(writer, sheet_name="Measurements", index=False)
+        _default_template = (
+            Path(__file__).parent.parent / "static" / "templates" / "tml" / "TM_Loader_Template.xlsx"
+        )
+        _tpl = template_path if (template_path and os.path.exists(template_path)) else (
+            str(_default_template) if _default_template.exists() else None
+        )
 
-        wb = load_workbook(output_path)
-        if "Measurements" in wb.sheetnames:
-            sheet = wb["Measurements"]
-            for col in sheet.columns:
-                sheet.column_dimensions[col[0].column_letter].width = 20
-        wb.save(output_path)
+        if _tpl:
+            import shutil
+            shutil.copy(_tpl, output_path)
+        else:
+            # No template: create a minimal workbook so openpyxl can open it.
+            with pd.ExcelWriter(output_path, engine="openpyxl") as _w:
+                pd.DataFrame().to_excel(_w, sheet_name="Measurements", index=False)
+
+        _write_measurements_sheet(output_path, df)
 
     return len(rows), summary_rows
 
@@ -238,16 +273,11 @@ def generate_measurements_dataloader_from_rows(
         if _tpl:
             import shutil
             shutil.copy(_tpl, output_path)
-            with pd.ExcelWriter(output_path, engine="openpyxl", mode="a", if_sheet_exists="replace") as writer:
-                df.to_excel(writer, sheet_name="Measurements", index=False)
         else:
-            with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-                df.to_excel(writer, sheet_name="Measurements", index=False)
-            wb = load_workbook(output_path)
-            if "Measurements" in wb.sheetnames:
-                sheet = wb["Measurements"]
-                for col in sheet.columns:
-                    sheet.column_dimensions[col[0].column_letter].width = 20
-            wb.save(output_path)
+            # No template: create a minimal workbook so openpyxl can open it.
+            with pd.ExcelWriter(output_path, engine="openpyxl") as _w:
+                pd.DataFrame().to_excel(_w, sheet_name="Measurements", index=False)
+
+        _write_measurements_sheet(output_path, df)
 
     return len(dl_rows), summary_rows
