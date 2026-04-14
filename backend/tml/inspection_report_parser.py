@@ -1987,7 +1987,8 @@ def _extract_structured_rows_from_easyocr_tokens(
     joined_text = " ".join(t["text"] for t in sorted(tokens, key=lambda t: (t["top"], t["left"])))
     upper_text = joined_text.upper()
     _has_section = "SECTION" in upper_text or "ZONE" in upper_text
-    if "CIRCUIT" not in upper_text or "CML" not in upper_text or not _has_section:
+    _has_directional = any(d in upper_text for d in ("NORTH", "SOUTH", "EAST", "WEST"))
+    if "CIRCUIT" not in upper_text or "CML" not in upper_text or (not _has_section and not _has_directional):
         _logger.debug("[token-extract] early exit — missing header words. Sample text: %r", joined_text[:200])
         return []
 
@@ -2034,7 +2035,8 @@ def _extract_structured_rows_from_easyocr_tokens(
         same_row = [t for t in header_tokens if abs(t["cy"] - token["cy"]) <= row_tolerance]
         labels = {t["text"].upper().rstrip(".") for t in same_row}
         _section_label_present = "SECTION" in labels or "ZONE" in labels
-        if {"CIRCUIT", "CML"}.issubset(labels) and _section_label_present:
+        _directional_present = any(d in labels for d in ("NORTH", "SOUTH", "EAST", "WEST"))
+        if {"CIRCUIT", "CML"}.issubset(labels) and (_section_label_present or _directional_present):
             header_row = same_row
             break
     if not header_row:
@@ -2091,7 +2093,10 @@ def _extract_structured_rows_from_easyocr_tokens(
                 t for t in _rtoks
                 if re.fullmatch(r"\d{1,2}", t["text"]) and 1 <= int(t["text"]) <= 40
             ]
-            if _cml_cands and not _sec_cands:
+            if _cml_cands:
+                # Include even when a section number is also present in the row — the CML
+                # label is in a merged cell that may be positioned at any section row.
+                # The nearest-label assignment handles disambiguation.
                 _cml_label_positions.append((_center, _cml_cands[0]["text"]))
 
     results: List[ExtractedReading] = []
@@ -2140,6 +2145,44 @@ def _extract_structured_rows_from_easyocr_tokens(
             _seq_cml = row_cml_base
 
         if section_x is None:
+            # Straight run (directional) table: no SECTION/ZONE column.
+            # Collect readings now (same logic as below) and emit one result per row.
+            _min_conf_sr = float(os.getenv("INSPECTION_REPORT_OCR_MIN_CONF", "0.6"))
+            readings_in_row = []
+            for token in row_tokens:
+                if token["left"] + 10 < reading_start_x:
+                    continue
+                if re.fullmatch(r"\d+\.\d{2,4}", token["text"]):
+                    if _min_conf_sr > 0 and token.get("conf", 1.0) < _min_conf_sr:
+                        continue
+                    try:
+                        value = float(token["text"])
+                    except ValueError:
+                        continue
+                    if 0.05 <= value <= 3.0:
+                        readings_in_row.append(value)
+            if not readings_in_row:
+                continue
+            # CML 9.xx: no zone suffix (straight run CMLs with integer part 9 are
+            # single-point measurements with no zone breakdown).
+            if re.match(r"^9\.", row_cml_base or ""):
+                cml_id_out = row_cml_base
+            else:
+                _row_seq += 1
+                while str(_row_seq) in _explicit_sections_used:
+                    _row_seq += 1
+                cml_id_out = f"{row_cml_base}-{_row_seq}"
+            results.append(
+                ExtractedReading(
+                    circuit_id=circuit_id,
+                    cml_id=cml_id_out,
+                    measurement_date=fallback_date or "",
+                    min_reading=min(readings_in_row),
+                    all_readings=readings_in_row,
+                    source_file=source_filename,
+                    extraction_method=_method,
+                )
+            )
             continue
         section_candidates = []
         for token in row_tokens:
@@ -2196,10 +2239,12 @@ def _extract_structured_rows_from_easyocr_tokens(
                 _row_seq += 1
             section = str(_row_seq)
             min_value = min(readings_in_row)
+            # CML 9.xx: no zone suffix
+            _cml_id_seq = row_cml_base if re.match(r"^9\.", row_cml_base or "") else f"{row_cml_base}-{section}"
             results.append(
                 ExtractedReading(
                     circuit_id=circuit_id,
-                    cml_id=f"{row_cml_base}-{section}",
+                    cml_id=_cml_id_seq,
                     measurement_date=fallback_date or "",
                     min_reading=min_value,
                     all_readings=readings_in_row,
@@ -2212,10 +2257,12 @@ def _extract_structured_rows_from_easyocr_tokens(
         section = unique_sections[0]  # closest to section_x (sorted above)
         _explicit_sections_used.add(section)
         min_value = min(readings_in_row)
+        # CML 9.xx: no zone suffix
+        _cml_id_expl = row_cml_base if re.match(r"^9\.", row_cml_base or "") else f"{row_cml_base}-{section}"
         results.append(
             ExtractedReading(
                 circuit_id=circuit_id,
-                cml_id=f"{row_cml_base}-{section}",
+                cml_id=_cml_id_expl,
                 measurement_date=fallback_date or "",
                 min_reading=min_value,
                 all_readings=readings_in_row,

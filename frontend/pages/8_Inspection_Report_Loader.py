@@ -454,24 +454,21 @@ def _render_pdf_floating_panel(pdf_files, sel_idx: int) -> None:
     combined_fp = "|".join(fp_parts)
     panel_id = "insp-pdf-" + hashlib.md5(combined_fp.encode(), usedforsecurity=False).hexdigest()[:12]
     html_key = f"insp_pdf_float_{panel_id}_v{_PANEL_HTML_VER}"
-    done_key = f"insp_pdf_done_{panel_id}_v{_PANEL_HTML_VER}"
 
     if html_key not in st.session_state:
         st.session_state[html_key] = _insp_pdf_floating_panel_html(
             panel_id, pdfjs_base, pdf_list, sel_idx
         )
 
-    if not st.session_state.get(done_key):
-        st_components.html(st.session_state[html_key], height=0, scrolling=False)
-        st.session_state[done_key] = True
+    # Always render so Streamlit keeps the iframe in its component tree across rerenders.
+    # Same content → Streamlit reuses the iframe without re-executing the script.
+    # Changed content (file set changed) → Streamlit updates the iframe → script runs →
+    # removes old panel and creates new one (JS guard at top of script handles deduplication).
+    st_components.html(st.session_state[html_key], height=0, scrolling=False)
 
 
 def _cleanup_pdf_panel() -> None:
     """Remove floating panel + layout CSS from parent DOM."""
-    # Reset injection flags so panels can be re-injected after re-toggle
-    for key in list(st.session_state.keys()):
-        if key.startswith("insp_pdf_done_"):
-            del st.session_state[key]
     st_components.html(
         f"""<script>
         var P = window.parent.document;
@@ -489,9 +486,7 @@ def _clear_insp_results():
     """Called on file-uploader change — clear stale results and schedule auto-read.
 
     Always schedules auto-read so new/changed files are read without requiring
-    a manual button click. Also clears PDF panel done-keys so the panel is
-    re-injected with the new file list (fixes stale panel when fingerprint
-    matches a previously-seen set that was already removed from the DOM).
+    a manual button click.
     """
     st.session_state.pop("insp_result", None)
     st.session_state.pop("insp_gen_from_table_result", None)
@@ -499,7 +494,7 @@ def _clear_insp_results():
     st.session_state.pop("insp_df_ver", None)
     st.session_state.pop(_LIVE_EDITOR_KEY, None)
     for k in list(st.session_state.keys()):
-        if k.startswith("insp_working_df_") or k.startswith("insp_pdf_done_"):
+        if k.startswith("insp_working_df_"):
             st.session_state.pop(k, None)
     st.session_state["insp_auto_read_pending"] = True
 
