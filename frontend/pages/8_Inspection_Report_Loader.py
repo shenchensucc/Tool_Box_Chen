@@ -431,6 +431,22 @@ def _insp_pdf_floating_panel_html(panel_id: str, pdfjs_base: str,
     s.onerror = function() {{ errEl.style.display='block'; errEl.textContent='Failed to load PDF.js'; }};
     P.head.appendChild(s);
   }}
+
+  /* ══════════════════ AUTO-REMOVE ON PAGE NAVIGATION ══════════════════ */
+  /* When Streamlit navigates away from this page it removes the component
+     iframe from the DOM. Watch for that and tear down the panel + style. */
+  (function() {{
+    var frame = window.frameElement;
+    if (!frame) return;
+    new MutationObserver(function(_, obs) {{
+      if (P.body.contains(frame)) return;
+      obs.disconnect();
+      var panelEl = P.getElementById(pid);
+      if (panelEl) panelEl.remove();
+      var stEl = P.getElementById(styleId);
+      if (stEl) stEl.remove();
+    }}).observe(P.body, {{ childList: true, subtree: true }});
+  }})();
 }})();
 </script></body></html>"""
 
