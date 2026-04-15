@@ -75,9 +75,7 @@ Chen's Engineer Toolbox is a modern, Python-based web application built with a *
 | **Excel Parsing** | openpyxl | Read/write Excel files | 3.1+ |
 | **Numeric Computing** | numpy | Statistical calculations | 1.26+ |
 | **PDF Parsing** | pdfplumber | Text and table extraction from PDFs | 0.10+ |
-| **OCR (primary)** | Surya | Document OCR for structured table extraction | Latest |
-| **OCR (fallback)** | EasyOCR / Tesseract | Neural and classic OCR fallbacks | Latest |
-| **Process Isolation** | ProcessPoolExecutor | Isolate OCR crashes from main server | stdlib |
+| **OCR** | Azure Document Intelligence | Cloud OCR for structured table extraction | Latest |
 
 **Location**: `backend/`
 
@@ -102,7 +100,6 @@ Tool_Box_Chen/
 │   ├── main.py                 # FastAPI app, endpoints, startup/shutdown
 │   ├── models.py               # Pydantic models
 │   ├── pipeline/               # Pipeline engineering modules
-│   │   ├── ocr_subprocess.py   # OCR worker functions (isolated process)
 │   │   ├── dig_package.py      # Dig package generation
 │   │   ├── metal_loss.py       # Metal loss calculations
 │   │   └── report_generator.py # Word report generation
@@ -198,20 +195,14 @@ result = await asyncio.to_thread(blocking_sync_function, args)
 
 This ensures the event loop stays free to handle concurrent requests (health checks, other uploads) while a long-running task executes in a thread pool.
 
-### 6. OCR Process Isolation
+### 6. OCR — Azure Document Intelligence
 
-OCR (Surya, EasyOCR, Tesseract) runs in a separate **subprocess** via `ProcessPoolExecutor`, completely isolated from the FastAPI server process. This means:
-
-- An OCR crash (segfault, OOM) cannot bring down the API server
-- On crash, the executor is automatically re-created and the user gets a retryable error
-- Only one OCR job runs at a time (single worker); concurrent OCR requests are rejected with HTTP 503 instead of silently queuing
+Inspection report OCR runs via **Azure Document Intelligence** (`prebuilt-layout` model), a cloud API call made from the backend thread pool. The PDF is sent in 2-page batches to comply with the F0 free tier, and all pages are processed regardless of document length.
 
 ```
 FastAPI process
     └── asyncio event loop (non-blocking)
-            └── asyncio.to_thread → thread pool (I/O: Excel, file ops)
-            └── ProcessPoolExecutor → OCR worker process (Surya / EasyOCR / Tesseract)
-                    ↑ crash here stays here — server keeps running
+            └── asyncio.to_thread → thread pool (Azure DI API calls, pdfplumber)
 ```
 
 ---
@@ -535,8 +526,7 @@ Technologies:
 ```
 backend/main.py
     ├─> backend/models.py              (Pydantic models)
-    ├─> backend/pipeline/ocr_subprocess.py  (OCR worker — runs in subprocess)
-    ├─> backend/tml/inspection_report_parser.py  (PDF + OCR parsing)
+    ├─> backend/tml/inspection_report_parser.py  (PDF + Azure DI OCR parsing)
     ├─> backend/tml/inspection_dataloader.py     (APM dataloader generation)
     ├─> backend/pipeline/dig_package.py          (Dig package generation)
     ├─> backend/pipeline/metal_loss.py           (Metal loss calculations)
@@ -545,8 +535,7 @@ backend/main.py
     ├─> openpyxl                       (Excel parsing)
     └─> numpy                          (Statistics)
 
-backend/pipeline/ocr_subprocess.py    (isolated subprocess)
-    └─> backend/tml/inspection_report_parser.py  (imported inside worker)
+
 ```
 
 ### Frontend Module Graph
@@ -666,12 +655,7 @@ Future extensibility:
 ### Startup (`@app.on_event("startup")`)
 
 1. Logs registered API routes for verification.
-2. Spawns the OCR worker process via `ProcessPoolExecutor` in a background daemon thread.
-3. Submits a warmup job so OCR models (EasyOCR; Surya/Tesseract load on demand) are pre-loaded before the first real request. This takes 30–60 s on first run; the server is fully responsive during warmup.
-
-### Shutdown (`@app.on_event("shutdown")`)
-
-Calls `_reset_ocr_executor()` which signals the OCR worker process to terminate cleanly. Without this, the subprocess would be orphaned after uvicorn exits.
+2. Logs startup completion.
 
 ---
 

@@ -38,25 +38,13 @@ def _perf(filename: str, phase: str, start: float) -> None:
         import time as _time
         elapsed_ms = int((_time.monotonic() - start) * 1000)
         _logger.info("PERF %s %s %dms", filename, phase, elapsed_ms)
-_EASYOCR_READER = None
-_EASYOCR_INIT_FAILED = False
-_SURYA_MODELS = None  # tuple: (det_predictor, rec_predictor) once loaded
-_SURYA_INIT_FAILED = False
-_TESSERACT_AVAILABLE: Optional[bool] = None
-# Cached Tesseract cmd configuration: True once pytesseract.tesseract_cmd has been set.
-# Avoids repeated Path(...).exists() filesystem stats on every OCR call.
-_TESSERACT_CMD_CONFIGURED = False
 # Azure Document Intelligence: None = not yet checked, True/False = result cached
 _AZURE_DI_AVAILABLE: Optional[bool] = None
 
-# Protect singleton initialization: two threads must not race to create the same reader.
-_EASYOCR_INIT_LOCK = threading.Lock()
-_SURYA_INIT_LOCK = threading.Lock()
-_TESSERACT_INIT_LOCK = threading.Lock()
+# Protect singleton initialization.
 _AZURE_DI_INIT_LOCK = threading.Lock()
 
-# In-process cache for OCR results: {(pdf_path_str, mtime_ns) -> List[ExtractedReading]}
-# Avoids re-running expensive EasyOCR on a file that hasn't changed.
+# In-process cache for OCR results keyed on PDF content hash.
 _STRUCT_OCR_CACHE: dict = {}
 _STRUCT_OCR_CACHE_LOCK = threading.Lock()
 
@@ -64,19 +52,6 @@ _STRUCT_OCR_CACHE_LOCK = threading.Lock()
 # Populated by _run_azure_di_on_pdf so the Streamlit UI can display raw OCR output for diagnostics.
 _AZURE_DI_DEBUG_CACHE: dict = {}
 _AZURE_DI_DEBUG_CACHE_LOCK = threading.Lock()
-
-# Allow up to 2 simultaneous OCR (CPU-bound) threads.
-# pytesseract shells out to the tesseract.exe binary — each call is a separate OS process,
-# so 2 concurrent calls occupy 2 CPU cores rather than thrashing a single one.
-# pdfplumber threads are not gated by this semaphore and run truly in parallel.
-# Override with INSPECTION_REPORT_OCR_CONCURRENCY=N (e.g. =1 on low-RAM machines).
-_OCR_SEMAPHORE = threading.Semaphore(
-    int(os.getenv("INSPECTION_REPORT_OCR_CONCURRENCY", "2"))
-)
-
-# Tesseract character whitelist — only characters that appear in inspection reports.
-# Eliminates letter/digit confusion (O↔0, l↔1, S↔5, B↔8) that corrupts readings.
-_OCR_CHAR_WHITELIST = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ.-/: "
 
 
 @dataclass
@@ -320,14 +295,6 @@ def _validate_and_dedupe_before_export(results: List[ExtractedReading]) -> List[
 
 # Page filtering: prefer "UT REPORT - TEE/ELBOW/CONNECTIONS" summary tables, skip "UT Grid" detailed readings
 # Acuren "Readings, Grids & Photos on attached pages" cover page: the readings are in scan/photo
-# images, not in a structured table. Structured OCR (Surya) will find only area diagrams; the
-# correct path is flat OCR (Tesseract). Match spaced/fragmented text produced by pdfplumber.
-_READINGS_GRIDS_PHOTOS = re.compile(
-    r"R\s*e\s*a\s*d\s*i\s*n\s*g\s*s\s*,?\s+G\s*r\s*i\s*d\s*s\s*&\s*P\s*h\s*o\s*t\s*o\s*s\s+"
-    r"o\s*n\s*\s*a\s*t\s*t\s*a\s*c\s*h\s*e\s*d\s*\s*p\s*a\s*g\s*e\s*s",
-    re.I,
-)
-
 # Summary table has final thickness readings; grid pages (6"x6", 3"x3", 1"x1", 2"x2") are detailed scans - do not read
 # Fragmented PDFs may have "U T R E P O R T - T E E" (spaces between letters)
 _UT_REPORT_SUMMARY = re.compile(
@@ -1029,406 +996,6 @@ def _extract_readings_from_text_pdf(pdf) -> List[float]:
     return all_readings
 
 
-def _preprocess_for_ocr(img, *, neural: bool = False):
-    """Enhance image for better OCR on inspection report tables.
-
-    Args:
-        img:    PIL Image (any mode).
-        neural: When True, use a lighter pipeline suitable for neural OCR engines
-                (Surya, EasyOCR) that were trained on natural images.  Heavy
-                binarisation can destroy the gradient features these models rely on.
-                When False (Tesseract default), apply full binarisation.
-
-    Pipeline (neural=False, Tesseract):
-        grayscale → autocontrast → unsharp mask → adaptive threshold (binarise)
-        Binarisation converts the image to pure black-and-white which Tesseract
-        handles best; eliminates grey backgrounds common in scanned PDFs.
-
-    Pipeline (neural=True, Surya/EasyOCR):
-        grayscale → autocontrast → mild unsharp mask
-        Keeps grey tones so the neural model retains contrast cues.
-        Skips binarisation which can erase thin strokes at small font sizes.
-    """
-    try:
-        from PIL import ImageFilter, ImageOps
-        import numpy as np
-
-        gray = img.convert("L")
-        # Autocontrast: clip 1% of dark/light extremes to normalise scanned exposure.
-        gray = ImageOps.autocontrast(gray, cutoff=1)
-        # Unsharp mask clarifies digit edges (e.g. distinguishes "0.285" from "0.28").
-        # Lighter radius for neural engines to avoid over-sharpening thin strokes.
-        radius = 0.8 if neural else 1
-        gray = gray.filter(ImageFilter.UnsharpMask(radius=radius, percent=150, threshold=3))
-
-        if not neural:
-            # Adaptive threshold: converts to black-and-white using a local neighbourhood
-            # mean. Better than global threshold for uneven lighting across a scanned page.
-            # block_size must be odd; C is the constant subtracted from the mean.
-            try:
-                import cv2
-                gray_np = np.array(gray)
-                binary = cv2.adaptiveThreshold(
-                    gray_np, 255,
-                    cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                    cv2.THRESH_BINARY,
-                    blockSize=31,  # neighbourhood size; larger = handles broader gradients
-                    C=10,          # subtract 10 from local mean; removes light-grey backgrounds
-                )
-                gray = type(gray).fromarray(binary)
-            except ImportError:
-                pass  # cv2 not available; skip adaptive threshold, proceed with grayscale
-
-        return gray.convert("RGB")
-    except Exception:
-        return img
-
-
-def _configure_tesseract_cmd() -> None:
-    """Set pytesseract.tesseract_cmd to the Windows default path if present. Idempotent + cached."""
-    global _TESSERACT_CMD_CONFIGURED
-    if _TESSERACT_CMD_CONFIGURED:
-        return
-    with _TESSERACT_INIT_LOCK:
-        if _TESSERACT_CMD_CONFIGURED:
-            return
-        try:
-            import pytesseract
-            _win_path = Path("C:/Program Files/Tesseract-OCR/tesseract.exe")
-            if _win_path.exists():
-                pytesseract.pytesseract.tesseract_cmd = str(_win_path)
-        except Exception:
-            pass
-        _TESSERACT_CMD_CONFIGURED = True
-
-
-def _run_ocr_on_page(page_image: bytes, dpi: int = 300, psm: int = 6) -> str:
-    """
-    Run OCR on a page image. Returns extracted text.
-
-    Tesseract works best at 300+ DPI. PSM 6 = single block (tables); PSM 11 = sparse text.
-    """
-    try:
-        import io
-
-        import pytesseract
-        from PIL import Image
-
-        _configure_tesseract_cmd()  # cached — free after first call
-
-        img = Image.open(io.BytesIO(page_image))
-        # Rescale if small: Tesseract needs ≥1400 px per side for reliable 3-decimal readings.
-        w, h = img.size
-        if w < 1400 or h < 1400:
-            scale = max(1400 / w, 1400 / h, 1.5)
-            new_w, new_h = int(w * scale), int(h * scale)
-            img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-        # Preprocessing is on by default; set INSPECTION_REPORT_OCR_PREPROCESS=0 to disable.
-        if os.getenv("INSPECTION_REPORT_OCR_PREPROCESS", "1") != "0":
-            img = _preprocess_for_ocr(img)
-        config = f"--psm {psm} --oem 3 -c tessedit_char_whitelist={_OCR_CHAR_WHITELIST}"
-        return pytesseract.image_to_string(img, config=config)
-    except Exception:
-        return ""
-
-
-# OCR: detect grid pages (6"x6", 3"x3", 1"x1", 2"x2" etc.) - do not extract readings from these
-# (?<![0-9A-Za-z]) prevents false matches on circuit IDs like "53-001X 1-1" where "1X 1" would match.
-_OCR_GRID_PAGE = re.compile(
-    r"grid\s+scan|grid\s+letters|grid\s+number|"
-    r'(?<![0-9A-Za-z])[1236]\s*["\']?\s*[xX]\s*[1236]\s*["\']?|'
-    r"letters\s+[A-Z]\s+to\s+[A-Z]|go\s+with\s+flow",
-    re.I,
-)
-
-
-def _extract_with_ocr(pdf_path: Path) -> Tuple[str, List[float], List[str], str, str]:
-    """Fallback: render PDF pages to images and run Tesseract OCR in parallel.
-
-    Strategy:
-    1. Pre-classify all pages via native pymupdf text (< 1 ms/page) to pre-filter grid pages.
-    2. Render only the candidate pages to PNG bytes (fast, ~50-200 ms/page).
-    3. Run Tesseract concurrently across all candidate pages — each call is a separate OS
-       process so N workers give near-linear speedup up to CPU count.
-    4. Aggregate results in page order, applying summary/grid logic.
-    Only runs dual-PSM when explicitly enabled via INSPECTION_REPORT_OCR_MULTI_PSM=1."""
-    doc = pymupdf.open(pdf_path)
-
-    # 250 DPI is the accuracy floor for printed numeric tables (CML IDs, thickness readings).
-    # HIGH_DPI bumps to 300 for scanned/compressed-image reports where text is small.
-    ocr_dpi = 300 if os.getenv("INSPECTION_REPORT_OCR_HIGH_DPI") else 250
-    dual_psm = os.getenv("INSPECTION_REPORT_OCR_MULTI_PSM") == "1"
-
-    # Phase 1: Classify all pages using fast native text (no Tesseract involved).
-    # This lets us pre-filter grid pages before the expensive render + OCR step.
-    page_native_grid: List[bool] = []
-    page_native_summary: List[bool] = []
-    for page in doc:
-        native_text = page.get_text() or ""
-        page_native_grid.append(
-            bool(_OCR_GRID_PAGE.search(native_text) or _UT_GRID_SECTION.search(native_text))
-        )
-        page_native_summary.append(bool(_UT_REPORT_SUMMARY.search(native_text)))
-    has_summary_native = any(page_native_summary)
-
-    # Phase 2: Render candidate pages to PNG bytes (skip grid pages when summary pages exist).
-    page_images: dict = {}  # page_idx -> PNG bytes
-    for i, page in enumerate(doc):
-        # Always include page 0 (header/metadata).
-        if i > 0 and page_native_grid[i] and not page_native_summary[i] and has_summary_native:
-            continue  # skip grid page — summary pages already found from native text
-        pix = page.get_pixmap(dpi=ocr_dpi)
-        page_images[i] = pix.tobytes(output="png")
-    doc.close()
-
-    pages_to_ocr = sorted(page_images.keys())
-    if not pages_to_ocr:
-        return "", [], [], "", ""
-
-    # Phase 3: Parallel Tesseract — each invocation is a separate OS process, so
-    # N workers give true CPU-level parallelism. Cap at OCR_CONCURRENCY (default 2).
-    _concurrency = int(os.getenv("INSPECTION_REPORT_OCR_CONCURRENCY", "2"))
-    max_workers = min(len(pages_to_ocr), max(1, _concurrency))
-
-    def _ocr_page_task(page_idx: int) -> Tuple[int, str]:
-        return page_idx, _run_ocr_on_page(page_images[page_idx], psm=6)
-
-    page_texts: dict = {}
-    if max_workers > 1 and len(pages_to_ocr) > 1:
-        # Submit all pages; results come back in submission order.
-        with ThreadPoolExecutor(max_workers=max_workers) as _pool:
-            for page_idx, text in _pool.map(_ocr_page_task, pages_to_ocr):
-                page_texts[page_idx] = text
-    else:
-        for page_idx in pages_to_ocr:
-            page_texts[page_idx] = _run_ocr_on_page(page_images[page_idx], psm=6)
-
-    # Phase 4: Aggregate results in page order, applying summary/grid logic.
-    full_text = ""
-    all_readings: List[float] = []
-    summary_page_readings: List[float] = []
-
-    for i in pages_to_ocr:
-        text = page_texts[i]
-        full_text += text + "\n"
-
-        if i == 0:
-            continue  # header page: use for metadata only
-
-        is_summary = bool(_UT_REPORT_SUMMARY.search(text))
-        is_grid_only = (
-            bool(_OCR_GRID_PAGE.search(text) or _UT_GRID_SECTION.search(text)) and not is_summary
-        )
-        if is_grid_only and summary_page_readings:
-            continue  # skip grid readings once we have summary readings
-
-        # The whitelist in _run_ocr_on_page already eliminates the primary noise sources
-        # (phone/fax numbers confusable with readings). No separate crop pass needed.
-        readings = _extract_numeric_readings(text)
-        if is_summary:
-            summary_page_readings.extend(readings)
-        all_readings.extend(readings)
-
-        # Dual-PSM second pass: opt-in only (off by default to avoid doubling OCR time)
-        if dual_psm and len(readings) < 3:
-            text2 = _run_ocr_on_page(page_images[i], psm=11)
-            extra = _extract_numeric_readings(text2)
-            all_readings.extend(extra)
-            if _UT_REPORT_SUMMARY.search(text2):
-                summary_page_readings.extend(extra)
-
-    # Prefer summary table readings when available (high sensitivity for image-based summaries)
-    # If no summary found (image-only), use all readings - summary may be embedded in grid pages
-    if summary_page_readings:
-        all_readings = summary_page_readings
-
-    date = _extract_date_from_text(full_text)
-    circuit = _extract_circuit_from_text(full_text)
-    cml_ids = _extract_cml_ids_from_text(full_text)
-
-    return date or "", all_readings, cml_ids, circuit or "", full_text
-
-
-def _extract_with_easyocr(pdf_path: Path) -> Tuple[str, List[float], List[str], str, str]:
-    """EasyOCR extraction — skips grid-scan pages before rendering to cut CPU time significantly."""
-    try:
-        import io
-        import numpy as np
-        from PIL import Image
-    except ImportError:
-        return "", [], [], "", ""
-
-    reader = _get_easyocr_reader()
-    if reader is None:
-        return "", [], [], "", ""
-    doc = pymupdf.open(pdf_path)
-    full_text = ""
-    all_readings = []
-    summary_page_readings: List[float] = []
-    ocr_dpi = 250 if os.getenv("INSPECTION_REPORT_OCR_HIGH_DPI") else 200
-
-    for page_idx, page in enumerate(doc):
-        # Quick native-text check before expensive rendering + neural OCR.
-        # EasyOCR is ~3-5 s/page on CPU; skipping grid pages saves substantial time.
-        if page_idx > 0:
-            quick_text = page.get_text() or ""
-            is_grid_prelim = bool(
-                _OCR_GRID_PAGE.search(quick_text) or _UT_GRID_SECTION.search(quick_text)
-            )
-            is_summary_prelim = bool(_UT_REPORT_SUMMARY.search(quick_text))
-            if is_grid_prelim and not is_summary_prelim and summary_page_readings:
-                continue
-
-        pix = page.get_pixmap(dpi=ocr_dpi)
-        img_bytes = pix.tobytes(output="png")
-        img = Image.open(io.BytesIO(img_bytes))
-        if os.getenv("INSPECTION_REPORT_OCR_PREPROCESS", "1") != "0":
-            img = _preprocess_for_ocr(img, neural=True)
-        img = np.array(img)
-        result = reader.readtext(img)
-        page_text = ""
-        for (_, text, _) in result:
-            page_text += text + "\n"
-            full_text += text + "\n"
-        readings = _extract_numeric_readings(page_text)
-        if page_idx > 0:
-            is_summary = _UT_REPORT_SUMMARY.search(page_text)
-            is_grid_only = (_OCR_GRID_PAGE.search(page_text) or _UT_GRID_SECTION.search(page_text)) and not is_summary
-            if is_summary:
-                summary_page_readings.extend(readings)
-            if not (is_grid_only and summary_page_readings):
-                all_readings.extend(readings)
-    doc.close()
-    if summary_page_readings:
-        all_readings = summary_page_readings
-
-    date = _extract_date_from_text(full_text)
-    circuit = _extract_circuit_from_text(full_text)
-    cml_ids = _extract_cml_ids_from_text(full_text)
-    return date or "", all_readings, cml_ids, circuit or "", full_text
-
-
-def _classify_pdf_for_ocr(
-    pdf_path: Path, full_text: str, max_pages: int = 5
-) -> Tuple[bool, List[int]]:
-    """
-    Single-pass PDF analysis: open once, return (is_image_heavy, candidate_pages).
-
-    Replaces the former _is_image_heavy_report + _get_candidate_vision_pages pair which
-    each opened the file independently. One open saves ~100-200 ms per image-heavy PDF.
-
-    Returns:
-        is_image_heavy: True when the PDF needs OCR (image-based tables, little text).
-        candidate_pages: ordered list of page indices to run structured OCR on.
-    """
-    if len(full_text.strip()) < 400:
-        # Barely any text at all — definitely image-heavy; fall back to all early pages.
-        return True, list(range(1, max_pages + 1))
-
-    try:
-        doc = pymupdf.open(pdf_path)
-    except Exception:
-        return False, []
-
-    scored_pages: List[Tuple[int, int]] = []
-    page_count = len(doc)
-    image_pages = 0
-
-    try:
-        for page_idx, page in enumerate(doc):
-            if page_idx == 0:
-                continue
-            text = page.get_text() or ""
-            images = page.get_images(full=True)
-            large_images = sum(1 for img in images if len(img) >= 4 and img[2] >= 900 and img[3] >= 400)
-
-            # is_image_heavy: count pages dominated by large images with little text
-            if large_images >= 1 and len(text.strip()) < 400:
-                image_pages += 1
-
-            # candidate_pages: skip UT Grid noise pages
-            if _OCR_GRID_PAGE.search(text) or _UT_GRID_SECTION.search(text):
-                continue
-
-            score = 0
-            upper_text = text.upper()
-            if _UT_REPORT_SUMMARY.search(text):
-                score += 6
-            if "RESULTS" in upper_text:
-                score += 3
-            if "CML" in upper_text:
-                score += 3
-            if "CIRCUIT" in upper_text:
-                score += 2
-            score += min(large_images, 3)
-
-            if score > 0:
-                scored_pages.append((score, page_idx))
-    finally:
-        doc.close()
-
-    is_image_heavy = image_pages >= 1
-    scored_pages.sort(key=lambda item: (-item[0], item[1]))
-    candidate_pages = [page_idx for _, page_idx in scored_pages[:max_pages]]
-    if not candidate_pages:
-        candidate_pages = list(range(1, min(page_count, max_pages + 1)))
-
-    return is_image_heavy, candidate_pages
-
-
-def _iter_candidate_image_segments(doc, candidate_pages: List[int]):
-    """Yield likely embedded report-image segments from candidate pages."""
-    try:
-        import io
-
-        from PIL import Image
-    except ImportError:
-        return
-
-    for page_idx in reversed(candidate_pages):
-        if page_idx >= len(doc):
-            continue
-        page = doc[page_idx]
-        large_images = []
-        for img in page.get_images(full=True):
-            if len(img) < 4:
-                continue
-            xref = img[0]
-            width, height = img[2], img[3]
-            if width >= 900 and height >= 400:
-                large_images.append((xref, width, height))
-
-        for xref, _, _ in large_images[:3]:
-            try:
-                image_info = doc.extract_image(xref)
-                image = Image.open(io.BytesIO(image_info["image"])).convert("RGB")
-            except Exception:
-                continue
-
-            segments = []
-            if image.width >= image.height:
-                segments.append(("bottom", image.crop((0, image.height // 2, image.width, image.height))))
-            segments.append(("full", image))
-
-            for segment_name, segment in segments:
-                scale = 2 if max(segment.size) < 1600 else 1
-                resized = segment.resize((segment.width * scale, segment.height * scale)) if scale > 1 else segment
-                yield page_idx, xref, segment_name, resized
-
-
-def _iter_candidate_page_segments(doc, candidate_pages: List[int], dpi: int = 300):
-    """Yield full-page rendered images for candidate pages (image-first OCR path)."""
-    for page_idx in candidate_pages:
-        if page_idx < 0 or page_idx >= len(doc):
-            continue
-        try:
-            page = doc[page_idx]
-            pix = page.get_pixmap(dpi=dpi, alpha=False)
-            yield page_idx, f"page-{page_idx + 1}", "full_page", pix
-        except Exception:
-            continue
-
-
 def _is_azure_di_available() -> bool:
     """Cached check: True if AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT + KEY are set and SDK is installed."""
     global _AZURE_DI_AVAILABLE
@@ -1679,285 +1246,6 @@ def get_azure_di_debug_data(filename: str) -> Optional[dict]:
         return _AZURE_DI_DEBUG_CACHE.get(filename)
 
 
-def _normalize_easyocr_tokens(ocr_result) -> List[dict]:
-    """Convert EasyOCR output into simple positioned tokens."""
-    tokens = []
-    for item in ocr_result or []:
-        if not item or len(item) < 2:
-            continue
-        bbox, text = item[0], str(item[1] or "").strip()
-        conf = float(item[2]) if len(item) > 2 else 0.0
-        if not text:
-            continue
-        xs = [p[0] for p in bbox]
-        ys = [p[1] for p in bbox]
-        tokens.append(
-            {
-                "text": text,
-                "conf": conf,
-                "left": min(xs),
-                "right": max(xs),
-                "top": min(ys),
-                "bottom": max(ys),
-                "cy": (min(ys) + max(ys)) / 2,
-                "height": max(1.0, max(ys) - min(ys)),
-            }
-        )
-    return tokens
-
-
-def _normalize_surya_tokens(ocr_result) -> List[dict]:
-    """Convert surya OCR output into simple positioned tokens.
-
-    surya returns a list of OCRResult objects (one per image), each with a
-    ``text_lines`` attribute that is a list of TextLine objects.  Each
-    TextLine has ``.text``, ``.confidence``, and ``.bbox`` ([x1, y1, x2, y2]).
-    """
-    tokens = []
-    for page_result in ocr_result or []:
-        for line in getattr(page_result, "text_lines", []) or []:
-            text = (getattr(line, "text", None) or "").strip()
-            if not text:
-                continue
-            bbox = getattr(line, "bbox", None)
-            if bbox is None or len(bbox) < 4:
-                continue
-            x1, y1, x2, y2 = float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])
-            tokens.append(
-                {
-                    "text": text,
-                    "conf": float(getattr(line, "confidence", 0.0) or 0.0),
-                    "left": x1,
-                    "right": x2,
-                    "top": y1,
-                    "bottom": y2,
-                    "cy": (y1 + y2) / 2,
-                    "height": max(1.0, y2 - y1),
-                }
-            )
-    return tokens
-
-
-def _get_surya_models():
-    """Lazy-load surya detection + recognition predictors. Thread-safe singleton."""
-    global _SURYA_MODELS, _SURYA_INIT_FAILED
-    if _SURYA_INIT_FAILED:
-        return None
-    if _SURYA_MODELS is not None:
-        return _SURYA_MODELS
-    with _SURYA_INIT_LOCK:
-        if _SURYA_INIT_FAILED:
-            return None
-        if _SURYA_MODELS is not None:
-            return _SURYA_MODELS
-        try:
-            from surya.recognition import RecognitionPredictor, FoundationPredictor
-            from surya.detection import DetectionPredictor
-        except ImportError:
-            _SURYA_INIT_FAILED = True
-            return None
-        try:
-            det_predictor = DetectionPredictor()
-            foundation_predictor = FoundationPredictor()
-            rec_predictor = RecognitionPredictor(foundation_predictor)
-            # Suppress surya's tqdm progress bars ("Detecting bboxes", "Recognizing Text")
-            # so they don't appear as noise in the Streamlit console / log output.
-            det_predictor.disable_tqdm = True
-            rec_predictor.disable_tqdm = True
-            _SURYA_MODELS = (det_predictor, rec_predictor)
-        except Exception as exc:
-            _logger.warning("surya init failed: %s", exc)
-            _SURYA_INIT_FAILED = True
-            return None
-    return _SURYA_MODELS
-
-
-def _easyocr_use_gpu() -> bool:
-    """Use GPU on the backend host when INSPECTION_REPORT_OCR_GPU=1 (requires CUDA + torch with CUDA)."""
-    flag = os.getenv("INSPECTION_REPORT_OCR_GPU", "").strip().lower()
-    if flag in ("0", "false", "no", "off"):
-        return False
-    if flag in ("1", "true", "yes", "on"):
-        try:
-            import torch
-
-            return bool(torch.cuda.is_available())
-        except ImportError:
-            return False
-    return False
-
-
-def _get_easyocr_reader():
-    """Reuse a singleton EasyOCR reader. Thread-safe: initialization is guarded by a lock."""
-    global _EASYOCR_READER, _EASYOCR_INIT_FAILED
-    # Fast path: already initialized (no lock needed — reads are safe under CPython GIL)
-    if _EASYOCR_INIT_FAILED:
-        return None
-    if _EASYOCR_READER is not None:
-        return _EASYOCR_READER
-    # Slow path: first-time init, serialize with a lock so two threads never race here
-    with _EASYOCR_INIT_LOCK:
-        # Re-check inside the lock in case another thread just finished initializing
-        if _EASYOCR_INIT_FAILED:
-            return None
-        if _EASYOCR_READER is not None:
-            return _EASYOCR_READER
-        try:
-            import easyocr
-        except ImportError:
-            _EASYOCR_INIT_FAILED = True
-            return None
-        try:
-            _EASYOCR_READER = easyocr.Reader(["en"], gpu=_easyocr_use_gpu(), verbose=False)
-        except Exception as exc:
-            msg = str(exc).lower()
-            _logger.warning("EasyOCR init failed: %s", exc)
-            if "not enough memory" in msg or "alloc" in msg and "fail" in msg:
-                _logger.warning(
-                    "EasyOCR needs hundreds of MB of free RAM. Close other apps, or use "
-                    "Tesseract-only (install Tesseract, set INSPECTION_REPORT_OCR_ENGINE=tesseract), "
-                    "or avoid INSPECTION_REPORT_PRELOAD_OCR=1 on this machine."
-                )
-            _EASYOCR_INIT_FAILED = True
-            return None
-    return _EASYOCR_READER
-
-
-def _is_tesseract_available() -> bool:
-    """Cached check: returns True if Tesseract is installed and callable. Thread-safe."""
-    global _TESSERACT_AVAILABLE
-    if _TESSERACT_AVAILABLE is not None:
-        return _TESSERACT_AVAILABLE
-    with _TESSERACT_INIT_LOCK:
-        if _TESSERACT_AVAILABLE is not None:
-            return _TESSERACT_AVAILABLE
-        try:
-            import pytesseract
-            _configure_tesseract_cmd()  # sets tesseract_cmd as side effect
-            pytesseract.get_tesseract_version()
-            _TESSERACT_AVAILABLE = True
-        except Exception:
-            _TESSERACT_AVAILABLE = False
-    return _TESSERACT_AVAILABLE
-
-
-def _normalize_tesseract_tokens(img_np) -> List[dict]:
-    """
-    Run Tesseract with per-word bounding boxes (image_to_data) and return tokens in the
-    same format as EasyOCR/Surya tokens so _extract_structured_rows_from_easyocr_tokens
-    can consume them without modification.
-
-    Uses the same whitelist as _run_ocr_on_page to eliminate letter/digit confusion.
-    Confidence values are normalized from Tesseract's 0-100 scale to 0.0-1.0.
-    """
-    try:
-        import pytesseract
-        from PIL import Image
-
-        _configure_tesseract_cmd()  # cached — free after first call
-
-        pil_img = Image.fromarray(img_np)
-        # Rescale small images so Tesseract resolves 3-decimal readings reliably.
-        w, h = pil_img.size
-        if w < 1400 or h < 1400:
-            scale = max(1400 / w, 1400 / h, 1.5)
-            pil_img = pil_img.resize((int(w * scale), int(h * scale)), Image.Resampling.LANCZOS)
-        if os.getenv("INSPECTION_REPORT_OCR_PREPROCESS", "1") != "0":
-            pil_img = _preprocess_for_ocr(pil_img)
-
-        config = f"--psm 6 --oem 3 -c tessedit_char_whitelist={_OCR_CHAR_WHITELIST}"
-        data = pytesseract.image_to_data(pil_img, config=config, output_type=pytesseract.Output.DICT)
-
-        tokens: List[dict] = []
-        for i, text in enumerate(data["text"]):
-            text = str(text or "").strip()
-            if not text:
-                continue
-            raw_conf = float(data["conf"][i])
-            if raw_conf < 0:
-                continue  # Tesseract uses -1 for block/line-level rows with no confidence
-            conf = raw_conf / 100.0
-            left = float(data["left"][i])
-            top = float(data["top"][i])
-            width = float(data["width"][i])
-            height = float(data["height"][i])
-            tokens.append(
-                {
-                    "text": text,
-                    "conf": conf,
-                    "left": left,
-                    "right": left + width,
-                    "top": top,
-                    "bottom": top + height,
-                    "cy": top + height / 2.0,
-                    "height": max(1.0, height),
-                }
-            )
-        return tokens
-    except Exception as exc:
-        _logger.debug("tesseract token extraction failed: %s", exc)
-        return []
-
-
-def _run_structured_ocr_on_image(img_np):
-    """
-    Return (normalized OCR tokens, engine id) from the local structured OCR engine.
-
-    Used as fallback when Azure Document Intelligence is not configured. Azure DI
-    is now handled at the PDF level via _run_azure_di_on_pdf (one call per document).
-
-    Engine order (auto mode): Surya → EasyOCR → Tesseract
-
-    Override with INSPECTION_REPORT_STRUCTURED_OCR_ENGINE:
-    - surya:      Surya only
-    - easyocr:    EasyOCR only
-    - tesseract:  Tesseract only
-    - auto:       Surya → EasyOCR → Tesseract (default)
-
-    Legacy values ``paddle`` and ``azure`` are treated as ``auto``.
-
-    Returns:
-        (list of token dicts, engine name). Engine is \"surya\"|\"easyocr\"|\"tesseract\"
-        or \"\" if no tokens were produced.
-    """
-    engine = os.getenv("INSPECTION_REPORT_STRUCTURED_OCR_ENGINE", "auto").strip().lower()
-    if engine in ("paddle", "azure"):
-        engine = "auto"
-
-    # Serialize CPU-bound OCR calls so parallel threads don't thrash each other.
-    with _OCR_SEMAPHORE:
-        if engine in ("surya", "auto"):
-            models = _get_surya_models()
-            if models is not None:
-                try:
-                    from PIL import Image as _PILImage
-                    det_predictor, rec_predictor = models
-                    pil_img = _PILImage.fromarray(img_np)
-                    surya_result = rec_predictor([pil_img], det_predictor=det_predictor)
-                    surya_tokens = _normalize_surya_tokens(surya_result)
-                    if surya_tokens:
-                        return surya_tokens, "surya"
-                except Exception as exc:
-                    _logger.debug("surya OCR failed on image: %s", exc)
-
-        if engine in ("easyocr", "auto"):
-            reader = _get_easyocr_reader()
-            if reader is not None:
-                try:
-                    easy_result = reader.readtext(img_np, detail=1)
-                    easy_tokens = _normalize_easyocr_tokens(easy_result)
-                    if easy_tokens:
-                        return easy_tokens, "easyocr"
-                except Exception:
-                    pass
-
-        # Tesseract: last resort in auto mode. Uses image_to_data for per-word bboxes.
-        if engine in ("tesseract", "auto"):
-            tokens = _normalize_tesseract_tokens(img_np)
-            if tokens:
-                return tokens, "tesseract"
-
-    return [], ""
 
 
 def _extract_structured_rows_from_easyocr_tokens(
@@ -2281,17 +1569,13 @@ def _extract_structured_with_local_ocr(
     candidate_pages: Optional[List[int]] = None,
     content_hash: Optional[str] = None,
 ) -> List[ExtractedReading]:
-    """Structured OCR for inspection report PDFs.
+    """Structured OCR for inspection report PDFs via Azure Document Intelligence.
 
-    Azure DI path (preferred): sends the entire PDF in one API call, processes
-    all returned pages locally with _extract_structured_rows_from_easyocr_tokens.
-
-    Local fallback (when Azure DI is not configured): renders candidate pages as
-    images and runs Surya / EasyOCR / Tesseract on each segment.
+    Sends the entire PDF to Azure DI in 2-page batches, then extracts structured
+    readings from each page's tokens via _extract_structured_rows_from_easyocr_tokens.
 
     Args:
-        candidate_pages: Used only by the local fallback path to limit which pages
-                         are rendered. Ignored when Azure DI is available.
+        candidate_pages: Unused (kept for call-site compatibility).
         content_hash: Pre-computed MD5 of the PDF bytes for cache keying.
     """
     # ── Cache check (keyed on content hash, not temp-file path) ───────────────
@@ -2340,84 +1624,12 @@ def _extract_structured_with_local_ocr(
             out = [] if (finalized and len(finalized) < 3 and not fallback_cml_ids) else finalized
             return _cache_and_return(out)
         elif per_page_tokens is not None and _total_az_tokens == 0:
-            # Azure DI returned pages but extracted zero word tokens.
-            # Do NOT cache this — fall through to local OCR engines instead.
             _logger.warning(
-                "Azure DI returned %d pages with 0 tokens for %s — falling back to local OCR",
+                "Azure DI returned %d pages with 0 tokens for %s",
                 len(per_page_tokens) if per_page_tokens else 0, pdf_path.name,
             )
 
-    # ── Local OCR fallback: Surya / EasyOCR / Tesseract ───────────────────────
-    try:
-        import io
-        import numpy as np
-        from PIL import Image
-    except ImportError:
-        return []
-
-    if candidate_pages is None:
-        _, candidate_pages = _classify_pdf_for_ocr(pdf_path, "", max_pages=6)
-    if not candidate_pages:
-        return []
-
-    if (_get_surya_models() is None and _get_easyocr_reader() is None
-            and not _is_tesseract_available()):
-        return []
-
-    doc = pymupdf.open(pdf_path)
-    results: List[ExtractedReading] = []
-    try:
-        # Pass 1: embedded report images (high precision on image-based summary tables).
-        for page_idx, xref, segment_name, segment in _iter_candidate_image_segments(doc, candidate_pages):
-            try:
-                tokens, ocr_engine = _run_structured_ocr_on_image(np.array(segment))
-            except Exception:
-                continue
-            if not tokens:
-                continue
-            page_results = _extract_structured_rows_from_easyocr_tokens(
-                tokens,
-                source_filename=source_filename or pdf_path.name,
-                fallback_circuit=fallback_circuit,
-                fallback_date=fallback_date,
-                fallback_cml_ids=fallback_cml_ids,
-                structured_ocr_engine=ocr_engine,
-            )
-            if page_results:
-                results.extend(page_results)
-                expected_bases = {cml_id for cml_id in (fallback_cml_ids or []) if cml_id}
-                found_bases = {r.cml_id.split("-", 1)[0] for r in results if "-" in r.cml_id}
-                min_expected_rows = max(5, len(expected_bases) * 2 + 1) if expected_bases else 5
-                if expected_bases and expected_bases.issubset(found_bases) and len(results) >= min_expected_rows:
-                    return _cache_and_return(_validate_and_dedupe_before_export(results))
-
-        # Pass 2: full page rendered as image (vector-text PDFs without embedded images).
-        if not results:
-            for page_idx, xref, segment_name, pix in _iter_candidate_page_segments(doc, candidate_pages):
-                try:
-                    segment = Image.open(io.BytesIO(pix.tobytes(output="png"))).convert("RGB")
-                    tokens, ocr_engine = _run_structured_ocr_on_image(np.array(segment))
-                except Exception:
-                    continue
-                if not tokens:
-                    continue
-                page_results = _extract_structured_rows_from_easyocr_tokens(
-                    tokens,
-                    source_filename=source_filename or pdf_path.name,
-                    fallback_circuit=fallback_circuit,
-                    fallback_date=fallback_date,
-                    fallback_cml_ids=fallback_cml_ids,
-                    structured_ocr_engine=ocr_engine,
-                )
-                if page_results:
-                    results.extend(page_results)
-                    break
-    finally:
-        doc.close()
-
-    finalized = _validate_and_dedupe_before_export(results) if results else []
-    out = [] if (finalized and len(finalized) < 3) else finalized
-    return _cache_and_return(out)
+    return _cache_and_return([])
 
 
 
@@ -2623,152 +1835,39 @@ def parse_inspection_report_pdf(
                 )
                 return _finalize_results(pdf_path, source_filename, merged)
 
-    # Try OCR when: no readings, very little text, suspicious 0.0-only readings, or image-heavy report.
-    # Always classify first so _image_heavy_report is available for the late fallback path too.
+    # Azure DI structured OCR — always attempt for all PDF types.
     _suspicious_readings = all_readings and all(r == 0.0 for r in all_readings)
-    _image_heavy_report, _precomputed_candidate_pages = _classify_pdf_for_ocr(pdf_path, full_text)
-    # Include multi-CML + vision candidates so structured OCR runs even when pdfplumber
-    # already found numeric noise — otherwise we skip straight to generic table / chunk
-    # fallback and lose zone-level rows.
-    _multi_cml_vision = len(cml_ids) >= 3 and bool(_precomputed_candidate_pages)
-
     _try_ocr = (
-        _azure_di_only  # always run Azure DI when in azure_di_only mode
+        _azure_di_only
         or not all_readings
         or len(full_text) < 100
         or _suspicious_readings
-        or _image_heavy_report
-        or _multi_cml_vision
+        or len(cml_ids) >= 3
     )
 
-    # ── Early pdfplumber table parse (fast path before OCR) ──────────────────────
-    # For image-heavy or multi-CML reports that would otherwise run Surya/OCR (30-120 s),
-    # first try the zone-level table parsers.  They run in 1-2 s and often extract the
-    # complete structured result without any OCR.
-    # Guard: only when we have the metadata needed, azure_di_only is off, and OCR is
-    # actually about to be triggered (avoid redundant work on normal text PDFs).
-    if not _azure_di_only and (_image_heavy_report or _multi_cml_vision) and cml_ids and circuit:
-        _t_early = _time.monotonic()
-        _early_circuit_base = _extract_circuit_base(circuit)
-        _early_date = date or ""
-        try:
-            with pdfplumber.open(pdf_path) as _epdf:
-                if len(cml_ids) >= 3:
-                    _early_results = _parse_generic_zone_table(
-                        pdf_path, _early_circuit_base, cml_ids, _early_date, _pdf=_epdf
-                    )
-                else:
-                    _early_results = _parse_acuren_results_table(
-                        pdf_path, _early_circuit_base, cml_ids, _early_date, _pdf=_epdf
-                    )
-                    if not _early_results and len(cml_ids) == 1:
-                        _ut = _parse_ut_report_summary_table(
-                            pdf_path, _early_circuit_base, cml_ids, _early_date, _pdf=_epdf
-                        )
-                        if _ut:
-                            _early_results = _ut
-                    # 2-CML PDFs: also try the generic zone parser as a final fallback
-                    if not _early_results and len(cml_ids) == 2:
-                        _gz = _parse_generic_zone_table(
-                            pdf_path, _early_circuit_base, cml_ids, _early_date, _pdf=_epdf
-                        )
-                        if _gz:
-                            _early_results = _gz
-            if _early_results:
-                _found_cmls = {r.cml_id.split("-", 1)[0] for r in _early_results if "-" in r.cml_id}
-                _zone_level = bool(_found_cmls)
-                _min_rows = max(len(cml_ids) * 2, 3)  # ≥ 2 zones per CML, at least 3 total
-                _all_covered = set(cml_ids).issubset(_found_cmls)
-                if _zone_level and len(_early_results) >= _min_rows and _all_covered:
-                    _early_results = _validate_and_dedupe_before_export(_early_results)
-                    _perf(_fname, "early_table_parse", _t_early)
-                    return _finalize_results(pdf_path, source_filename, _early_results)
-        except Exception:
-            pass
-        _perf(_fname, "early_table_parse_miss", _t_early)
-
-    # Aggregate fallback below defaults extraction_method to pdfplumber; set when legacy OCR supplied readings.
-    legacy_ocr_filled_readings = False
-    # "Readings, Grids & Photos on attached pages" — Acuren scan/photo reports where readings are
-    # stored in NDE area grid images, not in a structured table. Surya structured OCR will only see
-    # area diagrams (not tables) and waste 20-30 s; skip straight to flat Tesseract OCR instead.
-    _is_grids_photos_report = bool(_READINGS_GRIDS_PHOTOS.search(full_text))
     if _try_ocr:
-        if _azure_di_only or _image_heavy_report or _multi_cml_vision:
-            _t_ocr = _time.monotonic()
-            structured_local_results = _extract_structured_with_local_ocr(
-                pdf_path,
-                source_filename=source_filename,
-                fallback_circuit=_extract_circuit_base(circuit or "Unknown"),
-                fallback_date=date or "",
-                fallback_cml_ids=cml_ids,
-                candidate_pages=_precomputed_candidate_pages,
-                content_hash=_content_hash,
-            )
-            _perf(_fname, "ocr_structured", _t_ocr)
-            if structured_local_results:
-                _circuit_base = _extract_circuit_base(circuit or "Unknown")
-                _t_supp = _time.monotonic()
-                merged = (
-                    structured_local_results
-                    if _azure_di_only
-                    else _supplement_with_pdfplumber(
-                        pdf_path, _circuit_base, cml_ids, date or "", structured_local_results
-                    )
-                )
-                _perf(_fname, "supplement", _t_supp)
-                return _finalize_results(pdf_path, source_filename, merged)
-
-        # Legacy flat OCR fallback (EasyOCR / Tesseract) — skipped in azure_di_only mode.
-        if not _azure_di_only:
-            # OCR fallback order: EasyOCR first (usually more accurate on tables, no external
-            # install), then Tesseract. Each engine is called at most once to avoid doubling
-            # the OCR time. Skip EasyOCR when Surya has already run for structured extraction
-            # on this PDF — Surya is the preferred neural engine; EasyOCR flat OCR on
-            # whole-page renders is 10-50× slower and rarely adds value when Surya already had
-            # a chance at the images. Tesseract (3-4 s) covers the flat-reading fallback.
-            # Skip EasyOCR when Surya already ran structured extraction, or when this is a
-            # "Readings, Grids & Photos" scan report (Surya was skipped intentionally but
-            # EasyOCR on full-page renders of area diagrams is also ineffective and very slow).
-            # In both cases Tesseract flat OCR (3-4 s) is the correct fallback.
-            _skip_easyocr = (
-                _is_grids_photos_report
-                or (
-                    (_image_heavy_report or _multi_cml_vision)
-                    and _get_surya_models() is not None
+        _t_ocr = _time.monotonic()
+        structured_local_results = _extract_structured_with_local_ocr(
+            pdf_path,
+            source_filename=source_filename,
+            fallback_circuit=_extract_circuit_base(circuit or "Unknown"),
+            fallback_date=date or "",
+            fallback_cml_ids=cml_ids,
+            content_hash=_content_hash,
+        )
+        _perf(_fname, "ocr_structured", _t_ocr)
+        if structured_local_results:
+            _circuit_base = _extract_circuit_base(circuit or "Unknown")
+            _t_supp = _time.monotonic()
+            merged = (
+                structured_local_results
+                if _azure_di_only
+                else _supplement_with_pdfplumber(
+                    pdf_path, _circuit_base, cml_ids, date or "", structured_local_results
                 )
             )
-            ocr_date, ocr_readings, ocr_cml_ids, ocr_circuit = "", [], [], ""
-            if not _skip_easyocr and os.getenv("INSPECTION_REPORT_OCR_ENGINE") != "tesseract":
-                _t_easyocr = _time.monotonic()
-                try:
-                    e_date, e_readings, e_cmls, e_circuit, _e_txt = _extract_with_easyocr(pdf_path)
-                    if e_readings:
-                        ocr_date, ocr_readings, ocr_cml_ids, ocr_circuit = e_date, e_readings, e_cmls, e_circuit
-                except Exception:
-                    pass
-                _perf(_fname, "ocr_easyocr", _t_easyocr)
-            # Try Tesseract only when EasyOCR found nothing or insufficient readings
-            if len(ocr_readings) < 4:
-                _t_tess = _time.monotonic()
-                try:
-                    t_date, t_readings, t_cmls, t_circuit, _t_txt = _extract_with_ocr(pdf_path)
-                    if len(t_readings) > len(ocr_readings):
-                        ocr_date, ocr_readings, ocr_cml_ids, ocr_circuit = t_date, t_readings, t_cmls, t_circuit
-                except Exception as e:
-                    _logger.debug(
-                        "Tesseract OCR fallback failed (install Tesseract for image-based reports): %s", e
-                    )
-                _perf(_fname, "ocr_tesseract", _t_tess)
-            if ocr_readings:
-                all_readings = ocr_readings
-                legacy_ocr_filled_readings = True
-            if ocr_date:
-                date = ocr_date
-            if ocr_cml_ids:
-                cml_ids = ocr_cml_ids
-            if ocr_circuit:
-                circuit = ocr_circuit
+            _perf(_fname, "supplement", _t_supp)
+            return _finalize_results(pdf_path, source_filename, merged)
 
     # Use pdfplumber/full_text only when OCR didn't provide values
     date = date or _extract_date_from_text(full_text)
@@ -2801,8 +1900,8 @@ def parse_inspection_report_pdf(
 
     # Finalized CML list may only appear after filename fallback — retry structured OCR here
     # so the late pass has complete cml_ids when the early pass had len(cml_ids) < 3.
-    # The content_hash passed here avoids re-reading file bytes; cache hit is near-instant.
-    if len(cml_ids) >= 3 and _precomputed_candidate_pages:
+    # Cache hit is near-instant when Azure DI already ran above.
+    if len(cml_ids) >= 3:
         _t_late = _time.monotonic()
         structured_late = _extract_structured_with_local_ocr(
             pdf_path,
@@ -2810,7 +1909,6 @@ def parse_inspection_report_pdf(
             fallback_circuit=circuit_base,
             fallback_date=date_str,
             fallback_cml_ids=cml_ids,
-            candidate_pages=_precomputed_candidate_pages,
             content_hash=_content_hash,
         )
         _perf(_fname, "ocr_late_retry", _t_late)
@@ -2875,24 +1973,6 @@ def parse_inspection_report_pdf(
         except Exception:
             pass
         _perf(_fname, "fallback_parse", _t_fallback)
-
-    # Image-based reports often lose table structure with OCR — retry structured local OCR.
-    if _image_heavy_report:
-        _t_ocr_img = _time.monotonic()
-        structured_local_results = _extract_structured_with_local_ocr(
-            pdf_path,
-            source_filename=source_filename,
-            fallback_circuit=circuit_base,
-            fallback_date=date_str,
-            fallback_cml_ids=cml_ids,
-            candidate_pages=_precomputed_candidate_pages,
-            content_hash=_content_hash,
-        )
-        _perf(_fname, "ocr_image_heavy_retry", _t_ocr_img)
-        if structured_local_results:
-            return _finalize_results(
-                pdf_path, source_filename, [replace(r, source_file=source_filename) for r in structured_local_results]
-            )
 
     results = []
 
@@ -2968,11 +2048,7 @@ def parse_inspection_report_pdf(
     if _azure_di_only:
         return results
 
-    _agg_method = (
-        "ocr"
-        if (_azure_di_only or legacy_ocr_filled_readings)
-        else "pdfplumber"
-    )
+    _agg_method = "pdfplumber"
     if len(cml_ids) == 1:
         min_reading = min(all_readings) if all_readings else 0.0
         cml_id = cml_ids[0]
@@ -3026,8 +2102,7 @@ def parse_inspection_report_pdfs(
     """Parse multiple PDFs in parallel and return combined results in original order.
 
     Text-based PDFs (pdfplumber path) run truly in parallel.
-    OCR-heavy PDFs are serialized through _OCR_SEMAPHORE to avoid CPU thrashing,
-    but their pdfplumber pre-pass and post-processing still overlap with other threads.
+    Azure DI calls are network I/O so all PDFs can be processed concurrently.
     """
     if not pdf_paths:
         return []
@@ -3035,8 +2110,6 @@ def parse_inspection_report_pdfs(
         fn = (source_filenames[0] if source_filenames else "") or str(pdf_paths[0])
         return parse_inspection_report_pdf(pdf_paths[0], fn)
 
-    # Cap workers: no benefit beyond number of PDFs; also avoid spawning too many threads
-    # on machines where EasyOCR already saturates all cores.
     max_workers = min(len(pdf_paths), (os.cpu_count() or 4))
 
     def _parse_one(idx: int) -> List[ExtractedReading]:
@@ -3057,26 +2130,3 @@ def parse_inspection_report_pdfs(
     return [r for sublist in results if sublist for r in sublist]
 
 
-def warmup_ocr_models() -> None:
-    """Start loading Surya OCR models in a background daemon thread.
-
-    Call once at module import or application startup.  By the time the user
-    uploads their first PDF, models are typically already loaded and
-    ``_get_surya_models()`` returns instantly — eliminating the 10-30 s
-    cold-start that would otherwise block the first parse request.
-
-    Safe to call multiple times: the thread is only started when models have
-    not yet been loaded (or attempted).  Set
-    ``INSPECTION_REPORT_SURYA_PRELOAD=0`` to disable.
-    """
-    if os.getenv("INSPECTION_REPORT_SURYA_PRELOAD", "1").lower() in ("0", "false", "no"):
-        return
-    if _SURYA_MODELS is not None or _SURYA_INIT_FAILED:
-        return  # already loaded (or known broken) — nothing to do
-    t = threading.Thread(target=_get_surya_models, daemon=True, name="surya-warmup")
-    t.start()
-
-
-# Kick off Surya model loading in background the moment this module is imported
-# so the first PDF parse does not stall on cold model initialisation.
-warmup_ocr_models()

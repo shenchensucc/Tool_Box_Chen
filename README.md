@@ -22,7 +22,7 @@ A Python-based web application providing tools for facility and pipeline enginee
 - **Backend**: FastAPI + Uvicorn (multi-worker, non-blocking async)
 - **Visualization**: Plotly (interactive charts)
 - **Data Processing**: pandas, openpyxl, pdfplumber
-- **OCR**: Surya / EasyOCR / Tesseract — isolated in a subprocess worker
+- **OCR**: Azure Document Intelligence (cloud API)
 - **Validation**: Pydantic
 - **Tooling**: uv (package management), ruff (linting), black (formatting)
 
@@ -46,7 +46,6 @@ Tool_Box_Chen/
 │   ├── main.py                    # FastAPI application, endpoints, startup/shutdown
 │   ├── models.py                   # Pydantic models for API validation
 │   ├── pipeline/                  # Pipeline engineering tools
-│   │   ├── ocr_subprocess.py      # OCR worker (runs in isolated subprocess)
 │   │   ├── ili_reader.py          # ILI data reading and processing
 │   │   ├── dig_package.py         # Dig package generation
 │   │   ├── metal_loss.py          # Metal loss assessment calculations

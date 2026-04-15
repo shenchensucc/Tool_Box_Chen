@@ -4,7 +4,6 @@
 
 - **Main API**: `backend/main.py`
 - **Data Models**: `backend/models.py`
-- **OCR Worker**: `backend/pipeline/ocr_subprocess.py`
 - **Inspection Parser**: `backend/tml/inspection_report_parser.py`
 - **Tests**: `tests/test_backend.py`
 

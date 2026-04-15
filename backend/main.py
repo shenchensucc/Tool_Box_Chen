@@ -1259,10 +1259,10 @@ async def deactivate_cml(
 
 
 # ---------------------------------------------------------------------------
-# OCR process pool — true process isolation for EasyOCR / Surya (inspection-report OCR)
+# Inspection report OCR — Azure Document Intelligence via thread pool
 # ---------------------------------------------------------------------------
 # OCR requests run in a thread pool so they don't block the async event loop.
-# _ocr_busy ensures only one parse is in-flight at a time (OCR is CPU-bound).
+# _ocr_busy ensures only one parse is in-flight at a time.
 _ocr_busy = False
 
 

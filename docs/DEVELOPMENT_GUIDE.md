@@ -593,7 +593,7 @@ API_KEY = os.getenv("API_KEY")
 ### Backend Performance
 
 - **Always use `asyncio.to_thread()`** for blocking I/O inside `async def` endpoints — never call `pd.read_excel`, `load_workbook`, or any slow sync function directly on the event loop
-- OCR and CPU-heavy work must go through `ProcessPoolExecutor` (see `backend/pipeline/ocr_subprocess.py`) for crash isolation and true parallelism
+- OCR (Azure Document Intelligence) runs via `asyncio.to_thread()` — it is network I/O, not CPU-bound
 - Use generators for large datasets
 - Cache expensive calculations
 - Use database indexes (when added)

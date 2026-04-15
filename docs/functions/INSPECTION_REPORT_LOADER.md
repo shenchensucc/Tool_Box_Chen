@@ -73,43 +73,29 @@ If table parsing returns no rows, falls back to aggregate logic (min reading per
 
 | Env var | Effect |
 |---------|--------|
-| `INSPECTION_REPORT_OCR_ENGINE=tesseract` | Use Tesseract only (skip EasyOCR; faster) |
-| `INSPECTION_REPORT_OCR_GPU=1` | Use CUDA GPU for EasyOCR on the **backend host** (requires PyTorch with CUDA) |
-| `INSPECTION_REPORT_OCR_HIGH_DPI=1` | 400 DPI for both EasyOCR and Tesseract (better decimal digits) |
-| `INSPECTION_REPORT_OCR_PREPROCESS=1` | Contrast + sharpen before OCR |
+| `INSPECTION_REPORT_AZURE_DI_ONLY=1` | Skip pdfplumber table/text readings; use Azure DI tokens only |
+| `INSPECTION_REPORT_IMAGE_FIRST=1` | Run Azure DI before pdfplumber table parsing |
+| `INSPECTION_REPORT_OCR_MIN_CONF=0.6` | Minimum Azure DI token confidence (default 0.6) |
 
 ---
 
 ## General Extraction
 
 - **Primary**: pdfplumber for text and table extraction
-- **Fallback**: pytesseract OCR when pdfplumber extracts little or suspicious (e.g. 0.79 from phone 780.790)
+- **OCR**: Azure Document Intelligence when pdfplumber extracts little or suspicious values
 - Date from header (e.g. "DATE: February 23, 2026") or filename `_02.23.2026.pdf`
 - Circuit from "Circuit: 52-010B 2-3" → base "52-010B"
 - CML IDs from header, ITEM(S) EXAMINED, or filename
 
 ---
 
-## OCR Process Isolation
+## OCR — Azure Document Intelligence
 
-OCR (Surya, EasyOCR, Tesseract) runs inside a dedicated **subprocess** managed by a `ProcessPoolExecutor` with `max_workers=1`. This provides hard isolation from the FastAPI server:
+Azure DI (`prebuilt-layout` model) is the sole OCR engine. The PDF is sent to Azure DI from the backend thread pool (`asyncio.to_thread`) in 2-page batches to comply with the F0 free tier. All pages are processed regardless of document length.
 
-- **Crash safety**: A segfault or OOM inside the OCR worker cannot crash the API server. The main process catches `BrokenProcessPool`, recreates the executor, and returns a retryable error to the user.
-- **Busy rejection**: If an OCR job is already running, new OCR requests are rejected immediately with **HTTP 503** (Service Unavailable) instead of silently queuing. This prevents memory pile-up when users refresh mid-parse.
-- **Startup warmup**: At server startup, a warmup job is submitted to the executor so OCR models are pre-loaded in the background (takes 30–60 s). The first real OCR request does not pay this cost.
-- **Clean shutdown**: On server shutdown, the executor sends a terminate signal to the worker process so it does not become an orphan.
-
-### Worker module: `backend/pipeline/ocr_subprocess.py`
-
-Functions that run inside the worker subprocess:
-
-| Function | Purpose |
-|----------|---------|
-| `init_ocr_worker()` | Executor initializer — pre-loads OCR models once per worker |
-| `warmup_ocr_worker()` | Dummy job submitted at startup to trigger model loading |
-| `run_ocr_parse(pdf_paths, filenames)` | Actual OCR parse; calls `parse_inspection_report_pdfs` |
-
-**Rule**: All functions must be top-level (not closures/lambdas) and all arguments/return values must be picklable.
+- **Busy rejection**: If a parse is already in-flight, new requests return **HTTP 503**
+- **Retry logic**: 429 rate-limit errors are retried up to 3 times with exponential back-off
+- **Config**: `AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT` and `AZURE_DOCUMENT_INTELLIGENCE_KEY` in `.env`
 
 ---
 
@@ -117,7 +103,7 @@ Functions that run inside the worker subprocess:
 
 - **Frontend**: On non-200 response, expandable "Error details" shows URL, status, response body, and 404 tip (restart backend)
 - **Backend**: Logs full traceback on exception; returns `{type}: {message}` in detail
-- **HTTP 503**: Returned when an OCR job is already running; user should wait and retry
+- **HTTP 503**: Returned when a parse is already running; user should wait and retry
 - **Startup**: Logs inspection-report routes at startup so you can verify endpoints are registered
 
 ---
@@ -131,25 +117,15 @@ Functions that run inside the worker subprocess:
 
 ## OCR (image-based reports)
 
-Python (pdfplumber + local OCR) is used for extraction on the **backend server** (CPU by default; GPU optional via `INSPECTION_REPORT_OCR_GPU=1`).
+Azure Document Intelligence handles all image-based extraction. The parser triggers Azure DI when pdfplumber returns no readings, little text, or suspicious 0.0-only readings.
 
 ### Image-based results tables
 
-Some reports (e.g. 52-010B) have "Readings, Grids & Photos on attached pages" — the results table is embedded as an image. The parser:
+Some reports (e.g. 52-010B) have the results table embedded as an image. The parser:
 
-1. **Triggers OCR** when pdfplumber returns no readings, little text, or suspicious 0.0-only readings
-2. **Builds zone-level output** from OCR-extracted numbers (e.g. 6 readings + 2 CMLs → 1.29-1..3, 1.37-1..3)
-
-**OCR engines (tried in order):**
-
-| Engine | Install | Notes |
-|--------|---------|------|
-| **EasyOCR** (primary) | `pip install easyocr` | Often better on tables; no external binary |
-| **Tesseract** (fallback) | `winget install UB-Mannheim.TesseractOCR` | 300 DPI, PSM 6/11 for tables |
-
-EasyOCR runs first when 4+ readings expected; Tesseract used otherwise. Both prefer summary table pages (UT REPORT - Connections/Elbow) over grid pages.
-
-**Deployment:** The Dockerfile installs `tesseract-ocr` via apt. On Linux, Tesseract is in PATH (`/usr/bin/tesseract`). On Windows dev, the parser uses `C:/Program Files/Tesseract-OCR/tesseract.exe` when present.
+1. **Sends the full PDF to Azure DI** — all pages processed, no page limit
+2. **Extracts structured rows** from Azure DI word tokens via `_extract_structured_rows_from_easyocr_tokens`
+3. **Supplements with pdfplumber** to fill any zones Azure DI missed
 
 ---
 

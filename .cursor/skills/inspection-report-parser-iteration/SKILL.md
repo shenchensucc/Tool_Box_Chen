@@ -43,7 +43,7 @@ Validation uses `is_correct` readings + additions as expected. Tolerance: 0.01 f
 2. **Phone number false positive** (0.79 from 780.790): Dedupe keeps min; if correct reading exists, it wins. Else add context-aware filter in `_extract_numeric_readings`.
 3. **Filename CML** (e.g. "2.37UT" no space): Regex `([\d.]+)\s*UT` allows zero spaces.
 4. **Missing zones**: Table structure may differ; try permissive parser or generic zone table.
-5. **Image-based results** (e.g. 52-010B): OCR triggers when readings are all 0.0. Install Tesseract for OCR. Parser builds zone-level output from OCR numbers.
+5. **Image-based results** (e.g. 52-010B): Azure DI triggers when readings are all 0.0 or pdfplumber finds little text. Ensure `AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT` and `AZURE_DOCUMENT_INTELLIGENCE_KEY` are set in `.env`.
 
 ## Validation Commands
 
@@ -52,13 +52,13 @@ python dev_tools/validate_ground_truth.py
 python dev_tools/validate_ground_truth.py --fixtures-only
 ```
 
-## OCR tuning (optional)
+## Azure DI tuning
 
-Set in `.env` or the shell when debugging slow or inaccurate OCR:
+Set in `.env` when debugging OCR:
 
-- `INSPECTION_REPORT_OCR_HIGH_DPI=1` — 400 DPI (Tesseract / EasyOCR rasterization)
-- `INSPECTION_REPORT_OCR_ENGINE=tesseract` — Tesseract only (skip EasyOCR; often faster on CPU)
-- `INSPECTION_REPORT_OCR_GPU=1` — EasyOCR on CUDA GPU (backend host must have GPU + torch CUDA)
+- `INSPECTION_REPORT_AZURE_DI_ONLY=1` — skip pdfplumber table/text readings; Azure DI tokens only
+- `INSPECTION_REPORT_IMAGE_FIRST=1` — run Azure DI before pdfplumber table parsing
+- `INSPECTION_REPORT_OCR_MIN_CONF=0.6` — minimum token confidence (default 0.6)
 
 ## Checklist
 
