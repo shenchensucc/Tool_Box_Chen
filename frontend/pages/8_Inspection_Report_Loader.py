@@ -541,8 +541,11 @@ def _pdf_page_count(pdf_bytes: bytes) -> int:
 
 
 def _insp_edit_columns(summary: list) -> tuple[list, pd.DataFrame]:
-    EDIT_COLS = ["Circuit", "CML", "Min Reading", "Date", "Equipment ID"]
+    EDIT_COLS = ["Circuit", "CML", "Min Reading", "Date", "Comments"]
     df_full = pd.DataFrame(summary)
+    # Ensure Comments column exists even if backend didn't produce it yet
+    if "Comments" not in df_full.columns:
+        df_full["Comments"] = ""
     edit_cols = [c for c in EDIT_COLS if c in df_full.columns]
     return edit_cols, df_full[edit_cols].copy() if edit_cols else df_full.copy()
 
@@ -550,11 +553,11 @@ def _insp_edit_columns(summary: list) -> tuple[list, pd.DataFrame]:
 _LIVE_EDITOR_KEY = "insp_live_editor"
 
 _EDITOR_COL_CONFIG = {
-    "Circuit":      st.column_config.TextColumn("Circuit",            width="medium"),
-    "CML":          st.column_config.TextColumn("CML",                width="small"),
-    "Min Reading":  st.column_config.NumberColumn("Min Reading (in)", format="%.3f", width="small"),
-    "Date":         st.column_config.TextColumn("Date (YYYY-MM-DD)", width="medium"),
-    "Equipment ID": st.column_config.TextColumn("Equipment ID",       width="large"),
+    "Circuit":     st.column_config.TextColumn("Circuit",            width="medium"),
+    "CML":         st.column_config.TextColumn("CML",                width="small"),
+    "Min Reading": st.column_config.NumberColumn("Min Reading (in)", format="%.3f", width="small"),
+    "Date":        st.column_config.TextColumn("Date (YYYY-MM-DD)", width="medium"),
+    "Comments":    st.column_config.TextColumn("Comments",           width="large"),
 }
 
 # First *data* column after Streamlit’s row-selection checkboxes (we cannot merge into those cells).
@@ -1120,14 +1123,18 @@ def _render_results_section() -> None:
                 try:
                     url = f"{BACKEND_URL}/api/tml/inspection-report/generate-from-table"
                     _tpl_file = st.session_state.get(fu_key("insp", "template"))
+                    _src_file = st.session_state.get(fu_key("insp", "source"))
                     _form_data = {
                         "rows_json": json.dumps(rows_payload),
                         "cmms_system": "P1R-100",
                     }
                     _files: list = []
                     if _tpl_file is not None:
-                        _files = [("template_file", (_tpl_file.name, _tpl_file.getvalue(),
-                                   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))]
+                        _files.append(("template_file", (_tpl_file.name, _tpl_file.getvalue(),
+                                       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")))
+                    if _src_file is not None:
+                        _files.append(("source_file", (_src_file.name, _src_file.getvalue(),
+                                       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")))
                     with httpx.Client(timeout=60.0) as client:
                         response = client.post(url, data=_form_data, files=_files if _files else None)
                     if response.status_code == 200:
@@ -1146,6 +1153,8 @@ def _render_results_section() -> None:
         gen_res = st.session_state.get("insp_gen_from_table_result")
         if gen_res and gen_res.get("download_token") and gen_res.get("records_count", 0) > 0:
             st.success(f"✅ {gen_res.get('message', '')}")
+            for note in gen_res.get("notes") or []:
+                st.warning(f"⚠️ {note}")
             try:
                 dl = httpx.get(
                     f"{BACKEND_URL}/api/tml/download/{gen_res['download_token']}",
@@ -1199,15 +1208,17 @@ with main:
         disabled=_uploading_locked,
     )
 
-    with st.expander("📎 Optional: Source Excel (Circuit → Equipment ID)", expanded=False):
+    with st.expander("📎 Optional: Source Excel (Circuit → Equipment ID + CML Group ID)", expanded=False):
         st.caption(
-            "If provided, Equipment IDs are mapped from this file. "
-            "Without it, Equipment ID = 'Need Add Equipment ID' — edit in the table or in Excel before APM upload."
+            "If provided, Equipment IDs and CML Group IDs are looked up from this file when generating the dataloader. "
+            "Matches on **Circuit #**, **Circuit**, or **Sort Field** columns; also reads **CML Group ID** and **CML ID** "
+            "for the TML Group ID in APM. Any sheet is auto-detected. "
+            "Without this file, Equipment ID = 'Need Add Equipment ID' and TML Group ID = Circuit."
         )
         source_file = st.file_uploader(
             "Source Excel File",
             type=["xlsx", "xls"],
-            help="Sheet 'Source_Data' with Circuit ID and Equipment ID columns",
+            help="Excel with Circuit #/Circuit/Sort Field, Equipment ID, CML Group ID, and CML ID columns",
             key=fu_key("insp", "source"),
             on_change=_clear_insp_results,
             disabled=_uploading_locked,
@@ -1326,8 +1337,9 @@ with main:
         1. **Auto-read**: Reports are parsed automatically when you upload PDFs.
            Click **📖 Read Reports** to re-parse after changing files.
         2. **Generate Dataloader**: parse + produce APM dataloader Excel in one step.
-        3. **Edit table**: correct OCR errors or fill Equipment IDs directly in the grid,
-           then click **Generate Dataloader from Table**.
+        3. **Edit table**: correct OCR errors or add Comments directly in the grid,
+           then click **Generate Dataloader from Table** (Equipment IDs and CML Group IDs are
+           looked up from the Source Excel at generation time).
         4. **PDF panel**: fixed to the right edge, 40 % wide — content shifts left, nothing is covered.
            Drag the header to resize. Use × to dismiss; toggle the **📄 PDF Preview** switch to re-open.
 

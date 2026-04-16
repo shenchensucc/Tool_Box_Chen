@@ -1439,13 +1439,14 @@ async def process_inspection_reports(
         # ── Phase 2: Dataloader generation — lightweight; runs in thread ───
         def _generate_dataloader() -> InspectionReportResponse:
             from backend.tml.inspection_dataloader import (
-                build_circuit_to_equipment_map,
+                build_source_mapping,
                 generate_measurements_dataloader,
             )
 
             circuit_to_equipment = {}
+            circuit_cml_to_group_id = {}
             if temp_source_path:
-                circuit_to_equipment = build_circuit_to_equipment_map(str(temp_source_path))
+                circuit_to_equipment, circuit_cml_to_group_id = build_source_mapping(str(temp_source_path))
 
             temp_dir = tempfile.mkdtemp()
             output_path = Path(temp_dir) / "Inspection_Report_Dataloader.xlsx"
@@ -1455,6 +1456,7 @@ async def process_inspection_reports(
                 str(output_path),
                 template_path=template_path_str,
                 use_placeholder_when_missing=True,
+                circuit_cml_to_group_id=circuit_cml_to_group_id,
             )
             if records_count == 0:
                 return InspectionReportResponse(
@@ -1465,22 +1467,24 @@ async def process_inspection_reports(
                 )
 
             download_token = _store_token(str(output_path))
-            has_placeholder = any(
-                s.get("Equipment ID") == "Need Add Equipment ID" for s in summary
-            )
-            msg = f"Processed {len(pdf_bytes_list)} PDF(s), {records_count} record(s)."
-            if has_placeholder:
-                msg += " Some Equipment IDs are placeholders—edit in Excel before upload to APM."
+            missing_equip = sum(1 for s in summary if "Equipment ID" in s.get("Status", ""))
+            missing_group = sum(1 for s in summary if "CML Group ID" in s.get("Status", ""))
+            notes = []
+            if missing_equip:
+                notes.append(f"{missing_equip} record(s) could not find Equipment ID — check dataloader before APM upload.")
+            if missing_group:
+                notes.append(f"{missing_group} record(s) could not find CML Group ID — check dataloader before APM upload.")
             logger.info(
                 f"[tml/inspection-report] Processed {len(pdf_bytes_list)} PDFs, {records_count} records"
             )
             return InspectionReportResponse(
                 success=True,
-                message=msg,
+                message=f"Generated dataloader with {records_count} record(s) from extract reading table successfully.",
                 download_token=download_token,
                 output_filename="Inspection_Report_Dataloader.xlsx",
                 records_count=records_count,
                 summary=summary,
+                notes=notes,
             )
 
         return await asyncio.to_thread(_generate_dataloader)
@@ -1520,11 +1524,13 @@ async def generate_inspection_dataloader_from_table(
     rows_json: str = Form(...),
     cmms_system: str = Form("P1R-100"),
     template_file: Optional[UploadFile] = File(None),
+    source_file: Optional[UploadFile] = File(None),
 ):
     """
     Generate APM dataloader from pre-parsed / user-edited table rows.
 
-    Accepts multipart form: rows_json (JSON-encoded list), cmms_system, optional template_file.
+    Accepts multipart form: rows_json (JSON-encoded list), cmms_system, optional template_file,
+    optional source_file (Excel with Circuit #, Equipment ID, CML Group ID columns).
     Falls back to system TM_Loader_Template.xlsx when no template is uploaded.
     """
     import json as _json
@@ -1543,6 +1549,7 @@ async def generate_inspection_dataloader_from_table(
     temp_dir = tempfile.mkdtemp()
     output_path = Path(temp_dir) / "Inspection_Report_Dataloader.xlsx"
     temp_template_path: Optional[str] = None
+    temp_source_path: Optional[str] = None
 
     if template_file and template_file.filename:
         validate_excel_file(template_file)
@@ -1551,14 +1558,31 @@ async def generate_inspection_dataloader_from_table(
             f.write(tpl_bytes)
             temp_template_path = f.name
 
+    if source_file and source_file.filename:
+        validate_excel_file(source_file)
+        src_bytes = await source_file.read()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(source_file.filename).suffix) as f:
+            f.write(src_bytes)
+            temp_source_path = f.name
+
     try:
-        from backend.tml.inspection_dataloader import generate_measurements_dataloader_from_rows
+        from backend.tml.inspection_dataloader import (
+            build_source_mapping,
+            generate_measurements_dataloader_from_rows,
+        )
+
+        circuit_to_equipment = {}
+        circuit_cml_to_group_id = {}
+        if temp_source_path:
+            circuit_to_equipment, circuit_cml_to_group_id = build_source_mapping(temp_source_path)
 
         records_count, summary = generate_measurements_dataloader_from_rows(
             rows,
             str(output_path),
             cmms_system=cmms_system,
             template_path=temp_template_path,
+            circuit_to_equipment=circuit_to_equipment,
+            circuit_cml_to_group_id=circuit_cml_to_group_id,
         )
 
         if records_count == 0:
@@ -1571,19 +1595,23 @@ async def generate_inspection_dataloader_from_table(
 
         download_token = _store_token(str(output_path))
 
-        has_placeholder = any(s.get("Equipment ID") == "Need Add Equipment ID" for s in summary)
-        msg = f"Generated dataloader with {records_count} record(s) from edited table."
-        if has_placeholder:
-            msg += " Some Equipment IDs are placeholders—edit in Excel before APM upload."
+        missing_equip = sum(1 for s in summary if "Equipment ID" in s.get("Status", ""))
+        missing_group = sum(1 for s in summary if "CML Group ID" in s.get("Status", ""))
+        notes = []
+        if missing_equip:
+            notes.append(f"{missing_equip} record(s) could not find Equipment ID — check dataloader before APM upload.")
+        if missing_group:
+            notes.append(f"{missing_group} record(s) could not find CML Group ID — check dataloader before APM upload.")
 
         logger.info(f"[tml/inspection-report/generate-from-table] {records_count} records")
         return InspectionReportResponse(
             success=True,
-            message=msg,
+            message=f"Generated dataloader with {records_count} record(s) from extract reading table successfully.",
             download_token=download_token,
             output_filename="Inspection_Report_Dataloader.xlsx",
             records_count=records_count,
             summary=summary,
+            notes=notes,
         )
     except Exception as e:
         log_error(logger, "tml/inspection-report/generate-from-table", e)
@@ -1592,6 +1620,11 @@ async def generate_inspection_dataloader_from_table(
         if temp_template_path:
             try:
                 os.unlink(temp_template_path)
+            except OSError:
+                pass
+        if temp_source_path:
+            try:
+                os.unlink(temp_source_path)
             except OSError:
                 pass
 

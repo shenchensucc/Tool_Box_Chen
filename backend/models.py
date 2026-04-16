@@ -128,7 +128,11 @@ class InspectionReportResponse(BaseModel):
     records_count: int = Field(default=0, description="Number of measurement records in dataloader")
     summary: List[Dict[str, Any]] = Field(
         default_factory=list,
-        description="Summary table: Circuit, CML, Min Reading, Date, Equipment ID, Status",
+        description="Summary table: Circuit, CML, Min Reading, Date, Status",
+    )
+    notes: List[str] = Field(
+        default_factory=list,
+        description="Warning notes shown below the success message (e.g. unmatched Equipment ID / CML Group ID counts)",
     )
     error: Optional[str] = None
 
