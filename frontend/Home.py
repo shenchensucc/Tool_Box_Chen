@@ -112,6 +112,11 @@ with main:
             "page": "2_TML_Data_Loader",
         },
         {
+            "icon": "✨", "title": "New CML Helper",
+            "desc": "AI-assisted column mapping from uploads into TML batch outputs",
+            "page": "11_New_CML_Helper",
+        },
+        {
             "icon": "📄", "title": "Inspection Report Loader",
             "desc": "Parse and extract data from inspection report PDFs",
             "page": "8_Inspection_Report_Loader",

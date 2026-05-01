@@ -1211,6 +1211,7 @@ def display_sidebar_navigation():
 
         with st.expander("🏭 Facility", expanded=False):
             st.page_link("pages/2_TML_Data_Loader.py", label="⚙️ TML Data Loader")
+            st.page_link("pages/11_New_CML_Helper.py", label="✨ New CML Helper")
             st.page_link("pages/7_Deactive_CML.py", label="🔴 De-active CML")
             st.page_link("pages/8_Inspection_Report_Loader.py", label="📄 Inspection Report Loader")
 

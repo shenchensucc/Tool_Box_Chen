@@ -48,26 +48,14 @@ from backend.models import (
 )
 from backend.tml.deactivate_cml import process_deactivate_cml
 from backend.tml.file_handler import FileHandler
-from backend.tml.workflows._01_status import process_status_indicator
-from backend.tml.workflows._02_follow_up_cml import process_follow_up_cml
-from backend.tml.workflows._03_code_year_tmin import process_code_year_tmin
-from backend.tml.workflows._04_design_code import process_design_code
-from backend.tml.workflows._05_material_spec import process_material_specification
-from backend.tml.workflows._06_material_grade import process_material_grade
-from backend.tml.workflows._07_design_temperature import process_design_temperature
-from backend.tml.workflows._08_piping_formula import process_piping_formula
-from backend.tml.workflows._09_od import process_od
-from backend.tml.workflows._10_nps import process_nps
-from backend.tml.workflows._11_schedule import process_schedule
-from backend.tml.workflows._12_design_pressure import process_design_pressure
-from backend.tml.workflows._13_temperature_coefficient import process_temperature_coefficient
-from backend.tml.workflows._14_tnom import process_tnom
-from backend.tml.workflows._15_tmin import process_tmin
-from backend.tml.workflows._16_override_allowable_stress import process_override_allowable_stress
-from backend.tml.workflows._17_allowable_stress import process_allowable_stress
-from backend.tml.workflows._18_design_factor import process_design_factor
-from backend.tml.workflows._19_joint_factor import process_joint_factor
-from backend.tml.workflows._20_location_factor import process_location_factor
+from backend.tml.new_cml_helper.pipeline import run_analyze, run_generate, run_refine
+from backend.tml.new_cml_helper.schema import (
+    AssistantPlan,
+    NewCMLAnalyzeResponse,
+    NewCMLRefineRequest,
+    NewCMLRefineResponse,
+)
+from backend.tml.tml_batch_runner import TMLBatchError, run_tml_batch
 from backend.pipeline.metal_loss import assess_metal_loss_feature, mass_assess_metal_loss
 from backend.pipeline.ili_parse import parse_ili_file
 from backend.pipeline.ili_reader import (
@@ -213,6 +201,16 @@ def validate_excel_file(file: UploadFile) -> None:
         raise HTTPException(status_code=400, detail="File must be an Excel file (.xlsx or .xls)")
     
     # Validate file size
+    validate_file_size(file)
+
+
+def validate_new_cml_source_upload(file: UploadFile) -> None:
+    """CSV / Excel uploads for New CML Helper analyze/generate."""
+    if not file.filename or not file.filename.lower().endswith((".csv", ".xlsx", ".xls")):
+        raise HTTPException(
+            status_code=400,
+            detail="Each source file must be .csv, .xlsx, or .xls",
+        )
     validate_file_size(file)
 
 
@@ -1000,136 +998,16 @@ async def process_tml_data(
                 f.write(template_content)
                 temp_template = Path(f.name)
 
-            temp_output_dir = Path(temp_dir) / "output"
-            temp_output_dir.mkdir(exist_ok=True)
-
-            file_handler = FileHandler(
-                source_path=str(temp_source),
-                template_path=str(temp_template),
-                output_dir=str(temp_output_dir)
-            )
-
-            # Read source data and filter
             try:
-                source = file_handler.read_excel("source", "Source_Data")
-                logger.info(f"[tml/process] Source data shape: {source.shape}")
-            except Exception as e:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Error reading source file. Ensure it has a sheet named 'Source_Data'. Error: {str(e)}"
+                return run_tml_batch(
+                    temp_source,
+                    temp_template,
+                    workflow_ids,
+                    Path(temp_dir),
+                    _store_token,
                 )
-
-            if "AER_Status_CML" not in source.columns:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Source file missing required column 'AER_Status_CML'. Found columns: {', '.join(source.columns.tolist())}"
-                )
-
-            source = source[source["AER_Status_CML"].str.contains("Yes", na=False)].copy()
-            logger.info(f"[tml/process] Filtered source data shape: {source.shape}")
-
-            if source.empty:
-                raise HTTPException(
-                    status_code=400,
-                    detail="No records found with AER_Status_CML containing 'Yes'. Please check your source data."
-                )
-
-            try:
-                loader_Assets = file_handler.read_excel("template", "Assets")
-                loader_TML = file_handler.read_excel("template", "TML")
-            except Exception as e:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Error reading template file. Ensure it has sheets named 'Assets' and 'TML'. Error: {str(e)}"
-                )
-
-            for file_key in file_handler.output_files.keys():
-                shutil.copy(temp_template, file_handler.output_files[file_key])
-
-            workflow_map = {
-                1: (process_status_indicator, "Status"),
-                2: (process_follow_up_cml, "FollowUp"),
-                3: (process_code_year_tmin, "CodeYearTmin"),
-                4: (process_design_code, "DesignCode"),
-                5: (process_material_specification, "MaterialSpec"),
-                6: (process_material_grade, "MaterialGrade"),
-                7: (process_design_temperature, "T"),
-                8: (process_piping_formula, "PF"),
-                9: (process_od, "OD"),
-                10: (process_nps, "NPS"),
-                11: (process_schedule, "Schedule"),
-                12: (process_design_pressure, "P"),
-                13: (process_temperature_coefficient, "TempCoef"),
-                14: (process_tnom, "Tnom"),
-                15: (process_tmin, "Tmin"),
-                16: (process_override_allowable_stress, "OAS"),
-                17: (process_allowable_stress, "AS"),
-                18: (process_design_factor, "DF"),
-                19: (process_joint_factor, "JF"),
-                20: (process_location_factor, "LF"),
-            }
-
-            processed_files = []
-            workflow_summary = {}
-
-            for workflow_id in workflow_ids:
-                if workflow_id not in workflow_map:
-                    logger.warning(f"[tml/process] Invalid workflow ID {workflow_id}, skipping")
-                    workflow_summary[workflow_id] = 0
-                    continue
-
-                process_func, file_key = workflow_map[workflow_id]
-                output_file = file_handler.output_files[file_key]
-
-                try:
-                    logger.info(f"[tml/process] Processing workflow {workflow_id}...")
-                    records_count, result_file = process_func(source, loader_Assets, loader_TML, output_file)
-                    workflow_summary[workflow_id] = records_count
-                    if result_file and records_count > 0:
-                        processed_files.append(result_file)
-                        logger.info(f"[tml/process] Workflow {workflow_id}: Added {records_count} records")
-                    else:
-                        logger.info(f"[tml/process] Workflow {workflow_id}: No records to add, skipping file creation")
-                except Exception as e:
-                    log_error(logger, f"tml/process workflow {workflow_id}", e)
-                    workflow_summary[workflow_id] = 0
-
-            if not processed_files:
-                raise HTTPException(status_code=400, detail="No workflows were successfully processed. All workflows returned 0 records.")
-
-            zip_path = Path(temp_dir) / "TML_Output.zip"
-            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
-                for file_path in processed_files:
-                    if os.path.exists(file_path):
-                        zipf.write(file_path, os.path.basename(file_path))
-
-            from backend.tml.data_processor import DataProcessor
-            combined_path = Path(temp_dir) / "TML_Combined_Output.xlsx"
-            DataProcessor.create_combined_output(
-                processed_files=processed_files,
-                output_file=str(combined_path),
-                template_assets=loader_Assets,
-                template_tml=loader_TML,
-                asset_sheet_name="Assets",
-                tml_sheet_name="TML"
-            )
-
-            zip_token = _store_token(str(zip_path))
-            combined_token = _store_token(str(combined_path))
-
-            logger.info(
-                f"[tml/process] Completed: {len(processed_files)} workflows, "
-                f"workflow_summary={workflow_summary}"
-            )
-            return TMLProcessResponse(
-                success=True,
-                message="TML data processed successfully",
-                zip_token=zip_token,
-                combined_token=combined_token,
-                workflows_processed=len(processed_files),
-                workflow_summary=workflow_summary,
-                timestamp=datetime.now().isoformat()
-            )
+            except TMLBatchError as e:
+                raise HTTPException(status_code=e.status_code, detail=e.detail)
 
         finally:
             if temp_source and temp_source.exists():
@@ -1145,6 +1023,105 @@ async def process_tml_data(
     except Exception as e:
         log_error(logger, "tml/process", e)
         raise HTTPException(status_code=500, detail=f"Error processing TML data: {str(e)}")
+
+
+@app.post("/api/tml/new-cml-helper/analyze", response_model=NewCMLAnalyzeResponse)
+async def new_cml_helper_analyze(
+    files: List[UploadFile] = File(...),
+    notes: str = Form(""),
+    model: str = Form(DEFAULT_MODEL),
+):
+    """Upload spreadsheets; returns column profiles plus an AI-assisted mapping/workflow plan."""
+    if not files:
+        raise HTTPException(status_code=400, detail="No files uploaded")
+
+    uploads = []
+    for uf in files:
+        validate_new_cml_source_upload(uf)
+        uploads.append((uf.filename, await uf.read()))
+
+    log_params(logger, "tml/new-cml-helper/analyze", {"n_files": len(uploads), "model": model})
+
+    try:
+        return await asyncio.to_thread(run_analyze, uploads, notes, model)
+    except Exception as e:
+        log_error(logger, "tml/new-cml-helper/analyze", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/tml/new-cml-helper/refine", response_model=NewCMLRefineResponse)
+async def new_cml_helper_refine(body: NewCMLRefineRequest):
+    """Apply user answers to questions / constants and recompute validation."""
+    try:
+        return await asyncio.to_thread(run_refine, body)
+    except Exception as e:
+        log_error(logger, "tml/new-cml-helper/refine", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/tml/new-cml-helper/generate", response_model=TMLProcessResponse)
+async def new_cml_helper_generate(
+    template_file: UploadFile = File(...),
+    source_files: List[UploadFile] = File(...),
+    plan_json: str = Form(...),
+    workflows: str = Form(""),
+):
+    """Assemble Source_Data from uploads + confirmed plan, then run TML batch."""
+    validate_excel_file(template_file)
+    if not source_files:
+        raise HTTPException(status_code=400, detail="No source files uploaded")
+
+    template_content = await template_file.read()
+    template_filename = template_file.filename or "template.xlsx"
+
+    uploads_dict: Dict[str, bytes] = {}
+    for uf in source_files:
+        validate_new_cml_source_upload(uf)
+        uploads_dict[uf.filename] = await uf.read()
+
+    try:
+        plan = AssistantPlan.model_validate_json(plan_json)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid plan_json: {e}") from e
+
+    if workflows.strip():
+        try:
+            workflow_ids = [int(w.strip()) for w in workflows.split(",") if w.strip()]
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail="Invalid workflows format") from e
+        if not workflow_ids:
+            raise HTTPException(status_code=400, detail="No workflows selected")
+    else:
+        workflow_ids = list(plan.recommended_workflows)
+
+    log_params(logger, "tml/new-cml-helper/generate", {
+        "template_filename": template_filename,
+        "n_sources": len(uploads_dict),
+        "workflows": workflow_ids,
+    })
+
+    def _do_gen() -> TMLProcessResponse:
+        try:
+            return run_generate(
+                uploads_dict,
+                plan,
+                workflow_ids,
+                template_content,
+                template_filename,
+                _store_token,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        except TMLBatchError as e:
+            raise HTTPException(status_code=e.status_code, detail=e.detail) from e
+
+    try:
+        return await asyncio.to_thread(_do_gen)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log_error(logger, "tml/new-cml-helper/generate", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/tml/deactivate-cml", response_model=DeactivateCMLResponse)
