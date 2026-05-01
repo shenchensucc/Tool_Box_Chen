@@ -13,7 +13,9 @@ ILI_READER_VERSION = "v3-early-exit"
 logger.info(f"ili_reader loaded ({ILI_READER_VERSION})")
 
 # Configurable keywords for column identification
-# Users can manually update these lists to support different ILI vendors
+# Users can manually update these lists to support different ILI vendors.
+# Note: new data-format-specific keys (ds_distance, wall_thickness, pipe_grade)
+# return None for anomaly files — harmless — and are used only by the pipe-tally builder.
 COLUMN_KEYWORDS = {
     "depth": [
         "depth", "defect depth", "Max. Depth", "dimp", "depth (%)", "depth (mm)",
@@ -23,7 +25,9 @@ COLUMN_KEYWORDS = {
     ],
     "length": [
         "length", "Length", "defect length", "Limp", "length (mm)",
-        "Feature Length", "Feature Length (mm)", "Length (in)", "Length (in.)"
+        "Feature Length", "Feature Length (mm)", "Length (in)", "Length (in.)",
+        # Pipe-tally joint lengths (matched here so basic header scoring still works)
+        "Joint Length", "Joint Length (m)", "Pipe Length", "Pipe Length (m)", "Jt Length",
     ],
     "width": [
         "width", "Width", "defect width", "Wimp", "width (mm)",
@@ -33,7 +37,14 @@ COLUMN_KEYWORDS = {
         "distance", "Distance", "Odometer", "Log Distance", "Chainage",
         "Wheel Count (ft)", "Wheel Count (ft.)", "Log Dist.", "ILI Chainage (m)",
         "Odometer (m)", "ILI Chainage/Odometer (m)", "ILI Chainage", "ILI Distance (m)",
-        "Distance from TGW (m)", "Distance from TGW"
+        "Distance from TGW (m)", "Distance from TGW",
+        # Pipe-tally US-end chainage variants (treated as the primary x position)
+        "US GWD ILI Chainage (m)", "US GWD ILI Chainage", "US GWD Chainage (m)",
+        "US ILI Chainage (m)", "US Chainage (m)", "US Chainage",
+        "US Odometer (m)", "US Odometer", "US Odo (m)", "US Odo",
+        "U/S GWD ILI Chainage (m)", "U/S GWD Chainage (m)", "U/S Chainage (m)",
+        "U/S Odometer (m)", "U/S Odometer", "U/S Odo (m)", "U/S Odo",
+        "Upstream Chainage (m)", "Upstream Odometer (m)", "Upstream Odo (m)",
     ],
     "feature_id": [
         "feature id", "feature", "id", "f_id", "Feature Number", "Anomaly ID",
@@ -45,15 +56,43 @@ COLUMN_KEYWORDS = {
         "Orientation", "Clock Orientation", "O'Clock", "Orientation (clock)",
         "Clock Orient.", "Orientation (hh:mm)", "Feature Orientation",
         "Feature Orientation (Center of feature) (hh:mm)", "Feature Orientation (deg. or clock)",
-        "(Degree)", "o'clock"
+        "(Degree)", "o'clock",
+        # Pipe-tally seam / longseam orientation variants
+        "Seam Orientation", "Seam Orient.", "Seam Position",
+        "Longseam Orientation", "Longseam Orient.", "Longseam (o'clock)",
+        "LS Orientation", "LS Orient.", "LS Position", "Longseam Position",
     ],
     "joint_number": [
         "Joint", "Joint Number", "Weld Number", "Joint No. or US GW No.",
-        "Joint No", "US GW No", "PNG Joint Number", "Client Jno."
+        "Joint No", "US GW No", "PNG Joint Number", "Client Jno.",
+        # Pipe-tally GWD / joint number variants
+        "GWD No.", "GWD No", "GWD #", "GWD#", "GWD",
+        "US GWD", "U/S GWD", "PNG GWD", "PNG GWD No.", "Client GWD No.",
+        "Weld No.", "Weld No", "Jt No.", "Jt No",
     ],
     "source": [
         "ILI source", "Source", "ILI Vendor", "Vendor", "ILI Source"
-    ]
+    ],
+    # ── Pipe-tally-specific keys ──────────────────────────────────────────
+    # These are ignored by the anomaly builder; only the pipe-tally builder reads them.
+    "ds_distance": [
+        "DS GWD ILI Chainage (m)", "DS GWD ILI Chainage", "DS GWD Chainage (m)",
+        "DS ILI Chainage (m)", "DS Chainage (m)", "DS Chainage",
+        "DS Odometer (m)", "DS Odometer", "DS Odo (m)", "DS Odo",
+        "D/S GWD ILI Chainage (m)", "D/S GWD Chainage (m)", "D/S Chainage (m)",
+        "D/S Odometer (m)", "D/S Odometer", "D/S Odo (m)", "D/S Odo",
+        "Downstream Chainage (m)", "Downstream Odometer (m)", "Downstream Odo (m)",
+    ],
+    "wall_thickness": [
+        "Wall Thickness", "Wall Thickness (mm)", "Nom. WT", "Nom. WT (mm)",
+        "Nominal WT", "Nominal WT (mm)", "Nominal Wall Thickness (mm)",
+        "WT", "WT (mm)", "Thickness (mm)", "Wall Thk", "Wall Thk (mm)",
+    ],
+    "pipe_grade": [
+        "Grade", "Pipe Grade", "Material Grade", "Mat. Grade",
+        "API Grade", "Specification", "Pipe Specification",
+        "Material Specification", "Mat. Spec.", "Grade/Spec",
+    ],
 }
 
 def find_column_names(df: pd.DataFrame, possible_names: List[str]) -> Optional[str]:
@@ -330,6 +369,46 @@ def parse_pasted_ili_text(text: str) -> pd.DataFrame:
             continue
     logger.warning("parse_pasted_ili_text: could not parse input")
     return pd.DataFrame()
+
+
+def detect_data_format(df: pd.DataFrame, mapping: Dict[str, Optional[str]]) -> str:
+    """
+    Detect the data format from a column mapping and DataFrame.
+
+    Returns one of the registered format names (currently ``"anomaly"`` or
+    ``"pipe_tally"``).  New formats can be added by extending this function.
+
+    Detection heuristics (higher specificity wins):
+
+    * **pipe_tally**: has a DS-distance column  OR  has wall-thickness + joint
+      number but no depth column  OR  the column names contain common pipe-tally
+      keywords and there is no anomaly-style depth column.
+    * **anomaly**: has a depth column or feature-type column (default).
+    """
+    has_ds = bool(mapping.get("ds_distance"))
+    has_wt = bool(mapping.get("wall_thickness"))
+    has_grade = bool(mapping.get("pipe_grade"))
+    has_joint = bool(mapping.get("joint_number"))
+    has_depth = bool(mapping.get("depth"))
+    has_ftype = bool(mapping.get("feature_type"))
+
+    # Heuristic scan of raw column names for pipe-tally keywords
+    col_str = " ".join(str(c).lower() for c in df.columns)
+    tally_col_hints = any(
+        kw in col_str
+        for kw in [
+            "wall thickness", "wt (mm)", "nom. wt", "ds chainage",
+            "ds odometer", "ds odo", "d/s chainage", "d/s odo",
+        ]
+    )
+
+    if has_ds:
+        return "pipe_tally"
+    if (has_wt or has_grade) and has_joint and not has_depth:
+        return "pipe_tally"
+    if tally_col_hints and has_joint and not has_depth and not has_ftype:
+        return "pipe_tally"
+    return "anomaly"
 
 
 def read_ili_data(file_path_or_buffer, sheet_name: Optional[str] = None) -> pd.DataFrame:

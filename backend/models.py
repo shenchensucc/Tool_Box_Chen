@@ -92,6 +92,10 @@ class FeatureMapResponse(BaseModel):
         default=None,
         description="Raw Feature summary: columns, sheet, header_row, sample rows (for data tracing)",
     )
+    data_format: str = Field(
+        default="anomaly",
+        description="Detected or requested data format: 'anomaly', 'pipe_tally', etc.",
+    )
     error: Optional[str] = None
 
 

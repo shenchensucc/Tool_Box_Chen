@@ -1,0 +1,68 @@
+{
+  "_comment": "ILI Visual Tool — test case registry. Add a new object to 'test_cases' for each file/sheet combo you want to verify. The runner checks every field inside 'expected'; omit a field to skip that check.",
+  "backend_url": "http://127.0.0.1:8000",
+  "test_cases": [
+    {
+      "id": "pipe_tally_209_240_manual",
+      "description": "PNG dig-correlation workbook — Pipe Tally sheet (manual sheet mode, format auto-detect)",
+      "file_path": "c:\\Users\\cshen\\trisummit\\PNG - Asset Integrity - Documents\\General\\003_TIMP\\003_West_ML\\000_Common\\IDP\\2026_Planning\\00_ILI_including_2025_repair\\R4 to TPLS (209-240)\\Test 209-240.xlsx",
+      "mode": "manual_sheet",
+      "sheet_name": "Pipe Tally",
+      "data_format_override": "auto",
+      "expected": {
+        "success": true,
+        "data_format": "pipe_tally",
+        "min_rows": 5,
+        "column_keys_required": ["distance", "joint_number"],
+        "column_keys_preferred": ["ds_distance", "wall_thickness", "pipe_grade", "orientation"],
+        "has_girth_welds": true,
+        "has_seam_welds": "any"
+      }
+    },
+    {
+      "id": "pipe_tally_209_240_forced",
+      "description": "Same file — Pipe Tally sheet, format explicitly forced to pipe_tally",
+      "file_path": "c:\\Users\\cshen\\trisummit\\PNG - Asset Integrity - Documents\\General\\003_TIMP\\003_West_ML\\000_Common\\IDP\\2026_Planning\\00_ILI_including_2025_repair\\R4 to TPLS (209-240)\\Test 209-240.xlsx",
+      "mode": "manual_sheet",
+      "sheet_name": "Pipe Tally",
+      "data_format_override": "pipe_tally",
+      "expected": {
+        "success": true,
+        "data_format": "pipe_tally",
+        "min_rows": 5,
+        "column_keys_required": ["distance"],
+        "has_girth_welds": true
+      }
+    },
+    {
+      "id": "dig_correlation_sheet",
+      "description": "Same file — Dig Correlation sheet (should be anomaly features or fail gracefully)",
+      "file_path": "c:\\Users\\cshen\\trisummit\\PNG - Asset Integrity - Documents\\General\\003_TIMP\\003_West_ML\\000_Common\\IDP\\2026_Planning\\00_ILI_including_2025_repair\\R4 to TPLS (209-240)\\Test 209-240.xlsx",
+      "mode": "manual_sheet",
+      "sheet_name": "Dig Correlation",
+      "data_format_override": "auto",
+      "expected": {
+        "success": true,
+        "min_rows": 1,
+        "column_keys_required": ["distance"]
+      }
+    },
+    {
+      "_comment": "Template for a standard Rosen MFL-A anomaly file — fill in your own file_path",
+      "id": "rosen_mfla_vendor_auto",
+      "description": "Standard Rosen MFL-A anomaly file — vendor auto mode",
+      "file_path": "REPLACE_WITH_YOUR_ROSEN_FILE.xlsx",
+      "mode": "vendor_auto",
+      "vendor_format": "Rosen-MFLA",
+      "data_format_override": "auto",
+      "skip": true,
+      "expected": {
+        "success": true,
+        "data_format": "anomaly",
+        "min_rows": 1,
+        "column_keys_required": ["distance", "depth"],
+        "has_girth_welds": "any"
+      }
+    }
+  ]
+}

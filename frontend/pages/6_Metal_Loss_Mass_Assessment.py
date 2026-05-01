@@ -1,6 +1,6 @@
 import sys
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, date
 import httpx
 import streamlit as st
 
@@ -33,7 +33,7 @@ with main:
     # Header
     display_header(
         "📉 Metal Loss Mass Assessment",
-        "Bulk assess metal loss features from Excel for 10-year pressure decay",
+        "Bulk assess metal loss features from Excel — 11-year Pf decay, defect date, and failure mode",
     )
 
     # Check backend status
@@ -41,7 +41,11 @@ with main:
         show_backend_unavailable_and_retry()
         st.stop()
 
-    st.info("📋 **About This Tool**: Upload an Excel file containing metal loss features (depth, length) to calculate the 10-year failure pressure decay for all features at once.")
+    st.info(
+        "📋 **About This Tool**: Upload an Excel file containing metal loss features (depth %, length mm) "
+        "to calculate 11-year failure pressure decay (Pf, psi), estimated date to become a defect (80 % WT), "
+        "failure mode, and active/inactive status for every feature."
+    )
 
     # --- Integrated Process Flow (real workflow) ---
     st.subheader("📊 Process Flow")
@@ -52,7 +56,7 @@ with main:
             'mass_assess_result', 'mass_assess_filename',
             'mass_do', 'mass_tp', 'mass_YS', 'mass_TS',
             'mass_depth_tol', 'mass_length_tol', 'mass_depth_cr', 'mass_length_cr',
-            'mass_start_year', 'mass_verified'
+            'mass_ili_date', 'mass_verified'
         ]
         for key in keys_to_clear:
             if key in st.session_state:
@@ -101,9 +105,15 @@ with main:
                 with p2:
                     depth_tol = st.number_input("Depth Tolerance (%)", min_value=0.0, value=10.0, step=0.1, key="mass_depth_tol")
                     length_tol = st.number_input("Length Tolerance (mm)", min_value=0.0, value=0.0, step=1.0, key="mass_length_tol")
-                    depth_cr = st.number_input("Depth CR (mm/yr)", min_value=0.0, value=4.0, step=0.1, key="mass_depth_cr")
-                    length_cr = st.number_input("Length CR (mm/yr)", min_value=0.0, value=25.0, step=1.0, key="mass_length_cr")
-                    start_year = st.number_input("ILI Run Year", min_value=1900, max_value=2100, value=datetime.now().year, key="mass_start_year")
+                    depth_cr = st.number_input("Depth CR (mm/yr)", min_value=0.0, value=0.47, step=0.01, key="mass_depth_cr",
+                                               help="Depth corrosion rate in mm/year. Used for both Pf growth and Date to Become a Defect.")
+                    length_cr = st.number_input("Length CR (mm/yr)", min_value=0.0, value=0.0, step=0.1, key="mass_length_cr")
+                    ili_date_val = st.date_input(
+                        "ILI Run Date",
+                        value=date(datetime.now().year, 1, 1),
+                        key="mass_ili_date",
+                        help="Date of the ILI run. Sets the base year for Pf columns and the reference for 'Date to Become a Defect'.",
+                    )
                 st.caption("⚠️ Verify all parameters above, then check the box and click the button to run.")
                 verified = st.checkbox("I have verified the parameters and am ready to run", value=False, key="mass_verified")
                 run_clicked = st.button("🚀 Run Mass Assessment", type="primary", width="stretch", key="mass_run_btn")
@@ -116,16 +126,24 @@ with main:
                     with st.spinner("⏳ Processing..."):
                         try:
                             files = {"file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)}
+                            ili_date_str = ili_date_val.strftime("%Y-%m-%d")
                             data = {
                                 "do": do, "tp": tp, "YS": YS, "TS": TS,
                                 "depth_tolerance": depth_tol, "length_tolerance": length_tol,
-                                "depth_cr": depth_cr, "length_cr": length_cr, "start_year": int(start_year)
+                                "depth_cr": depth_cr, "length_cr": length_cr,
+                                "start_year": ili_date_val.year,
+                                "ili_date": ili_date_str,
                             }
                             with httpx.Client(timeout=600.0) as client:
-                                response = client.post(f"{BACKEND_URL}/api/pipeline/metal-loss/mass-assess", files=files, data=data)
+                                response = client.post(
+                                    f"{BACKEND_URL}/api/pipeline/metal-loss/mass-assess",
+                                    files=files, data=data,
+                                )
                             if response.status_code == 200:
                                 st.session_state['mass_assess_result'] = response.content
-                                st.session_state['mass_assess_filename'] = f"Mass_Metal_Loss_Assessment_{datetime.now().strftime('%Y%m%d')}.xlsx"
+                                st.session_state['mass_assess_filename'] = (
+                                    f"Mass_Metal_Loss_Assessment_{datetime.now().strftime('%Y%m%d')}.xlsx"
+                                )
                                 st.success("✅ Done!")
                                 st.rerun()
                             else:
@@ -165,44 +183,52 @@ with main:
     with st.expander("📐 **Equation & Calculation Logic**", expanded=False):
         st.markdown("""
         ### Modified B31G Methodology
-    
-        The tool uses **Modified B31G** to compute failure pressure (Pf) for each defect at each year.
-    
+
+        The tool uses **Modified B31G** to compute failure pressure (Pf) for each defect at each year,
+        and derives defect-scheduling outputs from the same growth model.
+
         #### Step 1: Apply Tolerances
         ```
-        dimp_0 = (depth_percent + depth_tolerance) × 0.01 × tp   [mm]
-        Limp_0 = length_raw + length_tolerance                    [mm]
+        dimp_0 = (depth_pct + depth_tolerance) × 0.01 × tp   [mm]
+        Limp_0 = length_mm  + length_tolerance                [mm]
         ```
-    
-        #### Step 2: Defect Growth (per year i = 0 to 9)
+
+        #### Step 2: Date to Become a Defect (80 % WT criterion)
+        ```
+        Years to Become a Defect = (tp × 0.80 − dimp_0) / depth_cr
+        Date  to Become a Defect = ILI Date + Years × 365.25 days
+        ```
+
+        #### Step 3: Pf Growth (year i = 0 to 10, producing 11 columns)
         ```
         dimp_t = dimp_0 + (i × depth_cr)    [mm]
         Limp_t = Limp_0 + (i × length_cr)   [mm]
         ```
-    
-        #### Step 3: Normalized Parameters
+
+        #### Step 4: Normalized Parameters
         ```
-        z = L² / (do × tp)     (defect length factor)
-        d/t = dimp / tp        (depth ratio)
+        z = Limp² / (do × tp)
+        d/t = dimp / tp
         ```
-    
-        #### Step 4: Flow Stress & Folias Factor
+
+        #### Step 5: Flow Stress & Folias Factor
         ```
-        Sflow = YS + 69 MPa
+        Sflow = YS + 69  [MPa]
         ```
-        - **If z ≤ 50**:  M = √(1 + 0.6275z - 0.003375z²)
-        - **If z > 50**:  M = 0.032z + 3.3
-    
-        #### Step 5: Remaining Strength & Failure Pressure
+        - **If z ≤ 50**: M = √(1 + 0.6275 z − 0.003375 z²)
+        - **If z > 50**: M = 0.032 z + 3.3
+
+        #### Step 6: Remaining Strength & Failure Pressure
         ```
-        Rs = (1 - 0.85×d/t) / (1 - 0.85×d/t / M)
-        Po = 2 × Sflow / (do/tp)
-        Pf = Po × Rs × 1000  [kPa]  →  Pf_psi = Pf × 0.14503774
+        Rs     = (1 − 0.85 d/t) / (1 − 0.85 d/t / M)
+        Po     = 2 × Sflow / (do/tp)
+        Pf_psi = Po × Rs × 1000 × 0.14503774
         ```
-    
-        #### Step 6: >80% Limit
-        When **dimp/tp > 0.80**, the result shows **">80% leak"** (beyond B31G applicability).
-    
+
+        #### Step 7: Limits
+        When **dimp/tp > 0.80**, that cell shows **">80% leak"** (beyond B31G applicability).
+        `Failure Mode` = **Leak** | `Active/Inactive` = **Active** for all metal-loss features.
+
         ---
         *Full documentation: `docs/functions/METAL_LOSS_MASS_ASSESSMENT.md`*
         """)
@@ -210,17 +236,27 @@ with main:
     # Help section
     with st.expander("ℹ️ Help & Instructions"):
         st.markdown("""
-        **Step 1 – Upload:** Excel file with depth and length columns (e.g. `depth`, `Depth (%)`, `length`, `Length (mm)`).
+        **Step 1 – Upload:** Excel file with depth (% WT) and length (mm) columns.
+        Column names are auto-detected (e.g. `As-Reported Anomaly Depth (%WT)`, `depth`, `Depth (%)`,
+        `Length (mm)`, `length`).
 
-        **Step 2 – Calculate:** Open Parameters to set pipe specs, tolerances, and corrosion rates, then click Run.
+        **Step 2 – Calculate:** Open Parameters to set pipe specs, tolerances, corrosion rates,
+        and the ILI Run Date, then click Run.
 
-        **Step 3 – Download:** After the run completes, download the results Excel with 10 years of Pf (psi) per feature.
+        **Step 3 – Download:** Results Excel adds the following columns to your input data:
+        | Column | Description |
+        |--------|-------------|
+        | `Date to Become a Defect` | Calendar date depth (with tolerance) reaches 80 % WT |
+        | `Years to Become a Defect` | Years from ILI date to that threshold |
+        | `Failure Mode` | Leak (metal loss default) |
+        | `Active/Inactive` | Active (all growing features) |
+        | `{year}` × 11 | Pf (psi) for each year from ILI year to ILI year + 10 |
 
-        **Note:** If depth exceeds 80% wall thickness in a year, that cell shows `>80% leak`.
+        **Note:** Cells where depth exceeds 80 % WT in a given year show `>80% leak`.
         """)
 
     # Footer
     st.divider()
-    st.caption("Metal Loss Mass Assessment Tool v1.0 | Chen's Engineer Toolbox")
+    st.caption("Metal Loss Mass Assessment Tool v2.0 | Chen's Engineer Toolbox")
 
 render_floating_chat_shell()

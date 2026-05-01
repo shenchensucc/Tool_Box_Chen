@@ -59,15 +59,19 @@ from backend.tml.tml_batch_runner import TMLBatchError, run_tml_batch
 from backend.pipeline.metal_loss import assess_metal_loss_feature, mass_assess_metal_loss
 from backend.pipeline.ili_parse import parse_ili_file
 from backend.pipeline.ili_reader import (
+    detect_data_format,
     identify_ili_columns,
     parse_pasted_ili_text,
     read_ili_data,
 )
 from backend.pipeline.feature_map_builder import (
+    DATA_FORMAT_BUILDERS,
+    DATA_FORMAT_LABELS,
+    build_feature_map_auto,
     build_feature_map_from_df,
+    format_orientation_hours,
     parse_orientation_to_degrees,
     parse_orientation_to_hours,
-    format_orientation_hours,
 )
 from backend.pipeline.dig_package_reader import build_feature_map_from_dig_package
 from backend.pipeline.report_generator import generate_word_report
@@ -744,11 +748,23 @@ async def parse_pasted_ili(pasted_text: str = Form(...)):
         return FeatureMapResponse(success=False, error=str(e))
 
 
+@app.get("/api/ili/data-formats")
+async def get_data_formats():
+    """Return the registry of supported data formats for the ILI Visual Tool."""
+    return {
+        "formats": [
+            {"key": k, "label": v}
+            for k, v in DATA_FORMAT_LABELS.items()
+        ]
+    }
+
+
 @app.post("/api/ili/process-feature-map", response_model=FeatureMapResponse)
 async def process_ili_feature_map(
     file: UploadFile = File(...),
     sheet_name: Optional[str] = Form(None),
     vendor_format: Optional[str] = Form(None),
+    data_format: Optional[str] = Form(None),
     gwd_start: Optional[int] = Form(None),
     gwd_end: Optional[int] = Form(None),
     gwd_center: Optional[int] = Form(None),
@@ -760,16 +776,22 @@ async def process_ili_feature_map(
     **Manual sheet mode:** pass ``sheet_name`` (from preview). Omit ``vendor_format``.
 
     **Auto sheet mode (same as Dig Package ILI parsing):** pass non-empty ``vendor_format``
-    (e.g. ``Rosen-MFLA``, ``TDW``). Sheet and header are detected from the workbook; ``sheet_name`` is ignored.
+    (e.g. ``Rosen-MFLA``, ``TDW``). Sheet and header are detected; ``sheet_name`` is ignored.
 
-    Optional GWD filter: gwd_start+gwd_end for range, or gwd_center for ±3 adjacent GWDs.
+    **data_format** (optional): one of the keys from ``/api/ili/data-formats``
+    (e.g. ``anomaly``, ``pipe_tally``). When omitted or ``"auto"``, the format is
+    detected automatically from the column mapping.
+
+    Optional GWD filter: gwd_start+gwd_end for range, or gwd_center for ±N adjacent GWDs.
     """
     vf = (vendor_format or "").strip()
     sn = (sheet_name or "").strip()
+    df_override = (data_format or "").strip().lower()
     log_params(logger, "ili/process-feature-map", {
         "filename": file.filename,
         "sheet_name": sn or None,
         "vendor_format": vf or None,
+        "data_format": df_override or "auto",
         "gwd_start": gwd_start,
         "gwd_end": gwd_end,
         "gwd_center": gwd_center,
@@ -800,19 +822,33 @@ async def process_ili_feature_map(
 
             if df.empty:
                 return FeatureMapResponse(success=False, error="Sheet is empty")
+
+            # Resolve data format: explicit override > auto-detect > anomaly default
+            if df_override and df_override != "auto" and df_override in DATA_FORMAT_BUILDERS:
+                resolved_format = df_override
+            else:
+                resolved_format = detect_data_format(df, ili_cols)
+
             dist_col = ili_cols.get("distance")
             if not dist_col:
                 return FeatureMapResponse(
                     success=False,
-                    error="No distance/chainage column detected. Ensure your data has a column like 'ILI Chainage (m)' or 'Distance'.",
+                    error=(
+                        "No distance/chainage column detected. "
+                        "Ensure your data has a column like 'ILI Chainage (m)', 'US Chainage (m)', or 'Distance'."
+                    ),
                 )
-            features, scatter_data, sources = build_feature_map_from_df(df, ili_cols)
+
+            features, scatter_data, sources = build_feature_map_auto(df, ili_cols, resolved_format)
             gwd_numbers = sorted({int(f["gwd_number"]) for f in features if isinstance(f.get("gwd_number"), (int, float))})
             if gwd_start is not None or gwd_end is not None or gwd_center is not None:
                 features, scatter_data = _apply_gwd_filter(
                     features, scatter_data, gwd_start, gwd_end, gwd_center
                 )
-            logger.info(f"[ili/process-feature-map] Processed {len(features)} features from sheet '{sheet_label}'")
+            logger.info(
+                "[ili/process-feature-map] format=%s, features=%d, sheet=%r",
+                resolved_format, len(features), sheet_label,
+            )
             return FeatureMapResponse(
                 success=True,
                 total_rows=len(features),
@@ -821,6 +857,7 @@ async def process_ili_feature_map(
                 scatter_data=scatter_data,
                 sources=sources,
                 gwd_numbers=gwd_numbers,
+                data_format=resolved_format,
             )
         finally:
             if tmp_path is not None and tmp_path.exists():
@@ -1711,16 +1748,20 @@ async def mass_assess_metal_loss_endpoint(
     length_tolerance: float = Form(...),
     depth_cr: float = Form(4.0),
     length_cr: float = Form(25.0),
-    start_year: int = Form(...)
+    start_year: int = Form(...),
+    ili_date: str = Form(None),
 ):
     """
     Mass assess metal loss features from an Excel file.
+    Produces 11 years of Pf (psi) columns plus Date/Years to Become a Defect,
+    Failure Mode, and Active/Inactive status columns.
     """
     log_params(logger, "metal-loss/mass-assess", {
         "filename": file.filename,
         "do": do, "tp": tp, "YS": YS, "TS": TS,
         "depth_tolerance": depth_tolerance, "length_tolerance": length_tolerance,
-        "depth_cr": depth_cr, "length_cr": length_cr, "start_year": start_year,
+        "depth_cr": depth_cr, "length_cr": length_cr,
+        "start_year": start_year, "ili_date": ili_date,
     })
     validate_excel_file(file)
     content = await file.read()
@@ -1737,7 +1778,8 @@ async def mass_assess_metal_loss_endpoint(
             df_result = mass_assess_metal_loss(
                 df=df, do=do, tp=tp, YS=YS, TS=TS,
                 depth_tolerance=depth_tolerance, length_tolerance=length_tolerance,
-                depth_cr=depth_cr, length_cr=length_cr, start_year=start_year,
+                depth_cr=depth_cr, length_cr=length_cr,
+                start_year=start_year, ili_date=ili_date,
             )
             logger.info(f"[metal-loss/mass-assess] Processed {len(df_result)} rows, output columns={list(df_result.columns)}")
             with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as out:

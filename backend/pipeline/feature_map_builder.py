@@ -234,3 +234,260 @@ def build_feature_map_from_df(
 
     sources = sorted({str(f.get("source", "")).strip() for f in features if f.get("source")})
     return features, scatter_data, sources
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pipe-Tally builder
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_feature_map_from_pipe_tally_df(
+    df: pd.DataFrame,
+    ili_cols: Dict[str, Optional[str]],
+) -> tuple:
+    """
+    Build features, scatter_data, and sources from a **Pipe Tally** DataFrame.
+
+    Pipe Tally rows represent individual pipe joints, not anomalies.
+
+    Mapping:
+    - ``distance`` (US chainage)   → girth-weld position + joint left edge
+    - ``ds_distance`` (DS chainage) → joint right edge / next girth weld
+    - ``length``                   → joint length in metres (fallback when DS absent)
+    - ``orientation`` / seam col   → longseam orientation per joint (seam_welds)
+    - ``wall_thickness``           → metadata (stored in hover; not used for depth colour)
+    - ``pipe_grade``               → metadata (stored in hover)
+    - ``joint_number``             → GWD number at the US end
+
+    The 2D view shows:
+    - Red vertical lines  = girth welds (US chainage of each joint, plus the final DS)
+    - Coloured horizontal lines = longseam per joint span (seam_welds)
+    - Thin feature boxes centred at mid-joint at the seam orientation (hoverable)
+
+    Returns (features, scatter_data, sources) — same contract as :func:`build_feature_map_from_df`.
+    """
+    us_col  = ili_cols.get("distance")       # US-end chainage
+    ds_col  = ili_cols.get("ds_distance")    # DS-end chainage
+    len_col = ili_cols.get("length")         # joint length (fallback)
+    wt_col  = ili_cols.get("wall_thickness")
+    gr_col  = ili_cols.get("pipe_grade")
+    jt_col  = ili_cols.get("joint_number")
+    src_col = ili_cols.get("source")
+    fid_col = ili_cols.get("feature_id")
+
+    # Seam orientation: prefer a column whose name contains both "seam"/"longseam"
+    # and "orient"/"position", then fall back to the generic orientation column.
+    orient_col = ili_cols.get("orientation")
+    seam_orient_col: Optional[str] = next(
+        (
+            c for c in df.columns
+            if ("seam" in str(c).lower() or "longseam" in str(c).lower() or " ls " in f" {str(c).lower()} ")
+            and ("orient" in str(c).lower() or "position" in str(c).lower() or "o'clock" in str(c).lower())
+        ),
+        orient_col,
+    )
+
+    for col in [c for c in [us_col, ds_col, wt_col, len_col] if c and c in df.columns]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    features: list = []
+    # Collect (chainage, gwd_number, source) for girth-weld list
+    girth_entries: list[tuple] = []
+
+    for idx, row in df.iterrows():
+        # US chainage — mandatory; skip rows without it
+        us_val = pd.to_numeric(row.get(us_col), errors="coerce") if us_col else None
+        if us_val is None or (isinstance(us_val, float) and pd.isna(us_val)):
+            continue
+        us_val = float(us_val)
+
+        # DS chainage
+        ds_val: Optional[float] = None
+        if ds_col and ds_col in df.columns:
+            dv = pd.to_numeric(row.get(ds_col), errors="coerce")
+            if not (isinstance(dv, float) and pd.isna(dv)):
+                ds_val = float(dv)
+
+        # Joint length in metres
+        jt_length_m: Optional[float] = None
+        if ds_val is not None:
+            jt_length_m = abs(ds_val - us_val)
+        elif len_col and len_col in df.columns:
+            lv = pd.to_numeric(row.get(len_col), errors="coerce")
+            if not (isinstance(lv, float) and pd.isna(lv)):
+                # len_col keywords include "Joint Length (m)" → assume metres
+                jt_length_m = float(lv)
+
+        jt_length_mm = (jt_length_m * 1000.0) if jt_length_m else 0.001
+
+        # Centre chainage (x position for the feature box)
+        if ds_val is not None:
+            center_x = (us_val + ds_val) / 2.0
+        elif jt_length_m:
+            center_x = us_val + jt_length_m / 2.0
+        else:
+            center_x = us_val
+
+        # Wall thickness
+        wt_val = 0.0
+        if wt_col and wt_col in df.columns:
+            wv = pd.to_numeric(row.get(wt_col), errors="coerce")
+            if not (isinstance(wv, float) and pd.isna(wv)):
+                wt_val = float(wv)
+
+        # Grade
+        gr_val = str(row.get(gr_col, "")).strip() if gr_col and gr_col in df.columns and pd.notna(row.get(gr_col)) else ""
+
+        # Seam orientation
+        seam_raw = row.get(seam_orient_col) if seam_orient_col and seam_orient_col in df.columns else None
+        seam_hours = parse_orientation_to_hours(seam_raw)
+
+        # GWD number
+        gwd_number: Optional[Any] = None
+        if jt_col and jt_col in df.columns:
+            jv = row.get(jt_col)
+            if pd.notna(jv):
+                try:
+                    gwd_number = int(float(jv))
+                except (ValueError, TypeError):
+                    gwd_number = str(jv).strip()
+
+        # Source
+        src_val = (
+            str(row.get(src_col, "")).strip()
+            if src_col and src_col in df.columns and pd.notna(row.get(src_col))
+            else ""
+        )
+
+        # Hover text
+        parts = []
+        if gwd_number is not None:
+            parts.append(f"<b>GWD:</b> {gwd_number}")
+        parts.append(f"<b>US Chainage (m):</b> {us_val:.3f}")
+        if ds_val is not None:
+            parts.append(f"<b>DS Chainage (m):</b> {ds_val:.3f}")
+        if jt_length_m is not None:
+            parts.append(f"<b>Joint Length (m):</b> {jt_length_m:.3f}")
+        if wt_val:
+            parts.append(f"<b>Wall Thickness (mm):</b> {wt_val}")
+        if gr_val:
+            parts.append(f"<b>Grade:</b> {gr_val}")
+        if seam_raw is not None:
+            parts.append(f"<b>Seam Orientation:</b> {seam_raw}")
+        if src_val:
+            parts.append(f"<b>Source:</b> {src_val}")
+
+        feat: Dict[str, Any] = {
+            "x": center_x,
+            "y": 0.0,
+            "depth": 0.0,       # no anomaly depth for pipe joints
+            "length": jt_length_mm,
+            "width": 0.001,     # thin tick; seam line carries the orientation info
+            "orientation_deg": None,
+            "orientation_hours": seam_hours if seam_hours is not None else 6.0,
+            "feature_type": "Pipe Joint",
+            "gwd_number": gwd_number,
+            "seam_orient_hours": seam_hours,
+            "hover_text": "<br>".join(parts),
+            "feature_id": str(row.get(fid_col, idx)) if fid_col and fid_col in df.columns else str(idx),
+            "source": src_val,
+            "wall_thickness": wt_val,
+            "pipe_grade": gr_val,
+            "_us_chainage": us_val,
+            "_ds_chainage": ds_val,
+        }
+        features.append(feat)
+        girth_entries.append((us_val, gwd_number, src_val))
+
+    if not features:
+        return [], None, []
+
+    # ── Girth welds: one per unique US chainage (+ last DS) ───────────────
+    seen_ch: set = set()
+    girth_welds: List[Dict] = []
+    for ch, gn, src in sorted(girth_entries, key=lambda t: t[0]):
+        key = round(ch, 3)
+        if key in seen_ch:
+            continue
+        seen_ch.add(key)
+        lbl = f"GWD {gn}" if gn is not None else f"{ch:.3f} m"
+        girth_welds.append({"chainage": ch, "gwd_number": gn, "label": lbl, "source": src})
+
+    # Add the DS end of the last joint so the rightmost boundary appears
+    last = features[-1]
+    if last.get("_ds_chainage") is not None:
+        last_ds = last["_ds_chainage"]
+        key = round(last_ds, 3)
+        if key not in seen_ch:
+            girth_welds.append({"chainage": last_ds, "gwd_number": None, "label": "DS end", "source": ""})
+
+    # ── Seam welds: per-joint longseam spans ──────────────────────────────
+    seam_welds: List[Dict] = []
+    for f in features:
+        us = f.get("_us_chainage")
+        ds = f.get("_ds_chainage")
+        oh = f.get("seam_orient_hours")
+        if us is None or oh is None:
+            continue
+        end = ds if ds is not None else us + f["length"] / 1000.0
+        seam_welds.append({
+            "chainage_start": us,
+            "chainage_end": end,
+            "orientation_hours": oh,
+            "orientation_label": format_orientation_hours(oh),
+            "source": f.get("source", ""),
+            "gwd_number": f.get("gwd_number"),
+        })
+
+    x_vals = [f["x"] for f in features]
+    scatter_data: Dict[str, Any] = {
+        "x_column": us_col or "US Chainage (m)",
+        "x_values": x_vals,
+        "y_data": {
+            "depth": [0.0] * len(features),
+            "metal_loss": [0.0] * len(features),
+        },
+        "orientation_hours": [f.get("orientation_hours", 6.0) for f in features],
+        "girth_welds": girth_welds,
+        "seam_welds": seam_welds,
+    }
+
+    sources = sorted({str(f.get("source", "")).strip() for f in features if f.get("source")})
+    return features, scatter_data, sources
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Extensible format registry + dispatcher
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: Mapping of data-format name → builder callable.
+#: Add new entries here to support additional data types without touching any
+#: other code — the API dispatcher calls ``build_feature_map_auto`` which looks
+#: up the right builder from this dict.
+DATA_FORMAT_BUILDERS: Dict[str, Any] = {
+    "anomaly":    build_feature_map_from_df,
+    "pipe_tally": build_feature_map_from_pipe_tally_df,
+    # Future examples:
+    # "cathodic_protection": build_feature_map_from_cp_df,
+    # "depth_of_cover":      build_feature_map_from_doc_df,
+}
+
+#: Human-readable labels for each data format (used by frontend selectbox).
+DATA_FORMAT_LABELS: Dict[str, str] = {
+    "anomaly":    "ILI Anomaly / Feature Data",
+    "pipe_tally": "Pipe Tally (Joint Inventory)",
+}
+
+
+def build_feature_map_auto(
+    df: pd.DataFrame,
+    ili_cols: Dict[str, Optional[str]],
+    data_format: str = "anomaly",
+) -> tuple:
+    """
+    Dispatch to the correct feature-map builder for the detected data format.
+
+    ``data_format`` should be one of :data:`DATA_FORMAT_BUILDERS`; unknown
+    values fall back to the anomaly builder so callers never crash on new keys.
+    """
+    builder = DATA_FORMAT_BUILDERS.get(data_format, build_feature_map_from_df)
+    return builder(df, ili_cols)

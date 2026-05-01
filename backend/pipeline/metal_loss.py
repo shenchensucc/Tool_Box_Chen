@@ -3,6 +3,7 @@ Metal Loss Assessment Calculations based on Modified B31G methodology.
 """
 import numpy as np
 import pandas as pd
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Union
 from backend.pipeline.ili_reader import identify_ili_columns
 from backend.logging_config import get_logger
@@ -377,140 +378,169 @@ def mass_assess_metal_loss(
     length_tolerance: float,
     depth_cr: float,
     length_cr: float,
-    start_year: int
+    start_year: int,
+    ili_date: Optional[str] = None,
 ) -> pd.DataFrame:
     """
-    Perform mass assessment for metal loss features over 10 years.
-    
-    Parameters:
-    -----------
+    Perform mass assessment for metal loss features over 11 years (start_year through
+    start_year+10 inclusive), producing output columns that match the IDP planning format.
+
+    For each feature the function computes:
+    - ``Date to Become a Defect`` – calendar date when depth (with tolerance) reaches 80 % WT
+    - ``Years to Become a Defect`` – corresponding duration from the ILI date
+    - ``Failure Mode`` – always "Leak" for metal loss
+    - ``Active/Inactive`` – "Active" for all growing features
+    - One Pf (psi) column per year labelled with the integer year (e.g. 2025, 2026, …)
+
+    Parameters
+    ----------
     df : pd.DataFrame
-        Input data with metal loss features
+        Input data with metal loss features.
     do : float
-        Outside diameter (mm)
+        Outside diameter (mm).
     tp : float
-        Wall thickness (mm)
+        Wall thickness (mm).
     YS : float
-        Yield strength (MPa)
+        Yield strength (MPa).
     TS : float
-        Tensile strength (MPa)
+        Tensile strength (MPa).
     depth_tolerance : float
-        ILI depth tolerance (%)
+        ILI depth measurement tolerance (% WT).
     length_tolerance : float
-        ILI length tolerance (mm)
+        ILI length measurement tolerance (mm).
     depth_cr : float
-        Corrosion rate for depth (mm/year)
+        Depth corrosion rate (mm/year).
     length_cr : float
-        Corrosion rate for length (mm/year)
+        Length growth rate (mm/year).
     start_year : int
-        The year of the ILI run
-        
-    Returns:
-    --------
+        Calendar year of the ILI run.  Used as year-0 for Pf columns and,
+        together with ``ili_date``, as the reference date for defect-date maths.
+    ili_date : str, optional
+        ISO date string of the ILI run (``YYYY-MM-DD``).  Defaults to
+        ``{start_year}-01-01`` when not supplied.
+
+    Returns
+    -------
     pd.DataFrame
-        Modified DataFrame with 10 years of Pf decay
+        Original columns plus the computed assessment columns.
     """
-    # 1. Map columns using the centralized ILI reader utility
+    # 1. Map columns
     ili_cols = identify_ili_columns(df)
     depth_col = ili_cols.get("depth")
     length_col = ili_cols.get("length")
     feature_id_col = ili_cols.get("feature_id")
-    
+
     if not depth_col or not length_col:
         logger.error(f"Required columns (depth, length) not found. Found: {list(df.columns)}")
-        raise ValueError(f"Required columns (depth, length) not found in Excel file. Found: {list(df.columns)}")
+        raise ValueError(
+            f"Required columns (depth, length) not found in Excel file. Found: {list(df.columns)}"
+        )
 
-    logger.info(f"Using depth column: '{depth_col}', length column: '{length_col}', feature id column: '{feature_id_col}'")
-    
-    # 2. Create working copy and initialize result columns
+    logger.info(
+        f"Using depth column: '{depth_col}', length column: '{length_col}', "
+        f"feature id column: '{feature_id_col}'"
+    )
+
+    # Parse ILI reference date
+    if ili_date:
+        try:
+            ref_date = datetime.strptime(ili_date, "%Y-%m-%d")
+        except ValueError:
+            ref_date = datetime(start_year, 1, 1)
+    else:
+        ref_date = datetime(start_year, 1, 1)
+
+    # 2. Working copy — pre-allocate result columns in the desired output order
     df_result = df.copy()
-    
-    # Initialize all result columns with None (will show as blank in Excel)
-    for i in range(10):
-        year = start_year + i
-        df_result[f"Year {year} Pf (psi)"] = None
-    
-    # Initialize debug columns
+
+    wall_80 = tp * 0.8  # 80 % WT threshold (mm)
+
+    # Computed columns (filled below for valid rows)
+    df_result["Date to Become a Defect"] = None
+    df_result["Years to Become a Defect"] = None
+    df_result["Failure Mode"] = None
+    df_result["Active/Inactive"] = None
+
+    # Year Pf columns: 11 years inclusive (i=0 … 10)
+    year_cols = [start_year + i for i in range(11)]
+    for yr in year_cols:
+        df_result[yr] = None
+
+    # Debug columns (appended at the end)
     df_result["Debug_Feature_ID"] = df[feature_id_col] if feature_id_col else "Not Found"
     df_result["Debug_Initial_Depth_mm"] = None
     df_result["Debug_Initial_Length_mm"] = None
-    
-    # 3. Identify valid rows (skip if 0, empty, or negative)
-    # Convert to numeric, errors become NaN
+
+    # 3. Identify valid rows
     depth_raw = pd.to_numeric(df[depth_col], errors='coerce')
     length_raw = pd.to_numeric(df[length_col], errors='coerce')
-    
-    logger.debug(f"First 5 depth values: {depth_raw.head().tolist()}")
-    logger.debug(f"First 5 length values: {length_raw.head().tolist()}")
-    
-    # Valid mask: both depth and length must be > 0 and not NaN
-    valid_mask = (depth_raw.notna()) & (depth_raw > 0) & \
-                 (length_raw.notna()) & (length_raw > 0)
-    
-    # Log skipped rows for debugging
-    skipped_mask = ~valid_mask
-    if skipped_mask.any():
-        skipped_indices = df[skipped_mask].index.tolist()
-        logger.info(f"Skipping {skipped_mask.sum()} rows with 0/empty depth or length at indices: {skipped_indices[:10]}...")
-        for idx in skipped_indices[:5]:
-            logger.debug(f"  Row {idx}: depth={depth_raw.iloc[idx]}, length={length_raw.iloc[idx]}")
-    
+
+    valid_mask = (
+        depth_raw.notna() & (depth_raw > 0) &
+        length_raw.notna() & (length_raw > 0)
+    )
+
+    skipped = (~valid_mask).sum()
+    if skipped:
+        logger.info(f"Skipping {skipped} rows with 0/empty depth or length.")
     logger.info(f"Valid rows: {valid_mask.sum()} out of {len(df)}")
-        
-    # If no valid rows, return the dataframe as is
+
     if not valid_mask.any():
         logger.warning("No valid rows found, returning empty results")
         return df_result
 
-    # 4. Extract only valid data for calculation
+    # 4. Extract valid arrays and apply tolerances
     dimp_percent_vals = depth_raw[valid_mask].values
     Limp_org_vals = length_raw[valid_mask].values
-    
-    # Get indices of valid rows for logging
-    valid_indices = df[valid_mask].index.tolist()
-    logger.info(f"Processing {len(dimp_percent_vals)} valid features at indices: {valid_indices[:10]}...")
-    
-    # Apply tool tolerances to valid data only
-    dimp_0 = (dimp_percent_vals + depth_tolerance) * 0.01 * tp
-    Limp_0 = Limp_org_vals + length_tolerance
-    
-    # Store exact values used for calculation for debugging
+
+    dimp_0 = (dimp_percent_vals + depth_tolerance) * 0.01 * tp  # initial depth (mm)
+    Limp_0 = Limp_org_vals + length_tolerance                    # initial length (mm)
+
     df_result.loc[valid_mask, "Debug_Initial_Depth_mm"] = np.round(dimp_0, 4)
     df_result.loc[valid_mask, "Debug_Initial_Length_mm"] = np.round(Limp_0, 4)
-    
-    # 5. Calculate for 10 years for valid rows only
-    for i in range(10):
-        year = start_year + i
-        
-        # Growth (mm)
+
+    # 5. "Date to Become a Defect" — when depth reaches 80 % WT under constant depth_cr
+    if depth_cr > 0:
+        # Years until dimp_0[i] reaches wall_80 under constant depth_cr
+        years_to_def = (wall_80 - dimp_0) / depth_cr
+        # Features already at/above 80 % WT get 0 years (effectively immediate)
+        years_to_def = np.where(years_to_def < 0, 0.0, years_to_def)
+
+        def _add_years(base_date: datetime, years: float) -> datetime:
+            return base_date + timedelta(days=years * 365.25)
+
+        dates_defect = np.array([_add_years(ref_date, y) for y in years_to_def])
+        df_result.loc[valid_mask, "Date to Become a Defect"] = dates_defect
+        df_result.loc[valid_mask, "Years to Become a Defect"] = np.round(years_to_def, 10)
+    else:
+        df_result.loc[valid_mask, "Years to Become a Defect"] = np.inf
+        df_result.loc[valid_mask, "Date to Become a Defect"] = None
+
+    # Metal loss always has Leak failure mode; all features assumed Active
+    df_result.loc[valid_mask, "Failure Mode"] = "Leak"
+    df_result.loc[valid_mask, "Active/Inactive"] = "Active"
+
+    # 6. Calculate Pf for 11 years
+    for i, yr in enumerate(year_cols):
         dimp_t = dimp_0 + (i * depth_cr)
         Limp_t = Limp_0 + (i * length_cr)
-        
-        # Calculate Pf (kPa)
+
         res = calculate_failure_pressure(
             dimp=dimp_t,
             Limp=Limp_t,
             do=do,
             tp=tp,
             YS=YS,
-            TS=TS
+            TS=TS,
         )
-        
-        pf_kPa = res['ans']['Pf']
-        
-        # Convert to psi
-        # kPa to psi conversion: 0.14503774
-        pf_values = pf_kPa * 0.14503774
-        
-        # Prepare result array
-        results = np.round(pf_values, 2).astype(object)
-        
-        # Handle >80% limit
-        is_leak = (dimp_t / tp) > 0.8
-        results[is_leak] = ">80% leak"
-        
-        # Assign back to the dataframe using the mask
-        col_name = f"Year {year} Pf (psi)"
-        df_result.loc[valid_mask, col_name] = results
-        
+
+        pf_psi = res['ans']['Pf'] * 0.14503774  # kPa → psi
+        results = np.round(pf_psi, 10).astype(object)
+
+        # Mark features beyond 80 % WT
+        is_over = (dimp_t / tp) > 0.8
+        results[is_over] = ">80% leak"
+
+        df_result.loc[valid_mask, yr] = results
+
     return df_result

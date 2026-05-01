@@ -1047,6 +1047,7 @@ async def call_process_feature_map_api(
     sheet_name: Optional[str] = None,
     *,
     vendor_format: Optional[str] = None,
+    data_format: Optional[str] = None,
     gwd_start: Optional[int] = None,
     gwd_end: Optional[int] = None,
     gwd_center: Optional[int] = None,
@@ -1057,6 +1058,9 @@ async def call_process_feature_map_api(
     **Manual mode:** pass ``sheet_name`` (sheet from preview). Omit ``vendor_format``.
 
     **Auto mode (same ILI parsing as Dig Package):** pass ``vendor_format`` (e.g. ``Rosen-MFLA``).
+
+    **data_format**: optional override (e.g. ``"pipe_tally"``). When omitted the
+    backend auto-detects the format from the column mapping.
     """
     url = f"{BACKEND_URL}/api/ili/process-feature-map"
     if vendor_format:
@@ -1066,6 +1070,8 @@ async def call_process_feature_map_api(
     else:
         st.error("Internal error: provide sheet_name or vendor_format for process-feature-map.")
         return None
+    if data_format:
+        data["data_format"] = data_format
     if gwd_start is not None:
         data["gwd_start"] = str(gwd_start)
     if gwd_end is not None:
