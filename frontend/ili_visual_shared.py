@@ -12,6 +12,7 @@ import streamlit.components.v1 as st_components
 from frontend_utils import (
     BACKEND_URL,
     DIG_PACKAGE_ILI_FORMAT_OPTIONS,
+    detect_dig_package_ili_format,
     call_excel_to_pdf_api,
     call_parse_paste_api,
     call_preview_api,
@@ -1291,7 +1292,7 @@ def _init_ili_session_state() -> None:
     st.session_state.setdefault("ili_upload_file_name", None)
     st.session_state.setdefault("ili_upload_feature_map_data", None)
     st.session_state.setdefault("ili_pasted_df", pd.DataFrame([[""] * 15]))
-    # Full cached parse results (never GWD-filtered — filtering happens in frontend)
+    # Full cached parse results. Upload mode may pre-filter on the backend by GWD scope.
     st.session_state.setdefault("ili_upload_features_full", None)
     st.session_state.setdefault("ili_upload_scatter_full", None)
     st.session_state.setdefault("ili_upload_gwd_numbers", [])
@@ -1299,6 +1300,7 @@ def _init_ili_session_state() -> None:
     st.session_state.setdefault("ili_upload_column_mapping", {})
     st.session_state.setdefault("ili_upload_total_rows", 0)
     st.session_state.setdefault("ili_upload_parse_key", None)
+    st.session_state.setdefault("ili_upload_settings_key", None)
     st.session_state.setdefault("ili_upload_data_format", "anomaly")
 
 
@@ -2170,20 +2172,237 @@ def _render_ili_paste_mode() -> None:
         )
 
 
+def _parse_optional_gwd_int(raw: str) -> tuple[bool, Optional[int]]:
+    """Returns (ok, value). ``ok`` is False if string is non-empty but not an integer."""
+    s = (raw or "").strip()
+    if not s:
+        return True, None
+    try:
+        return True, int(s)
+    except ValueError:
+        return False, None
+
+
+def _render_ili_upload_gwd_scope_and_load(
+    *,
+    key_prefix: str,
+    uploaded_file,
+    data_format_param: Optional[str],
+    vendor_format: Optional[str],
+    sheet_name: Optional[str],
+) -> None:
+    """
+    Optional survey scan + GWD scope (center / range / full) + primary load call.
+    Exactly one of ``vendor_format`` or ``sheet_name`` must be set.
+    """
+    if bool(vendor_format) == bool(sheet_name):
+        st.error("Internal error: pass exactly one of vendor_format or sheet_name.")
+        return
+
+    gwd_ns: list[int] = list(st.session_state.get("ili_upload_gwd_numbers", []))
+    default_center = int(gwd_ns[len(gwd_ns) // 2]) if gwd_ns else 0
+    rs = str(min(gwd_ns)) if gwd_ns else ""
+    re_ = str(max(gwd_ns)) if gwd_ns else ""
+
+    def _run_survey() -> None:
+        with st.spinner("Scanning…"):
+            if vendor_format:
+                result = asyncio.run(
+                    call_process_feature_map_api(
+                        uploaded_file,
+                        vendor_format=vendor_format,
+                        data_format=data_format_param,
+                        survey_only=True,
+                    )
+                )
+            else:
+                result = asyncio.run(
+                    call_process_feature_map_api(
+                        uploaded_file,
+                        sheet_name=sheet_name,
+                        data_format=data_format_param,
+                        survey_only=True,
+                    )
+                )
+        if result and result.get("success"):
+            st.session_state.ili_upload_gwd_numbers = result.get("gwd_numbers", [])
+            st.session_state.ili_upload_total_rows = int(result.get("total_rows", 0))
+            st.session_state.ili_upload_data_format = result.get("data_format", "anomaly")
+            st.success(
+                f"Scan: **{len(st.session_state.ili_upload_gwd_numbers)}** GWDs, "
+                f"**{st.session_state.ili_upload_total_rows}** rows."
+            )
+            st.rerun()
+        elif result:
+            st.error(result.get("error", "Scan failed"))
+
+    hint = ""
+    if gwd_ns:
+        hint = (
+            f"Last scan: **{gwd_ns[0]}** – **{gwd_ns[-1]}** ({len(gwd_ns)} distinct GWDs). "
+        )
+
+    with st.expander("Optional: scan (GWD list & row count only)", expanded=False):
+        st.caption(
+            "No geometry. Optional — you can **Load** directly if you already know your GWD numbers."
+        )
+        if st.button("Scan workbook", type="secondary", key=f"{key_prefix}_scan"):
+            _run_survey()
+
+    gwd_ns = list(st.session_state.get("ili_upload_gwd_numbers", []))
+    default_center = int(gwd_ns[len(gwd_ns) // 2]) if gwd_ns else 0
+    rs = str(min(gwd_ns)) if gwd_ns else ""
+    re_ = str(max(gwd_ns)) if gwd_ns else ""
+
+    st.markdown("##### Load visualization")
+    st.caption(
+        hint
+        + "Backend **filters sheet rows by chainage first**, then builds the map. "
+        "**Center** = that GWD ±2 neighbors along chainage order (up to **5 joints**). "
+        "**Range** = inclusive span between start/end GWD chainages (leave one side blank to anchor at file min/max)."
+    )
+
+    scope = st.radio(
+        "GWD scope",
+        options=["center", "range", "full"],
+        format_func=lambda x: {
+            "center": "Center GWD (±2 neighbors → 5 joints)",
+            "range": "GWD range (start / end)",
+            "full": "Full file (all rows — can be slow)",
+        }[x],
+        horizontal=True,
+        key=f"{key_prefix}_scope",
+    )
+
+    if scope == "center":
+        st.number_input(
+            "Center GWD number",
+            min_value=0,
+            step=1,
+            value=default_center,
+            key=f"{key_prefix}_center",
+        )
+    elif scope == "range":
+        c_a, c_b = st.columns(2)
+        with c_a:
+            st.text_input(
+                "Start GWD",
+                value=rs,
+                key=f"{key_prefix}_start_txt",
+                help="Leave empty to use minimum chainage in the file.",
+            )
+        with c_b:
+            st.text_input(
+                "End GWD",
+                value=re_,
+                key=f"{key_prefix}_end_txt",
+                help="Leave empty to use maximum chainage in the file.",
+            )
+
+    if st.button("🚀 Load visualization", type="primary", key=f"{key_prefix}_load"):
+        if scope == "center":
+            lc = int(st.session_state.get(f"{key_prefix}_center", default_center))
+            spinner_extra = f" (center GWD {lc})"
+            kw_gwd = dict(gwd_center=lc, gwd_start=None, gwd_end=None)
+        elif scope == "range":
+            ok_s, ls = _parse_optional_gwd_int(st.session_state.get(f"{key_prefix}_start_txt", ""))
+            ok_e, le = _parse_optional_gwd_int(st.session_state.get(f"{key_prefix}_end_txt", ""))
+            if not ok_s or not ok_e:
+                st.warning("Start and end GWD must be integers or blank.")
+                return
+            if ls is None and le is None:
+                st.warning("Enter at least one of start / end GWD, or choose another scope.")
+                return
+            if ls is not None and le is not None and ls > le:
+                st.warning("Start GWD must be ≤ end GWD.")
+                return
+            spinner_extra = f" (GWD {ls}–{le})"
+            kw_gwd = dict(gwd_center=None, gwd_start=ls, gwd_end=le)
+        else:
+            spinner_extra = " (full file)"
+            kw_gwd = dict(gwd_center=None, gwd_start=None, gwd_end=None)
+
+        with st.spinner(f"Building features for **{uploaded_file.name}**{spinner_extra}…"):
+            if vendor_format:
+                result = asyncio.run(
+                    call_process_feature_map_api(
+                        uploaded_file,
+                        vendor_format=vendor_format,
+                        data_format=data_format_param,
+                        survey_only=False,
+                        **kw_gwd,
+                    )
+                )
+            else:
+                result = asyncio.run(
+                    call_process_feature_map_api(
+                        uploaded_file,
+                        sheet_name=sheet_name,
+                        data_format=data_format_param,
+                        survey_only=False,
+                        **kw_gwd,
+                    )
+                )
+
+        if result and result.get("success"):
+            st.session_state.ili_upload_features_full = result["features"]
+            st.session_state.ili_upload_scatter_full = result.get("scatter_data")
+            st.session_state.ili_upload_gwd_numbers = result.get("gwd_numbers", []) or st.session_state.get(
+                "ili_upload_gwd_numbers", []
+            )
+            st.session_state.ili_upload_sources = result.get("sources", [])
+            st.session_state.ili_upload_column_mapping = result.get("column_mapping", {})
+            st.session_state.ili_upload_total_rows = int(result.get("total_rows", 0))
+            st.session_state.ili_upload_data_format = result.get("data_format", "anomaly")
+            st.success(f"✅ Loaded **{len(result['features'])}** features into the viewer.")
+            st.rerun()
+        elif result:
+            st.error(result.get("error", "Load failed"))
+
+
 def _render_ili_upload_mode() -> None:
     """
-    Upload mode — mirrors the Dig Package Visual Tool pattern:
-    • Parse runs automatically on upload (vendor-auto) or on button click (manual sheet).
-    • Full feature data is cached in session state; GWD zoom filtering runs entirely
-      in Python — no re-upload to the backend when the user changes the zoom.
-    • Center-GWD mode shows target ± 2 adjacent GWDs = 5 joints total (2 U/S + target + 2 D/S).
+    Upload ILI Excel → choose **GWD scope** → one ``process-feature-map`` call.
+
+    • **Center GWD** — backend keeps chainage window for that weld ±2 neighbors along
+      chainage (up to **5 joints**), then builds features only for those rows.
+    • **GWD range** — **start** and **end** GWD numbers; backend uses their chainages
+      (inclusive span), then builds that subset.
+    • **Full file** — optional; can be slow on very large ILIs.
+
+    Optional **Scan** (in an expander) only lists GWD distinct values / row count — no geometry.
+
+    After load, GWD zoom still refines locally without re-upload.
     """
 
-    # ── Controls shown before the file uploader ─────────────────────────
+    # ── Upload file first (filename drives default vendor in the row below) ─
     st.caption(
-        "Upload a raw ILI Excel file. Columns are auto-identified. "
-        "Vendor format selects the same sheet / header logic as the Dig Package Visual Tool."
+        "Upload an ILI workbook, pick **center GWD** (5 joints) or a **GWD range**, then load. "
+        "The backend **filters rows first**, then builds the map. Filename pre-selects TDW/Rosen/BH vendor."
     )
+
+    uploaded_file = st.file_uploader(
+        "Choose an Excel file (.xlsx or .xls)",
+        type=["xlsx", "xls"],
+        help="Maximum file size: 100 MB",
+        key=fu_key("ili", "excel"),
+    )
+
+    if uploaded_file is None:
+        st.info(
+            "👆 **Upload an Excel file** with ILI (In-Line Inspection) data.\n\n"
+            "The tool visualizes pipeline features by chainage and orientation. "
+            "No assessment — visualization only."
+        )
+        return
+
+    if st.session_state.get("_ili_visual_last_upload_name") != uploaded_file.name:
+        st.session_state["_ili_visual_last_upload_name"] = uploaded_file.name
+        _vf, _vn = detect_dig_package_ili_format(uploaded_file.name)
+        st.session_state["ili_vendor_format_visual"] = _vf
+        st.session_state["ili_vendor_filename_note"] = _vn
+
+    st.caption("📎 **%s** — %s" % (uploaded_file.name, st.session_state.get("ili_vendor_filename_note", "")))
 
     ctrl_c1, ctrl_c2, ctrl_c3 = st.columns([2, 2, 2])
     with ctrl_c1:
@@ -2201,8 +2420,7 @@ def _render_ili_upload_mode() -> None:
             selected_vendor = st.selectbox(
                 "ILI vendor / layout",
                 options=list(DIG_PACKAGE_ILI_FORMAT_OPTIONS),
-                index=1,
-                help="Same sheet and header detection as Dig Package Generator.",
+                help="Same sheet and header detection as Dig Package Generator. Filename sets default when you upload.",
                 key="ili_vendor_format_visual",
             )
         else:
@@ -2230,73 +2448,36 @@ def _render_ili_upload_mode() -> None:
         )
         data_format_param = None if selected_data_format == "auto" else selected_data_format
 
-    # ── File uploader ────────────────────────────────────────────────────
-    uploaded_file = st.file_uploader(
-        "Choose an Excel file (.xlsx or .xls)",
-        type=["xlsx", "xls"],
-        help="Maximum file size: 100 MB",
-        key=fu_key("ili", "excel"),
-    )
-
-    if uploaded_file is None:
-        st.info(
-            "👆 **Upload an Excel file** with ILI (In-Line Inspection) data.\n\n"
-            "The tool visualizes pipeline features by chainage and orientation. "
-            "No assessment — visualization only."
-        )
-        return
-
-    # ── Detect whether a re-parse is needed ─────────────────────────────
-    # Parse key encodes file identity + parse settings.
-    # Changing vendor / sheet / data_format triggers a new parse; GWD zoom does NOT.
-    current_parse_key: tuple = (
-        uploaded_file.name,
-        "vendor_auto" if ili_sheet_mode == "vendor_auto" else "choose_sheet",
-        selected_vendor if ili_sheet_mode == "vendor_auto" else "",
-        selected_data_format,
-    )
-    if st.session_state.get("ili_upload_parse_key") != current_parse_key:
-        # New file or settings changed — clear the cached full data.
-        st.session_state.ili_upload_parse_key = None
+    def _apply_ili_settings_change(ili_settings_key: tuple) -> None:
+        st.session_state.ili_upload_settings_key = ili_settings_key
         st.session_state.ili_upload_features_full = None
         st.session_state.ili_upload_scatter_full = None
         st.session_state.ili_upload_gwd_numbers = []
         st.session_state.ili_upload_sources = []
         st.session_state.ili_upload_column_mapping = {}
         st.session_state.ili_upload_total_rows = 0
-        st.session_state.ili_preview_data = None
+        st.session_state.ili_upload_data_format = "anomaly"
 
-    # ── Vendor auto mode: parse immediately on upload ────────────────────
     if ili_sheet_mode == "vendor_auto":
-        if st.session_state.ili_upload_features_full is None:
-            with st.spinner(f"Parsing **{uploaded_file.name}** (vendor: {selected_vendor})…"):
-                result = asyncio.run(
-                    call_process_feature_map_api(
-                        uploaded_file,
-                        vendor_format=selected_vendor,
-                        data_format=data_format_param,
-                    )
-                )
-            if result and result.get("success"):
-                st.session_state.ili_upload_parse_key = current_parse_key
-                st.session_state.ili_upload_features_full = result["features"]
-                st.session_state.ili_upload_scatter_full = result.get("scatter_data")
-                st.session_state.ili_upload_gwd_numbers = result.get("gwd_numbers", [])
-                st.session_state.ili_upload_sources = result.get("sources", [])
-                st.session_state.ili_upload_column_mapping = result.get("column_mapping", {})
-                st.session_state.ili_upload_total_rows = result.get("total_rows", 0)
-                st.session_state.ili_upload_data_format = result.get("data_format", "anomaly")
-                n = result.get("total_rows", 0)
-                fmt = result.get("data_format", "anomaly")
-                fmt_label = {"anomaly": "features", "pipe_tally": "pipe joints"}.get(fmt, "rows")
-                st.success(f"✅ Parsed **{n} {fmt_label}** from {uploaded_file.name}")
-            elif result:
-                st.error(result.get("error", "Parse failed"))
-                return
-            else:
-                return
+        ili_settings_key: tuple = (
+            uploaded_file.name,
+            "vendor_auto",
+            selected_vendor,
+            selected_data_format,
+        )
+        if st.session_state.get("ili_upload_settings_key") != ili_settings_key:
+            _apply_ili_settings_change(ili_settings_key)
 
-    # ── Manual sheet mode: preview → select → parse button ──────────────
+        if st.session_state.get("ili_upload_features_full") is None:
+            _render_ili_upload_gwd_scope_and_load(
+                key_prefix="ili_va",
+                uploaded_file=uploaded_file,
+                data_format_param=data_format_param,
+                vendor_format=selected_vendor,
+                sheet_name=None,
+            )
+
+    # ── Manual sheet: preview → GWD scope + load ─────────────────────────
     else:
         if st.session_state.ili_preview_data is None:
             col_prev, _ = st.columns([1, 3])
@@ -2321,38 +2502,25 @@ def _render_ili_upload_mode() -> None:
                 st.caption(f"{rows} rows · {len(cols)} columns")
                 st.write(", ".join(cols))
 
-            if st.button("🚀 Parse Sheet", type="primary", key="ili_parse_sheet_button"):
-                with st.spinner(f"Parsing sheet '{selected_sheet}'…"):
-                    result = asyncio.run(
-                        call_process_feature_map_api(
-                            uploaded_file,
-                            sheet_name=selected_sheet,
-                            data_format=data_format_param,
-                        )
-                    )
-                if result and result.get("success"):
-                    sheet_key = (
-                        uploaded_file.name,
-                        "choose_sheet",
-                        selected_sheet,
-                        selected_data_format,
-                    )
-                    st.session_state.ili_upload_parse_key = sheet_key
-                    st.session_state.ili_upload_features_full = result["features"]
-                    st.session_state.ili_upload_scatter_full = result.get("scatter_data")
-                    st.session_state.ili_upload_gwd_numbers = result.get("gwd_numbers", [])
-                    st.session_state.ili_upload_sources = result.get("sources", [])
-                    st.session_state.ili_upload_column_mapping = result.get("column_mapping", {})
-                    st.session_state.ili_upload_total_rows = result.get("total_rows", 0)
-                    st.session_state.ili_upload_data_format = result.get("data_format", "anomaly")
-                    n = result.get("total_rows", 0)
-                    fmt = result.get("data_format", "anomaly")
-                    fmt_label = {"anomaly": "features", "pipe_tally": "pipe joints"}.get(fmt, "rows")
-                    st.success(f"✅ Parsed **{n} {fmt_label}**")
-                elif result:
-                    st.error(result.get("error", "Parse failed"))
+            ili_settings_key_m: tuple = (
+                uploaded_file.name,
+                "choose_sheet",
+                selected_sheet,
+                selected_data_format,
+            )
+            if st.session_state.get("ili_upload_settings_key") != ili_settings_key_m:
+                _apply_ili_settings_change(ili_settings_key_m)
+
+            if st.session_state.get("ili_upload_features_full") is None:
+                _render_ili_upload_gwd_scope_and_load(
+                    key_prefix="ili_ms",
+                    uploaded_file=uploaded_file,
+                    data_format_param=data_format_param,
+                    vendor_format=None,
+                    sheet_name=selected_sheet,
+                )
         else:
-            st.info("Click **Preview File** to see available sheets, then select one and parse.")
+            st.info("Click **Preview File** to see available sheets, then select one.")
 
     # ── GWD zoom controls + feature map (frontend filtering only) ────────
     features_full = st.session_state.get("ili_upload_features_full")
@@ -2393,8 +2561,9 @@ def _render_ili_upload_mode() -> None:
         options=["Show all", "GWD range (start – end)", "Center GWD  (±2 joints, 5 total)"],
         horizontal=True,
         help=(
-            "All filtering runs locally — no re-upload to the backend.\n"
-            "**Center GWD**: shows target GWD + 2 upstream + 2 downstream joints (5 joints total)."
+            "Filters the **already-loaded** features in the browser (no re-upload).\n"
+            "**Center GWD**: target ± 2 adjacent joints (5 total). "
+            "For huge ILIs, **Load** with a center GWD or range first, then zoom here."
         ),
         key="ili_zoom_mode",
     )
@@ -2403,26 +2572,33 @@ def _render_ili_upload_mode() -> None:
 
     if zoom_mode == "GWD range (start – end)":
         if gwd_numbers:
-            gwd_opts = [str(g) for g in gwd_numbers]
+            lo, hi = min(gwd_numbers), max(gwd_numbers)
             c1, c2 = st.columns(2)
             with c1:
-                gs = st.selectbox(
+                gs_val = st.number_input(
                     "Start GWD",
-                    options=[""] + gwd_opts,
-                    format_func=lambda x: x or "—",
-                    key="ili_gwd_start",
+                    min_value=int(lo),
+                    max_value=int(hi),
+                    value=int(lo),
+                    step=1,
+                    key="ili_gwd_start_num",
                 )
-                gwd_start = int(gs) if gs else None
+                gwd_start = int(gs_val)
             with c2:
-                ge = st.selectbox(
+                ge_val = st.number_input(
                     "End GWD",
-                    options=[""] + gwd_opts,
-                    format_func=lambda x: x or "—",
-                    key="ili_gwd_end",
+                    min_value=int(lo),
+                    max_value=int(hi),
+                    value=int(hi),
+                    step=1,
+                    key="ili_gwd_end_num",
                 )
-                gwd_end = int(ge) if ge else None
+                gwd_end = int(ge_val)
+            if gwd_start > gwd_end:
+                st.warning("Start GWD is greater than end GWD — swap or adjust.")
+                gwd_start, gwd_end = None, None
         else:
-            st.caption("No GWD numbers detected in the data.")
+            st.caption("No GWD numbers in loaded data — use optional **Scan** when uploading, or load with a GWD scope.")
 
     elif zoom_mode == "Center GWD  (±2 joints, 5 total)":
         c1, c2 = st.columns([1, 2])

@@ -443,8 +443,10 @@ def test_build_feature_map_from_dig_package_parses_nde_limits_tgw_strip():
     ws["A8"] = "Feature Summary"
     ws["A9"] = "Distance from TGW (m)"
     ws["B9"] = "Feature Type"
+    ws["C9"] = "Depth (%wt)"
     ws["A10"] = 1.0
     ws["B10"] = "Metal Loss"
+    ws["C10"] = 42.0
 
     _, scatter_data, _, _, _, feature_summary_raw = build_feature_map_from_dig_package(_workbook_bytes(workbook))
 
@@ -614,6 +616,7 @@ def _build_minimal_template() -> bytes:
         "Downstream AGM",
         "Number of Excavations",
         "Issue Date",
+        "Target Girth Weld (TGW)",
     ]
     for i, lab in enumerate(row_labels, start=1):
         ws.cell(i, 1).value = lab

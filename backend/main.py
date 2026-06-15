@@ -59,19 +59,27 @@ from backend.tml.tml_batch_runner import TMLBatchError, run_tml_batch
 from backend.pipeline.metal_loss import assess_metal_loss_feature, mass_assess_metal_loss
 from backend.pipeline.ili_parse import parse_ili_file
 from backend.pipeline.ili_reader import (
+    COLUMN_KEYWORDS,
     detect_data_format,
+    detect_header_row,
     identify_ili_columns,
     parse_pasted_ili_text,
     read_ili_data,
+    read_worksheet_as_dataframe,
 )
 from backend.pipeline.feature_map_builder import (
     DATA_FORMAT_BUILDERS,
     DATA_FORMAT_LABELS,
+    GWD_CENTER_ADJACENT_GWDS,
     build_feature_map_auto,
     build_feature_map_from_df,
+    compute_chainage_bounds_for_gwd_filter,
+    filter_df_by_chainage_window,
     format_orientation_hours,
+    gwd_chainage_anchor_pairs,
     parse_orientation_to_degrees,
     parse_orientation_to_hours,
+    survey_gwd_numbers_from_dataframe,
 )
 from backend.pipeline.dig_package_reader import build_feature_map_from_dig_package
 from backend.pipeline.report_generator import generate_word_report
@@ -638,6 +646,12 @@ async def process_ili_data(
         raise HTTPException(status_code=400, detail=f"Error processing Excel file: {str(e)}")
 
 
+def _form_truthy(val: Optional[str]) -> bool:
+    if val is None:
+        return False
+    return str(val).strip().lower() in ("1", "true", "yes", "on")
+
+
 def _apply_gwd_filter(
     features: List[Dict],
     scatter_data: Optional[Dict],
@@ -648,7 +662,7 @@ def _apply_gwd_filter(
     """
     Filter features by GWD range. Returns (filtered_features, filtered_scatter_data).
     - gwd_start, gwd_end: chainage between start and end GWD
-    - gwd_center: ±3 adjacent GWDs (by sorted GWD list order)
+    - gwd_center: ±N adjacent GWDs by chainage-sorted list (N = GWD_CENTER_ADJACENT_GWDS → 5 joints max)
     """
     if not scatter_data or not scatter_data.get("girth_welds"):
         return features, scatter_data
@@ -668,8 +682,9 @@ def _apply_gwd_filter(
     if gwd_center is not None:
         idx = next((i for i, (gn, _) in enumerate(gwd_list) if _gwd_match(gn, gwd_center)), None)
         if idx is not None:
-            lo = max(0, idx - 3)
-            hi = min(len(gwd_list) - 1, idx + 3)
+            n = GWD_CENTER_ADJACENT_GWDS
+            lo = max(0, idx - n)
+            hi = min(len(gwd_list) - 1, idx + n)
             chainage_min = gwd_list[lo][1]
             chainage_max = gwd_list[hi][1]
     elif gwd_start is not None or gwd_end is not None:
@@ -768,6 +783,7 @@ async def process_ili_feature_map(
     gwd_start: Optional[int] = Form(None),
     gwd_end: Optional[int] = Form(None),
     gwd_center: Optional[int] = Form(None),
+    survey_only: Optional[str] = Form(None),
 ):
     """
     Process ILI Excel file and return features for unwrapped pipe visualization.
@@ -782,11 +798,17 @@ async def process_ili_feature_map(
     (e.g. ``anomaly``, ``pipe_tally``). When omitted or ``"auto"``, the format is
     detected automatically from the column mapping.
 
-    Optional GWD filter: gwd_start+gwd_end for range, or gwd_center for ±N adjacent GWDs.
+    **survey_only** (optional): pass ``1`` / ``true`` to return only ``gwd_numbers`` and
+    row counts without building features (fast first step for large ILI files).
+
+    Optional GWD filter: ``gwd_start`` + ``gwd_end`` (inclusive GWD numbers → chainage span),
+    or ``gwd_center`` (center GWD ± 2 adjacent welds along chainage order = up to **5 joints**).
+    When set, rows are filtered **before** feature build and only that subset is processed.
     """
     vf = (vendor_format or "").strip()
     sn = (sheet_name or "").strip()
     df_override = (data_format or "").strip().lower()
+    do_survey = _form_truthy(survey_only)
     log_params(logger, "ili/process-feature-map", {
         "filename": file.filename,
         "sheet_name": sn or None,
@@ -795,6 +817,7 @@ async def process_ili_feature_map(
         "gwd_start": gwd_start,
         "gwd_end": gwd_end,
         "gwd_center": gwd_center,
+        "survey_only": do_survey,
     })
     validate_excel_file(file)
     content = await file.read()
@@ -812,11 +835,31 @@ async def process_ili_feature_map(
                         success=False,
                         error="Provide sheet_name for manual mode, or vendor_format for auto-detect mode.",
                     )
-                suffix = Path(filename).suffix
-                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                    tmp.write(content)
-                    tmp_path = Path(tmp.name)
-                df = pd.read_excel(tmp_path, sheet_name=sn)
+                # Step 1: Use openpyxl (fast – max 60 rows) to locate the header row.
+                _wb = load_workbook(io.BytesIO(content), data_only=True, read_only=True)
+                try:
+                    if sn not in _wb.sheetnames:
+                        return FeatureMapResponse(
+                            success=False,
+                            error=f"Sheet '{sn}' not found. Available: {_wb.sheetnames}",
+                        )
+                    _ws = _wb[sn]
+                    _hrow = detect_header_row(_ws, keyword_map=COLUMN_KEYWORDS)
+                    if _hrow is None:
+                        _hrow = 1
+                finally:
+                    _wb.close()
+
+                # Step 2: Use pandas (fast vectorised read) with the correct header row.
+                # _hrow is 1-indexed; pandas header= is 0-indexed.
+                df = pd.read_excel(
+                    io.BytesIO(content),
+                    sheet_name=sn,
+                    header=_hrow - 1,
+                    engine="openpyxl",
+                )
+                # Drop entirely-blank rows that sometimes trail multi-row preambles.
+                df.dropna(how="all", inplace=True)
                 sheet_label = sn
                 ili_cols = identify_ili_columns(df)
 
@@ -839,15 +882,50 @@ async def process_ili_feature_map(
                     ),
                 )
 
+            gwd_numbers_survey = survey_gwd_numbers_from_dataframe(df, ili_cols)
+            if do_survey:
+                logger.info(
+                    "[ili/process-feature-map] survey_only format=%s rows=%d gwd_count=%d sheet=%r",
+                    resolved_format, len(df), len(gwd_numbers_survey), sheet_label,
+                )
+                return FeatureMapResponse(
+                    success=True,
+                    total_rows=len(df),
+                    column_mapping={k: v for k, v in ili_cols.items() if v},
+                    features=[],
+                    scatter_data=None,
+                    sources=[],
+                    gwd_numbers=gwd_numbers_survey,
+                    data_format=resolved_format,
+                )
+
+            pre_filtered = False
+            if gwd_start is not None or gwd_end is not None or gwd_center is not None:
+                pairs = gwd_chainage_anchor_pairs(df, ili_cols, resolved_format)
+                ch_min, ch_max = compute_chainage_bounds_for_gwd_filter(
+                    pairs, gwd_start, gwd_end, gwd_center
+                )
+                if ch_min is not None or ch_max is not None:
+                    df_filtered = filter_df_by_chainage_window(
+                        df, ili_cols, resolved_format, ch_min, ch_max
+                    )
+                    if df_filtered.empty:
+                        return FeatureMapResponse(
+                            success=False,
+                            error="No data in the selected GWD window. Try another GWD/range, check vendor format, or load the full line.",
+                        )
+                    df = df_filtered
+                    pre_filtered = True
+
             features, scatter_data, sources = build_feature_map_auto(df, ili_cols, resolved_format)
             gwd_numbers = sorted({int(f["gwd_number"]) for f in features if isinstance(f.get("gwd_number"), (int, float))})
-            if gwd_start is not None or gwd_end is not None or gwd_center is not None:
+            if not pre_filtered and (gwd_start is not None or gwd_end is not None or gwd_center is not None):
                 features, scatter_data = _apply_gwd_filter(
                     features, scatter_data, gwd_start, gwd_end, gwd_center
                 )
             logger.info(
-                "[ili/process-feature-map] format=%s, features=%d, sheet=%r",
-                resolved_format, len(features), sheet_label,
+                "[ili/process-feature-map] format=%s, features=%d, sheet=%r, pre_filtered=%s",
+                resolved_format, len(features), sheet_label, pre_filtered,
             )
             return FeatureMapResponse(
                 success=True,

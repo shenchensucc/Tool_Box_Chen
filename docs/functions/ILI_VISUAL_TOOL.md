@@ -1,116 +1,72 @@
-# 🛢️ ILI Visual Tool - Development Guide
+# ILI Visual Tool — workflow & implementation
 
-## 📍 Function Location
+## Locations
 
-- **Frontend**: `frontend/pages/3_ILI_Visual_Tool.py`
-- **Backend**: `backend/main.py` (endpoints: `/api/ili/preview`, `/api/ili/process`, `/api/ili/parse-paste`)
-- **Models**: `backend/models.py` (`PreviewResponse`, `ProcessResponse`, `FeatureMapResponse`)
+- **Frontend UI**: `frontend/pages/3_ILI_Visual_Tool.py` (entry) · shared logic `frontend/ili_visual_shared.py`
+- **Backend**: `backend/main.py` — `POST /api/ili/process-feature-map`, `POST /api/ili/preview`, `POST /api/ili/parse-paste`
+- **GWD pre-filter**: `backend/pipeline/feature_map_builder.py` — `gwd_chainage_anchor_pairs`, `compute_chainage_bounds_for_gwd_filter`, `filter_df_by_chainage_window`; constant `GWD_CENTER_ADJACENT_GWDS` (±2 welds → up to **5 joints**)
+- **API client**: `frontend/frontend_utils.py` — `call_process_feature_map_api`
 
----
+## Purpose
 
-## 🎯 Function Purpose
-
-The **ILI (In-Line Inspection) Visual Tool** is a **visualization-only** tool. It enables engineers to:
-
-1. Upload Excel files or paste tabular data containing pipeline inspection data
-2. Visualize features along the pipeline (chainage vs depth)
-3. Hover over features to see details (ID, type, depth, length, width, orientation)
-4. Color-coded by depth (Viridis scale)
-
-**No assessment, statistics, or analysis** — visualization only.
+Visualization only: pipeline ILI (or pipe tally) in chainage × orientation / depth views. No assessment or statistics.
 
 ---
 
-## 🏗️ Architecture
+## Upload workflow (intended behavior)
 
-### Data Flow
+1. **Upload** the ILI source workbook (`.xlsx` / `.xls`).
+2. Choose **table source**:
+   - **Auto-detect (vendor format)** — same ILI layouts as Dig Package (`vendor_format`).
+   - **Choose sheet manually** — **Preview File** → pick sheet → then load.
+3. **Optional scan** (collapsed expander): `survey_only=true` — distinct GWD list + row count, **no** feature geometry. Helps pick numbers for the next step; **not required** to load.
+4. **GWD scope** (sent to backend on **Load**):
+   - **Center GWD** — user enters one GWD number. Backend sorts GWDs by chainage, finds that joint, keeps **± `GWD_CENTER_ADJACENT_GWDS`** neighbors (default **2** → **5 joints**), computes chainage min/max, **filters the DataFrame**, then builds features.
+   - **GWD range** — **start** and/or **end** GWD (integers; blank side anchors to file min/max chainage). Backend filters rows to that inclusive chainage span, then builds.
+   - **Full file** — no GWD parameters; builds from all parsed rows (can be slow on large ILIs).
+5. After the map appears, **Zoom to section** filters the **already-loaded** features in the browser (no re-upload).
 
-**Upload mode:**
+### API parameters (`POST /api/ili/process-feature-map`)
+
+| Form field       | Meaning |
+|------------------|---------|
+| `vendor_format`  | Set for auto mode OR |
+| `sheet_name`     | Set for manual sheet mode |
+| `data_format`    | Optional: `anomaly`, `pipe_tally`, etc. |
+| `survey_only`    | `1` = survey only |
+| `gwd_center`     | Center weld; ±adjacent along chainage-sorted list |
+| `gwd_start` / `gwd_end` | Inclusive range by GWD numbers → chainages |
+
+Paste mode still uses `parse-paste` and does not use this GWD upload flow.
+
+---
+
+## Architecture sketch
+
 ```
-User Upload → /api/ili/preview → Preview (sheets, columns)
-                ↓
-         User Maps Columns, Clicks Process
-                ↓
-    /api/ili/process → Scatter plot (chainage vs depth)
+Upload → optional preview (manual) → optional survey_only
+     → Load with gwd_center | gwd_start/gwd_end | (none = full)
+     → backend: anchor pairs → chainage bounds → filter_df → build features
+     → Streamlit: feature map + local zoom
 ```
 
-**Paste mode:**
-```
-User pastes into Excel-like table → Clicks Generate
-                ↓
-    /api/ili/parse-paste → Feature map visualization
-```
+---
 
-### Component Breakdown
+## Safe to change
 
-#### Frontend (`3_ILI_Visual_Tool.py`)
+- Plot styling, labels, expander copy  
+- Zoom UI (client-side only)
 
-1. **Input mode**: Upload Excel File | Paste from Clipboard
+## Do not add here
 
-2. **Upload mode**
-   - File uploader
-   - Preview (sheets, columns, row counts)
-   - Column mapping (distance, depth, metal loss)
-   - Process button → Feature map only
-
-3. **Paste mode**
-   - Excel-like data editor (paste directly from Excel; column format preserved)
-   - Generate button → Feature map only
-
-4. **Visualization**
-   - Interactive Plotly scatter plot
-   - Feature boxes proportional to length/width when available
-   - Color by depth (Viridis)
-   - Hover tooltips with feature details
-
-#### Backend (`main.py`)
-
-1. **Preview** (`/api/ili/preview`) — Excel structure
-2. **Process** (`/api/ili/process`) — Excel → scatter data (used for visualization)
-3. **Parse-paste** (`/api/ili/parse-paste`) — Pasted text → features + scatter data
+- Assessment, KPIs, export of engineering conclusions  
+- Non–Azure OCR paths (project uses Azure Document Intelligence only for other flows)
 
 ---
 
-## 🔧 Key Functions
+## Related docs
 
-### Backend
+- `docs/DIG_PACKAGE_EXCEL_READING.md` — vendor Excel conventions  
+- `CLAUDE.md` — local run: backend `uvicorn backend.main:app --reload`, frontend `streamlit run frontend/Home.py`
 
-- `parse_pasted_ili(pasted_text)` — Parses pasted CSV/tab data, uses `ili_reader.identify_ili_columns`, returns features for visualization
-- `_parse_orientation_to_degrees(val)` — Converts clock format (e.g. 2:48) to degrees
-
-### Frontend
-
-- `call_parse_paste_api(pasted_text)` — Calls `/api/ili/parse-paste`
-- `call_preview_api(file)` — Calls `/api/ili/preview`
-- `call_process_api(...)` — Calls `/api/ili/process`
-
----
-
-## ✅ Safe to Modify
-
-- Visualization styles (colors, layouts)
-- Column mapping UI
-- Error messages
-
----
-
-## 🚨 Do Not Add
-
-- Statistics or assessment
-- Histograms, box plots
-- Export of analysis results
-
-This tool is **visualization only**.
-
----
-
-## 🔗 Related Documentation
-
-- [ARCHITECTURE.md](../ARCHITECTURE.md)
-- [BACKEND_API.md](BACKEND_API.md)
-- [DIG_PACKAGE_EXCEL_READING.md](../DIG_PACKAGE_EXCEL_READING.md) — dig package Excel (Joint Summary, TGW layout). Used by **Dig Package Visual Tool** (`frontend/pages/3_Dig_Package_Visual_Tool.py`); ILI Visual shares `ili_visual_shared.render_feature_map` for the map only.
-
----
-
-**Last Updated**: February 2025  
-**Function Version**: 0.2.0
+**Last updated**: May 2026

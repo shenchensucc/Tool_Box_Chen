@@ -48,6 +48,46 @@
       }
     },
     {
+      "id": "tdw_r1r2_pipe_tally",
+      "description": "2025 TDW R1-R2 — Pipe Tally sheet (TDW multi-source format, header at row 11)",
+      "file_path": "c:\\Users\\shenc\\Downloads\\2025 TDW - R1 to R2 Spreadsheet - 2026IDP.xlsx",
+      "mode": "manual_sheet",
+      "sheet_name": "Pipe Tally",
+      "data_format_override": "auto",
+      "expected": {
+        "success": true,
+        "min_rows": 50,
+        "column_keys_required": ["distance"],
+        "has_girth_welds": true
+      }
+    },
+    {
+      "id": "tdw_r1r2_tool_correlation",
+      "description": "2025 TDW R1-R2 — Tool correlation combined sheet (multi-vendor master pipebook, header at row 4)",
+      "file_path": "c:\\Users\\shenc\\Downloads\\2025 TDW - R1 to R2 Spreadsheet - 2026IDP.xlsx",
+      "mode": "manual_sheet",
+      "sheet_name": "Tool correlation combined",
+      "data_format_override": "auto",
+      "expected": {
+        "success": true,
+        "min_rows": 50,
+        "column_keys_required": ["distance"],
+        "has_girth_welds": true
+      }
+    },
+    {
+      "id": "tdw_r1r2_dig_correlation",
+      "description": "2025 TDW R1-R2 — Dig Correlation sheet (dig log / MDL-like)",
+      "file_path": "c:\\Users\\shenc\\Downloads\\2025 TDW - R1 to R2 Spreadsheet - 2026IDP.xlsx",
+      "mode": "manual_sheet",
+      "sheet_name": "Dig Correlation",
+      "data_format_override": "auto",
+      "expected": {
+        "success": true,
+        "min_rows": 5
+      }
+    },
+    {
       "_comment": "Template for a standard Rosen MFL-A anomaly file — fill in your own file_path",
       "id": "rosen_mfla_vendor_auto",
       "description": "Standard Rosen MFL-A anomaly file — vendor auto mode",

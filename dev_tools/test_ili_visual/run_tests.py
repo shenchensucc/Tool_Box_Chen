@@ -110,7 +110,7 @@ def call_preview(base_url: str, file_path: Path) -> dict[str, Any] | None:
             r = httpx.post(
                 url,
                 files={"file": (file_path.name, fh, _mime(file_path))},
-                timeout=30.0,
+                timeout=180.0,
             )
         r.raise_for_status()
         return r.json()
@@ -145,7 +145,7 @@ def call_process(
                 url,
                 files={"file": (file_path.name, fh, _mime(file_path))},
                 data=data,
-                timeout=120.0,
+                timeout=600.0,
             )
         r.raise_for_status()
         return r.json()
@@ -306,7 +306,10 @@ def print_report(results: list[Result], report_path: Path | None = None) -> None
 
     def _line(s: str = "") -> None:
         lines.append(s)
-        print(s)
+        try:
+            print(s)
+        except UnicodeEncodeError:
+            print(s.encode("ascii", errors="replace").decode("ascii"))
 
     _line()
     _line(BOLD("=" * 72))
@@ -421,7 +424,10 @@ def main() -> None:
 
     results: list[Result] = []
     for tc in cases:
-        print(f"  Running: {tc['id']} …", end=" ", flush=True)
+        try:
+            print(f"  Running: {tc['id']} \u2026", end=" ", flush=True)
+        except UnicodeEncodeError:
+            print(f"  Running: {tc['id']} ...", end=" ", flush=True)
         res = run_case(base_url, tc)
         tag = "SKIP" if res.skipped else ("PASS" if res.passed else ("ERROR" if res.error else "FAIL"))
         print(tag)

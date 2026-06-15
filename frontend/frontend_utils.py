@@ -1051,6 +1051,7 @@ async def call_process_feature_map_api(
     gwd_start: Optional[int] = None,
     gwd_end: Optional[int] = None,
     gwd_center: Optional[int] = None,
+    survey_only: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """
     Call the backend process-feature-map API for Excel → unwrapped pipe visualization.
@@ -1061,6 +1062,8 @@ async def call_process_feature_map_api(
 
     **data_format**: optional override (e.g. ``"pipe_tally"``). When omitted the
     backend auto-detects the format from the column mapping.
+
+    **survey_only**: when True, request GWD list + row count only (no feature build).
     """
     url = f"{BACKEND_URL}/api/ili/process-feature-map"
     if vendor_format:
@@ -1072,13 +1075,22 @@ async def call_process_feature_map_api(
         return None
     if data_format:
         data["data_format"] = data_format
+    if survey_only:
+        data["survey_only"] = "1"
     if gwd_start is not None:
         data["gwd_start"] = str(gwd_start)
     if gwd_end is not None:
         data["gwd_end"] = str(gwd_end)
     if gwd_center is not None:
         data["gwd_center"] = str(gwd_center)
-    timeout = 300.0 if vendor_format else 60.0
+    # Backend loads the **whole worksheet** before GWD chainage filtering; large ILIs need long reads.
+    if survey_only:
+        _ts = os.getenv("ILI_FEATURE_MAP_TIMEOUT_SURVEY")
+        timeout_seconds = float(_ts) if _ts else 300.0
+    else:
+        _tf = os.getenv("ILI_FEATURE_MAP_TIMEOUT")
+        timeout_seconds = float(_tf) if _tf else 600.0
+    timeout = httpx.Timeout(timeout_seconds)
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             files = {"file": (file.name, file.getvalue(), file.type)}
@@ -1093,6 +1105,25 @@ async def call_process_feature_map_api(
                 f"**404 Not Found** — `{url}` may not be available. "
                 "Please **restart the backend server** (e.g. `uvicorn backend.main:app --reload`) to load the latest code."
             )
+        return None
+    except httpx.TimeoutException as e:
+        st.error(
+            f"**Request timed out** after {timeout_seconds:.0f}s. "
+            "The backend reads the **entire worksheet** into memory before trimming to your GWD window, "
+            "so very large Excel files can still take several minutes. "
+            "Try optional **Scan** first, or export a smaller sheet. "
+            "Power users: set env `ILI_FEATURE_MAP_TIMEOUT` (full build, seconds) or "
+            "`ILI_FEATURE_MAP_TIMEOUT_SURVEY` (scan only). "
+            f"Backend: `{BACKEND_URL}`.\n\nDetails: `{e}`"
+        )
+        return None
+    except httpx.RequestError as e:
+        st.error(
+            f"**Backend unreachable** at `{BACKEND_URL}` (no response from the server). "
+            "From the repo root, start: `uvicorn backend.main:app --reload`. "
+            "If you use another host/port, set the `BACKEND_URL` environment variable.\n\n"
+            f"Details: `{e}`"
+        )
         return None
     except httpx.HTTPError as e:
         st.error(f"Request failed: {_format_api_error(e)}")

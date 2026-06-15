@@ -16,6 +16,10 @@ from backend.logging_config import get_logger
 
 logger = get_logger("backend.pipeline.feature_map_builder")
 
+# GWD “center” window: ± this many adjacent girth welds along chainage-sorted GWD list.
+# N=2 → at most 5 joints (target + 2 U/S + 2 D/S). Used by process-feature-map pre-filter.
+GWD_CENTER_ADJACENT_GWDS = 2
+
 
 def parse_orientation_to_degrees(val) -> Optional[float]:
     """Parse orientation (clock '2:48' or degrees) to degrees from 12 o'clock."""
@@ -68,6 +72,151 @@ def format_orientation_hours(hours: float) -> str:
         h += 1
         m -= 60
     return f"{h:02d}:{m:02d}"
+
+
+def _resolve_gwd_value_column(df: pd.DataFrame, ili_cols: Dict[str, Optional[str]]) -> Optional[str]:
+    """Column holding girth-weld / joint number for survey and chainage anchoring."""
+    jt = ili_cols.get("joint_number")
+    gwd_col = next(
+        (
+            c
+            for c in df.columns
+            if "gwd" in str(c).lower()
+            or ("u/s" in str(c).lower() and "ili" in str(c).lower() and "number" in str(c).lower())
+        ),
+        None,
+    )
+    if gwd_col and gwd_col in df.columns:
+        return gwd_col
+    if jt and jt in df.columns:
+        return jt
+    return None
+
+
+def survey_gwd_numbers_from_dataframe(
+    df: pd.DataFrame,
+    ili_cols: Dict[str, Optional[str]],
+) -> List[int]:
+    """
+    Fast unique sorted GWD indices for the ILI Visual survey step (no Python row loop).
+    """
+    dist_col = ili_cols.get("distance")
+    if not dist_col or dist_col not in df.columns:
+        return []
+    gwd_col = _resolve_gwd_value_column(df, ili_cols)
+    if not gwd_col:
+        return []
+    ch = pd.to_numeric(df[dist_col], errors="coerce")
+    gn = pd.to_numeric(df[gwd_col], errors="coerce")
+    valid = ch.notna() & gn.notna()
+    if not valid.any():
+        return []
+    return sorted({int(x) for x in gn[valid].unique() if pd.notna(x)})
+
+
+def gwd_chainage_anchor_pairs(
+    df: pd.DataFrame,
+    ili_cols: Dict[str, Optional[str]],
+    data_format: str,
+) -> List[tuple]:
+    """
+    (gwd_number, chainage) with one chainage per GWD (minimum seen), sorted by chainage.
+    Used to compute chainage bounds before building all features.
+    """
+    dist_col = ili_cols.get("distance")
+    if not dist_col or dist_col not in df.columns:
+        return []
+    gwd_col = _resolve_gwd_value_column(df, ili_cols)
+    if not gwd_col:
+        return []
+    ch = pd.to_numeric(df[dist_col], errors="coerce")
+    gn = pd.to_numeric(df[gwd_col], errors="coerce")
+    sub = pd.DataFrame({"ch": ch, "gn": gn}).dropna()
+    if sub.empty:
+        return []
+    sub["gn"] = sub["gn"].astype(int)
+    agg = sub.groupby("gn")["ch"].min().reset_index()
+    pairs = list(zip(agg["gn"].tolist(), agg["ch"].tolist()))
+    pairs.sort(key=lambda x: (x[1], str(x[0])))
+    return pairs
+
+
+def compute_chainage_bounds_for_gwd_filter(
+    gwd_chainage_pairs: List[tuple],
+    gwd_start: Optional[int],
+    gwd_end: Optional[int],
+    gwd_center: Optional[int],
+) -> tuple[Optional[float], Optional[float]]:
+    """
+    Match semantics of :func:`backend.main._apply_gwd_filter` but using anchor pairs only.
+    """
+    if not gwd_chainage_pairs:
+        return None, None
+
+    def _gwd_match(a, b):
+        try:
+            return int(a) == int(b)
+        except (TypeError, ValueError):
+            return a == b
+
+    gwd_list = list(gwd_chainage_pairs)
+    chainage_min, chainage_max = None, None
+
+    if gwd_center is not None:
+        idx = next((i for i, (gn, _) in enumerate(gwd_list) if _gwd_match(gn, gwd_center)), None)
+        if idx is not None:
+            n = GWD_CENTER_ADJACENT_GWDS
+            lo = max(0, idx - n)
+            hi = min(len(gwd_list) - 1, idx + n)
+            chainage_min = float(gwd_list[lo][1])
+            chainage_max = float(gwd_list[hi][1])
+    elif gwd_start is not None or gwd_end is not None:
+        start_chainage = next((float(ch) for gn, ch in gwd_list if _gwd_match(gn, gwd_start)), None) if gwd_start is not None else None
+        end_chainage = next((float(ch) for gn, ch in gwd_list if _gwd_match(gn, gwd_end)), None) if gwd_end is not None else None
+        if start_chainage is not None:
+            chainage_min = start_chainage
+        if end_chainage is not None:
+            chainage_max = end_chainage
+        if chainage_min is None and chainage_max is not None:
+            chainage_min = min(float(ch) for _, ch in gwd_list)
+        if chainage_max is None and chainage_min is not None:
+            chainage_max = max(float(ch) for _, ch in gwd_list)
+
+    return chainage_min, chainage_max
+
+
+def filter_df_by_chainage_window(
+    df: pd.DataFrame,
+    ili_cols: Dict[str, Optional[str]],
+    data_format: str,
+    chainage_min: Optional[float],
+    chainage_max: Optional[float],
+) -> pd.DataFrame:
+    """Subset rows overlapping [chainage_min, chainage_max] on the primary distance column."""
+    if chainage_min is None and chainage_max is None:
+        return df
+    dist_col = ili_cols.get("distance")
+    if not dist_col or dist_col not in df.columns:
+        return df
+
+    us = pd.to_numeric(df[dist_col], errors="coerce")
+    ds_col = ili_cols.get("ds_distance")
+    if data_format == "pipe_tally" and ds_col and ds_col in df.columns:
+        ds = pd.to_numeric(df[ds_col], errors="coerce")
+        right = ds.where(ds.notna(), us)
+        mask = us.notna()
+        if chainage_min is not None:
+            mask &= right >= chainage_min
+        if chainage_max is not None:
+            mask &= us <= chainage_max
+        return df.loc[mask].copy()
+
+    mask = us.notna()
+    if chainage_min is not None:
+        mask &= us >= chainage_min
+    if chainage_max is not None:
+        mask &= us <= chainage_max
+    return df.loc[mask].copy()
 
 
 def build_feature_map_from_df(
