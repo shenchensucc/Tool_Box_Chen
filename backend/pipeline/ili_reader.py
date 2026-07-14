@@ -431,5 +431,36 @@ def read_ili_data(file_path_or_buffer, sheet_name: Optional[str] = None) -> pd.D
         df = df[first_sheet]
         logger.debug(f"read_ili_data: Using first sheet '{first_sheet}', shape={df.shape}")
 
+    # Header-row auto-detection: some workbooks (e.g. IDP master anomaly lists)
+    # carry 1-3 banner/metadata rows above the real column header, so header=0
+    # yields "Unnamed: N" columns and depth/length detection fails.  When that
+    # happens, scan the first rows for one containing both a depth-like and a
+    # length-like label and re-header the frame from there.
+    cols = identify_ili_columns(df)
+    if not cols.get("depth") or not cols.get("length"):
+        try:
+            if hasattr(file_path_or_buffer, "seek"):
+                file_path_or_buffer.seek(0)
+            raw = pd.read_excel(file_path_or_buffer, sheet_name=sheet_name, header=None)
+            if isinstance(raw, dict):
+                raw = raw[list(raw.keys())[0]]
+            for hdr_row in range(min(10, len(raw))):
+                row_text = [str(v).lower() for v in raw.iloc[hdr_row].tolist() if pd.notna(v)]
+                has_depth = any("depth" in t for t in row_text)
+                has_length = any("length" in t for t in row_text)
+                if has_depth and has_length:
+                    candidate = raw.iloc[hdr_row + 1:].copy()
+                    candidate.columns = raw.iloc[hdr_row].tolist()
+                    candidate = candidate.reset_index(drop=True)
+                    if identify_ili_columns(candidate).get("depth"):
+                        logger.info(
+                            f"read_ili_data: header auto-detected on row {hdr_row} "
+                            f"(0-indexed); {len(candidate)} data rows."
+                        )
+                        df = candidate
+                        break
+        except Exception as e:
+            logger.warning(f"read_ili_data: header auto-detection failed, keeping original frame: {e}")
+
     logger.info(f"read_ili_data: Loaded shape={df.shape}, columns={list(df.columns)[:10]}...")
     return df

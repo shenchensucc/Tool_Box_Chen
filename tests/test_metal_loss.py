@@ -2,12 +2,15 @@
 Unit tests for metal loss assessment calculations
 # Tests are based on standard validation cases
 """
+import os
 import pytest
 import numpy as np
+import pandas as pd
 from backend.pipeline.metal_loss import (
     calculate_folias_factor,
     calculate_failure_pressure,
-    assess_metal_loss_feature
+    assess_metal_loss_feature,
+    mass_assess_metal_loss,
 )
 
 
@@ -127,7 +130,7 @@ class TestFailurePressureCalculations:
         assert np.isclose(calculated_Pf, expected_Pf, rtol=1e-6), \
             f"Failure pressure mismatch: {calculated_Pf} != {expected_Pf}"
         
-        print(f"✓ Test passed: Pf = {calculated_Pf:.2f} kPa (expected: {expected_Pf:.2f} kPa)")
+        print(f"[OK] Test passed: Pf = {calculated_Pf:.2f} kPa (expected: {expected_Pf:.2f} kPa)")
     
     def test_modified_b31g_z_less_than_or_equal_50(self):
         """
@@ -172,7 +175,7 @@ class TestFailurePressureCalculations:
         assert np.isclose(calculated_Pf, expected_Pf, rtol=1e-6), \
             f"Failure pressure mismatch: {calculated_Pf} != {expected_Pf}"
         
-        print(f"✓ Test passed: Pf = {calculated_Pf:.2f} kPa (expected: {expected_Pf:.2f} kPa)")
+        print(f"[OK] Test passed: Pf = {calculated_Pf:.2f} kPa (expected: {expected_Pf:.2f} kPa)")
     
     def test_multiple_depths(self):
         """Test with array of depths (growth over time)"""
@@ -204,7 +207,7 @@ class TestFailurePressureCalculations:
             assert Pf_values[i] > Pf_values[i+1], \
                 "Failure pressure should decrease as defect depth increases"
         
-        print(f"✓ Test passed: Multiple depths calculated correctly")
+        print(f"[OK] Test passed: Multiple depths calculated correctly")
     
     def test_depth_to_thickness_warning(self):
         """Test warning for d/t > 80%"""
@@ -230,7 +233,7 @@ class TestFailurePressureCalculations:
         assert "d_t ratio > 80%" in result['warnings'][0], \
             "Warning should mention d/t ratio exceeds 80%"
         
-        print(f"✓ Test passed: Warning generated for d/t > 80%")
+        print(f"[OK] Test passed: Warning generated for d/t > 80%")
 
 
 class TestCompleteAssessment:
@@ -303,7 +306,7 @@ class TestCompleteAssessment:
         assert wall_80 == tp * 0.8, \
             "80% wall thickness calculated incorrectly"
         
-        print(f"✓ Test passed: Complete assessment scenario")
+        print(f"[OK] Test passed: Complete assessment scenario")
         print(f"  Initial depth: {depth_low[0]:.2f} mm")
         print(f"  Final depth: {depth_low[-1]:.2f} mm")
         print(f"  Initial SOP: {sop_low[0]:.2f} psi")
@@ -341,10 +344,96 @@ class TestCompleteAssessment:
         assert depth_at_cutoff >= wall_80 * 0.95, \
             f"Depth at cutoff ({depth_at_cutoff:.2f}) should be near 80% wall thickness ({wall_80:.2f})"
         
-        print(f"✓ Test passed: Cutoff calculation")
+        print(f"[OK] Test passed: Cutoff calculation")
         print(f"  Cutoff month: {cutoff_high}")
         print(f"  Depth at cutoff: {depth_at_cutoff:.2f} mm")
         print(f"  80% wall thickness: {wall_80:.2f} mm")
+
+
+_DEKEY_PATH = (
+    r"C:\Users\cshen\trisummit\PNG - Asset Integrity - Documents"
+    r"\General\003_TIMP\003_West_ML\000_Common\IDP\2026_Planning"
+    r"\01-EAs_including_2025_repair\R1-R2"
+    r"\App2 NPS 10 R1R2 (MP 0-67) Master Anomalies List.xlsx"
+)
+
+
+@pytest.mark.skipif(not os.path.exists(_DEKEY_PATH), reason="Reference file not available")
+class TestMassAssessAgainstDekeyReference:
+    """
+    Validate mass_assess_metal_loss against Acuren's dekey Pf results for the
+    NPS 10 R1R2 (MP 0-67) segment (ILI date 2022-08-13).
+
+    Pipe specs used: OD=273.1 mm, TP=6.35 mm (standard NPS 10 wall), Grade B
+    (YS=241 MPa, TS=413 MPa, Sflow=310 MPa).  No tolerance or growth applied so
+    that the comparison is year-0 only (column "2023").
+
+    Acceptance criteria (derived from grid search over 1709 metal-loss features):
+      - RMSE  < 100 psi  (actual ~57.6 psi)
+      - |mean bias| < 2 % (actual ~-0.47 %)
+      - 90th-percentile absolute error < 8 % (actual ~5 %)
+    """
+
+    @pytest.fixture(scope="class")
+    def ref_data(self):
+        xl = pd.ExcelFile(_DEKEY_PATH)
+        raw = xl.parse("R1R2 0-67 Anomalies", header=None)
+        headers = raw.iloc[2].tolist()
+        df = raw.iloc[3:].copy()
+        df.columns = headers
+        df = df.reset_index(drop=True)
+        ml = df[df["Feature Type"] == "Metal Loss"].copy().reset_index(drop=True)
+        # First occurrence of integer column 2023 = Failure Pressure, No SF (psi)
+        pf_col_idx = next(i for i, c in enumerate(headers) if c == 2023)
+        pf_ref = pd.to_numeric(ml.iloc[:, pf_col_idx], errors="coerce").values
+        return ml, pf_ref
+
+    def test_rmse_within_tolerance(self, ref_data):
+        ml, pf_ref = ref_data
+        result = mass_assess_metal_loss(
+            df=ml,
+            do=273.1, tp=6.35, YS=241, TS=413,
+            depth_tolerance=0.0, length_tolerance=0.0,
+            depth_cr=0.0, length_cr=0.0,
+            start_year=2023, ili_date="2022-08-13",
+        )
+        pf_calc = pd.to_numeric(result[2023], errors="coerce").values
+        valid = ~np.isnan(pf_ref) & ~np.isnan(pf_calc) & (pf_ref > 0) & (pf_calc > 0)
+        assert valid.sum() >= 1500, f"Too few valid comparison rows: {valid.sum()}"
+
+        rmse = np.sqrt(((pf_calc[valid] - pf_ref[valid]) ** 2).mean())
+        bias_pct = ((pf_calc[valid] - pf_ref[valid]) / pf_ref[valid] * 100).mean()
+        abs_err_pct = np.abs((pf_calc[valid] - pf_ref[valid]) / pf_ref[valid] * 100)
+        p90_err = np.percentile(abs_err_pct, 90)
+
+        print(f"\nN={valid.sum()}, RMSE={rmse:.1f} psi, bias={bias_pct:.2f}%, P90_err={p90_err:.2f}%")
+        assert rmse < 100, f"RMSE {rmse:.1f} psi exceeds 100 psi limit"
+        assert abs(bias_pct) < 2.0, f"Mean bias {bias_pct:.2f}% exceeds ±2% limit"
+        assert p90_err < 8.0, f"P90 absolute error {p90_err:.2f}% exceeds 8% limit"
+
+    def test_depth_fraction_auto_detection(self, ref_data):
+        """Confirm the depth auto-scale fires (values stored as fractions in this file)."""
+        ml, _ = ref_data
+        depth_vals = pd.to_numeric(
+            ml["As Reported Anomaly Depth (%)"], errors="coerce"
+        ).dropna()
+        assert depth_vals.max() <= 1.5, (
+            "Expected fraction-scale depth in this reference file "
+            f"(max={depth_vals.max():.3f})"
+        )
+
+    def test_duplicate_year_columns_no_crash(self, ref_data):
+        """mass_assess_metal_loss must not crash when input has year-integer columns."""
+        ml, _ = ref_data
+        # ml already has integer year columns 2023-2032; this must not raise
+        result = mass_assess_metal_loss(
+            df=ml,
+            do=273.1, tp=6.35, YS=241, TS=413,
+            depth_tolerance=0.0, length_tolerance=0.0,
+            depth_cr=0.0, length_cr=0.0,
+            start_year=2023, ili_date="2022-08-13",
+        )
+        assert 2023 in result.columns
 
 
 if __name__ == "__main__":

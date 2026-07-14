@@ -380,7 +380,13 @@ def mass_assess_metal_loss(
     length_cr: float,
     start_year: int,
     ili_date: Optional[str] = None,
-) -> pd.DataFrame:
+    maop_psi: Optional[float] = None,
+    safety_factor: float = 1.25,
+    depth_cr_low: Optional[float] = None,
+    depth_cr_mid: Optional[float] = None,
+    depth_cr_high: Optional[float] = None,
+    return_summary: bool = False,
+):
     """
     Perform mass assessment for metal loss features over 11 years (start_year through
     start_year+10 inclusive), producing output columns that match the IDP planning format.
@@ -418,12 +424,39 @@ def mass_assess_metal_loss(
     ili_date : str, optional
         ISO date string of the ILI run (``YYYY-MM-DD``).  Defaults to
         ``{start_year}-01-01`` when not supplied.
+    maop_psi : float, optional
+        Maximum Allowable Operating Pressure (psi).  When supplied, each feature
+        is classified Leak vs Rupture (rupture = Pf drops below MAOP x SF before
+        depth reaches 80 % WT) and a "Repair-By Year" column is added.  When
+        absent, all features fall back to "Leak" and no rupture is reported.
+    safety_factor : float
+        Safety factor applied to MAOP for the repair criterion (default 1.25).
+    depth_cr_low, depth_cr_mid, depth_cr_high : float, optional
+        Depth-banded corrosion rates (mm/yr) applied by reported depth:
+        <20 % WT -> low, 20-40 % WT -> mid, >40 % WT -> high.
+        Any band left as None falls back to ``depth_cr``.
+    return_summary : bool
+        When True, returns ``(df_result, summary_dict)`` instead of just the
+        DataFrame.  The summary carries detected columns, warnings, skipped-row
+        counts, and per-year exceedance statistics for UI display.
 
     Returns
     -------
-    pd.DataFrame
-        Original columns plus the computed assessment columns.
+    pd.DataFrame or (pd.DataFrame, dict)
+        Original columns plus the computed assessment columns; with
+        ``return_summary=True`` also a summary dict.
     """
+    # Input validation — fail fast with clear messages
+    if do <= 0 or tp <= 0:
+        raise ValueError(f"Pipe dimensions must be positive (do={do}, tp={tp})")
+    if YS <= 0 or TS <= 0:
+        raise ValueError(f"Material strengths must be positive (YS={YS}, TS={TS})")
+    if maop_psi is not None and maop_psi <= 0:
+        raise ValueError(f"MAOP must be positive when supplied (maop_psi={maop_psi})")
+    if safety_factor <= 0:
+        raise ValueError(f"Safety factor must be positive (safety_factor={safety_factor})")
+
+    summary: Dict = {"warnings": []}
     # 1. Map columns
     ili_cols = identify_ili_columns(df)
     depth_col = ili_cols.get("depth")
@@ -453,16 +486,26 @@ def mass_assess_metal_loss(
     # 2. Working copy — pre-allocate result columns in the desired output order
     df_result = df.copy()
 
-    wall_80 = tp * 0.8  # 80 % WT threshold (mm)
+    # Rename any pre-existing year-integer columns so our output columns don't collide.
+    # This happens when the input Excel already contains Pf or SCC columns labelled with
+    # year integers (e.g. a reference assessment spreadsheet with 2023-2032 columns).
+    year_cols = [start_year + i for i in range(11)]
+    rename_map = {}
+    for col in df_result.columns:
+        if isinstance(col, int) and 2000 <= col <= 2100:
+            rename_map[col] = f"_ref_{col}"
+    if rename_map:
+        df_result = df_result.rename(columns=rename_map)
+        logger.info(f"Renamed {len(rename_map)} pre-existing year columns to avoid collision: {list(rename_map.keys())}")
 
     # Computed columns (filled below for valid rows)
     df_result["Date to Become a Defect"] = None
     df_result["Years to Become a Defect"] = None
     df_result["Failure Mode"] = None
     df_result["Active/Inactive"] = None
+    if maop_psi is not None:
+        df_result["Repair-By Year (Pf < MAOP x SF)"] = None
 
-    # Year Pf columns: 11 years inclusive (i=0 … 10)
-    year_cols = [start_year + i for i in range(11)]
     for yr in year_cols:
         df_result[yr] = None
 
@@ -470,6 +513,7 @@ def mass_assess_metal_loss(
     df_result["Debug_Feature_ID"] = df[feature_id_col] if feature_id_col else "Not Found"
     df_result["Debug_Initial_Depth_mm"] = None
     df_result["Debug_Initial_Length_mm"] = None
+    df_result["Debug_Depth_CR_mm_yr"] = None
 
     # 3. Identify valid rows
     depth_raw = pd.to_numeric(df[depth_col], errors='coerce')
@@ -480,67 +524,180 @@ def mass_assess_metal_loss(
         length_raw.notna() & (length_raw > 0)
     )
 
-    skipped = (~valid_mask).sum()
+    skipped = int((~valid_mask).sum())
     if skipped:
         logger.info(f"Skipping {skipped} rows with 0/empty depth or length.")
     logger.info(f"Valid rows: {valid_mask.sum()} out of {len(df)}")
 
+    summary.update({
+        "total_rows": int(len(df)),
+        "valid_rows": int(valid_mask.sum()),
+        "skipped_rows": skipped,
+        "depth_column": depth_col,
+        "length_column": length_col,
+        "feature_id_column": feature_id_col,
+        "depth_scaled_from_fraction": False,
+        "wall_thickness_column": None,
+        "maop_psi": maop_psi,
+        "safety_factor": safety_factor if maop_psi is not None else None,
+    })
+
     if not valid_mask.any():
         logger.warning("No valid rows found, returning empty results")
-        return df_result
+        summary["warnings"].append("No valid rows found (all depth/length values empty or non-positive).")
+        return (df_result, summary) if return_summary else df_result
 
     # 4. Extract valid arrays and apply tolerances
     dimp_percent_vals = depth_raw[valid_mask].values
     Limp_org_vals = length_raw[valid_mask].values
 
-    dimp_0 = (dimp_percent_vals + depth_tolerance) * 0.01 * tp  # initial depth (mm)
-    Limp_0 = Limp_org_vals + length_tolerance                    # initial length (mm)
+    # Auto-detect depth scale: Excel sometimes stores "17%" as the fraction 0.17.
+    # If all valid depth values are <= 1.5, treat them as fractions and convert to %.
+    # A depth of 1.5 would mean 150 % WT which is physically impossible, so this
+    # threshold is safe for any real ILI dataset.
+    if dimp_percent_vals.max() <= 1.5:
+        msg = (
+            f"Depth values appear to be fractions (max={dimp_percent_vals.max():.4f} <= 1.5). "
+            "Auto-scaled by x100 to convert to percent. "
+            "If your depth column really is in percent (all features < 1.5 % WT), "
+            "these results are wrong - contact the tool owner."
+        )
+        logger.warning(msg)
+        summary["warnings"].append(msg)
+        summary["depth_scaled_from_fraction"] = True
+        dimp_percent_vals = dimp_percent_vals * 100.0
+
+    # Per-row wall thickness: use a WT column from the file when present,
+    # falling back to the global tp for rows where it is missing/invalid.
+    tp_arr = np.full(int(valid_mask.sum()), float(tp))
+    wt_col = ili_cols.get("wall_thickness")
+    if wt_col and wt_col in df.columns:
+        wt_raw = pd.to_numeric(df.loc[valid_mask, wt_col], errors='coerce').values
+        wt_ok = ~np.isnan(wt_raw) & (wt_raw > 0)
+        tp_arr[wt_ok] = wt_raw[wt_ok]
+        summary["wall_thickness_column"] = wt_col
+        n_wt = int(wt_ok.sum())
+        logger.info(f"Using per-row wall thickness from '{wt_col}' for {n_wt} rows; global tp={tp} for the rest.")
+        if n_wt:
+            summary["warnings"].append(
+                f"Per-row wall thickness applied from column '{wt_col}' ({n_wt} rows); "
+                f"global TP {tp} mm used for the remaining {int(valid_mask.sum()) - n_wt} rows."
+            )
+
+    dimp_0 = (dimp_percent_vals + depth_tolerance) * 0.01 * tp_arr  # initial depth (mm)
+    Limp_0 = Limp_org_vals + length_tolerance                        # initial length (mm)
+    wall_80 = tp_arr * 0.8                                           # 80 % WT threshold (mm)
+
+    # Depth-banded corrosion rates: <20 % WT -> low, 20-40 % -> mid, >40 % -> high.
+    # Bands are chosen from the reported depth (before tolerance).  Any band not
+    # supplied falls back to the single depth_cr.
+    cr_low = depth_cr_low if depth_cr_low is not None else depth_cr
+    cr_mid = depth_cr_mid if depth_cr_mid is not None else depth_cr
+    cr_high = depth_cr_high if depth_cr_high is not None else depth_cr
+    cr_arr = np.where(
+        dimp_percent_vals < 20.0, cr_low,
+        np.where(dimp_percent_vals <= 40.0, cr_mid, cr_high)
+    ).astype(float)
+    summary["corrosion_rates"] = {
+        "band_lt20": cr_low, "band_20_40": cr_mid, "band_gt40": cr_high,
+        "rows_lt20": int((dimp_percent_vals < 20.0).sum()),
+        "rows_20_40": int(((dimp_percent_vals >= 20.0) & (dimp_percent_vals <= 40.0)).sum()),
+        "rows_gt40": int((dimp_percent_vals > 40.0).sum()),
+    }
 
     df_result.loc[valid_mask, "Debug_Initial_Depth_mm"] = np.round(dimp_0, 4)
     df_result.loc[valid_mask, "Debug_Initial_Length_mm"] = np.round(Limp_0, 4)
+    df_result.loc[valid_mask, "Debug_Depth_CR_mm_yr"] = np.round(cr_arr, 4)
 
-    # 5. "Date to Become a Defect" — when depth reaches 80 % WT under constant depth_cr
-    if depth_cr > 0:
-        # Years until dimp_0[i] reaches wall_80 under constant depth_cr
-        years_to_def = (wall_80 - dimp_0) / depth_cr
-        # Features already at/above 80 % WT get 0 years (effectively immediate)
-        years_to_def = np.where(years_to_def < 0, 0.0, years_to_def)
+    # 5. "Date to Become a Defect" — when depth reaches 80 % WT under each row's rate
+    with np.errstate(divide='ignore', invalid='ignore'):
+        years_to_def = np.where(cr_arr > 0, (wall_80 - dimp_0) / cr_arr, np.inf)
+    years_to_def = np.where(years_to_def < 0, 0.0, years_to_def)
 
-        def _add_years(base_date: datetime, years: float) -> datetime:
-            return base_date + timedelta(days=years * 365.25)
+    def _add_years(base_date: datetime, years: float) -> Optional[datetime]:
+        if not np.isfinite(years):
+            return None
+        return base_date + timedelta(days=years * 365.25)
 
-        dates_defect = np.array([_add_years(ref_date, y) for y in years_to_def])
-        df_result.loc[valid_mask, "Date to Become a Defect"] = dates_defect
-        df_result.loc[valid_mask, "Years to Become a Defect"] = np.round(years_to_def, 10)
-    else:
-        df_result.loc[valid_mask, "Years to Become a Defect"] = np.inf
-        df_result.loc[valid_mask, "Date to Become a Defect"] = None
+    dates_defect = np.array([_add_years(ref_date, y) for y in years_to_def], dtype=object)
+    df_result.loc[valid_mask, "Date to Become a Defect"] = dates_defect
+    df_result.loc[valid_mask, "Years to Become a Defect"] = np.round(years_to_def, 10)
 
-    # Metal loss always has Leak failure mode; all features assumed Active
-    df_result.loc[valid_mask, "Failure Mode"] = "Leak"
     df_result.loc[valid_mask, "Active/Inactive"] = "Active"
 
     # 6. Calculate Pf for 11 years
+    n_valid = int(valid_mask.sum())
+    pf_matrix = np.full((11, n_valid), np.nan)   # numeric Pf (psi) per year
+    over80_matrix = np.zeros((11, n_valid), dtype=bool)
+
     for i, yr in enumerate(year_cols):
-        dimp_t = dimp_0 + (i * depth_cr)
+        dimp_t = dimp_0 + (i * cr_arr)
         Limp_t = Limp_0 + (i * length_cr)
 
         res = calculate_failure_pressure(
             dimp=dimp_t,
             Limp=Limp_t,
             do=do,
-            tp=tp,
+            tp=tp_arr,
             YS=YS,
             TS=TS,
         )
 
         pf_psi = res['ans']['Pf'] * 0.14503774  # kPa → psi
+        pf_matrix[i] = pf_psi
+        over80_matrix[i] = (dimp_t / tp_arr) > 0.8
+
         results = np.round(pf_psi, 10).astype(object)
-
-        # Mark features beyond 80 % WT
-        is_over = (dimp_t / tp) > 0.8
-        results[is_over] = ">80% leak"
-
+        results[over80_matrix[i]] = ">80% leak"
         df_result.loc[valid_mask, yr] = results
 
-    return df_result
+    # 7. Failure mode and repair-by year
+    if maop_psi is not None:
+        # Rupture criterion: Pf falls below MAOP x SF while still under 80 % WT.
+        repair_threshold = maop_psi * safety_factor
+        below_thresh = pf_matrix < repair_threshold          # (11, n)
+        rupture_before_leak = np.any(below_thresh & ~over80_matrix, axis=0)
+        failure_mode = np.where(rupture_before_leak, "Rupture", "Leak").astype(object)
+
+        # Repair-by year: first year Pf < MAOP x SF OR depth > 80 % WT
+        needs_repair = below_thresh | over80_matrix
+        first_idx = np.argmax(needs_repair, axis=0)          # 0 when none True too
+        any_repair = np.any(needs_repair, axis=0)
+        repair_year = np.where(any_repair, start_year + first_idx, -1).astype(object)
+        repair_year[repair_year == -1] = "Beyond horizon"
+        df_result.loc[valid_mask, "Repair-By Year (Pf < MAOP x SF)"] = repair_year
+
+        summary["rupture_count"] = int(rupture_before_leak.sum())
+        summary["leak_count"] = int(n_valid - rupture_before_leak.sum())
+        summary["repair_within_horizon"] = int(any_repair.sum())
+    else:
+        # No MAOP supplied: cannot distinguish rupture — everything reports Leak.
+        failure_mode = np.full(n_valid, "Leak", dtype=object)
+        summary["warnings"].append(
+            "MAOP not supplied - Failure Mode defaults to 'Leak' for all features and "
+            "no Repair-By Year is computed. Enter MAOP for leak/rupture classification."
+        )
+    df_result.loc[valid_mask, "Failure Mode"] = failure_mode
+
+    # 8. Per-year exceedance stats + worst features for the UI summary
+    summary["over_80_by_year"] = {
+        int(yr): int(over80_matrix[i].sum()) for i, yr in enumerate(year_cols)
+    }
+    order = np.argsort(pf_matrix[0])
+    worst_n = min(20, n_valid)
+    feat_ids = (
+        df.loc[valid_mask, feature_id_col].astype(str).values
+        if feature_id_col else np.array([f"row {j}" for j in np.where(valid_mask)[0]])
+    )
+    summary["worst_features"] = [
+        {
+            "feature_id": feat_ids[j],
+            "depth_pct": round(float(dimp_percent_vals[j]), 2),
+            "length_mm": round(float(Limp_org_vals[j]), 1),
+            "pf_year0_psi": (None if np.isnan(pf_matrix[0][j]) else round(float(pf_matrix[0][j]), 1)),
+            "failure_mode": str(failure_mode[j]),
+        }
+        for j in order[:worst_n]
+    ]
+
+    return (df_result, summary) if return_summary else df_result

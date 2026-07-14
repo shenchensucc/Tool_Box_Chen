@@ -29,7 +29,12 @@
       "Bash(npm install:*)",
       "Bash(find D:GitHubTool_Box_Chen -maxdepth 1 -name *.txt -o -name *.yml -o -name *.yaml -o -name pyproject.toml -o -name requirements.txt)",
       "Bash(grep -E \"\\\\.py$|^d\")",
-      "Bash(start open_app.bat)"
+      "Bash(start open_app.bat)",
+      "Skill(run)",
+      "PowerShell(Get-NetTCPConnection *)",
+      "PowerShell(python --version; Write-Output \"---\"; python -c \"import uvicorn, fastapi, streamlit; print\\('deps ok', streamlit.__version__\\)\" 2>&1)",
+      "PowerShell(Start-Process -FilePath \"python\" -ArgumentList \"-m\",\"uvicorn\",\"backend.main:app\",\"--port\",\"8000\" -RedirectStandardOutput \"backend_run.log\" -RedirectStandardError \"backend_err.log\" -WindowStyle Hidden; Write-Output \"backend started\")",
+      "PowerShell(Start-Process -FilePath \"python\" -ArgumentList \"-m\",\"streamlit\",\"run\",\"frontend/Home.py\",\"--server.port\",\"8501\",\"--server.headless\",\"true\" -RedirectStandardOutput \"frontend_run.log\" -RedirectStandardError \"frontend_err.log\" -WindowStyle Hidden; Write-Output \"frontend started\")"
     ]
   }
 }

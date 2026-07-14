@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import io
 import os
 import shutil
@@ -1828,11 +1829,18 @@ async def mass_assess_metal_loss_endpoint(
     length_cr: float = Form(25.0),
     start_year: int = Form(...),
     ili_date: str = Form(None),
+    maop_psi: float = Form(None),
+    safety_factor: float = Form(1.25),
+    depth_cr_low: float = Form(None),
+    depth_cr_mid: float = Form(None),
+    depth_cr_high: float = Form(None),
 ):
     """
     Mass assess metal loss features from an Excel file.
     Produces 11 years of Pf (psi) columns plus Date/Years to Become a Defect,
-    Failure Mode, and Active/Inactive status columns.
+    Failure Mode, Active/Inactive, and (when MAOP is supplied) Repair-By Year.
+
+    Returns JSON: {"summary": {...}, "filename": str, "file_b64": str}.
     """
     log_params(logger, "metal-loss/mass-assess", {
         "filename": file.filename,
@@ -1840,12 +1848,18 @@ async def mass_assess_metal_loss_endpoint(
         "depth_tolerance": depth_tolerance, "length_tolerance": length_tolerance,
         "depth_cr": depth_cr, "length_cr": length_cr,
         "start_year": start_year, "ili_date": ili_date,
+        "maop_psi": maop_psi, "safety_factor": safety_factor,
+        "depth_cr_low": depth_cr_low, "depth_cr_mid": depth_cr_mid, "depth_cr_high": depth_cr_high,
     })
     validate_excel_file(file)
+    if do <= 0 or tp <= 0 or YS <= 0 or TS <= 0:
+        raise HTTPException(status_code=422, detail="do, tp, YS and TS must all be positive.")
+    if maop_psi is not None and maop_psi <= 0:
+        raise HTTPException(status_code=422, detail="MAOP must be positive when supplied (leave blank to skip rupture classification).")
     content = await file.read()
     filename = file.filename
 
-    def _do_mass_assess() -> str:
+    def _do_mass_assess():
         suffix = Path(filename).suffix
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             tmp.write(content)
@@ -1853,29 +1867,31 @@ async def mass_assess_metal_loss_endpoint(
         try:
             df = read_ili_data(tmp_path)
             logger.info(f"[metal-loss/mass-assess] Read {len(df)} rows from Excel")
-            df_result = mass_assess_metal_loss(
+            df_result, summary = mass_assess_metal_loss(
                 df=df, do=do, tp=tp, YS=YS, TS=TS,
                 depth_tolerance=depth_tolerance, length_tolerance=length_tolerance,
                 depth_cr=depth_cr, length_cr=length_cr,
                 start_year=start_year, ili_date=ili_date,
+                maop_psi=maop_psi, safety_factor=safety_factor,
+                depth_cr_low=depth_cr_low, depth_cr_mid=depth_cr_mid, depth_cr_high=depth_cr_high,
+                return_summary=True,
             )
-            logger.info(f"[metal-loss/mass-assess] Processed {len(df_result)} rows, output columns={list(df_result.columns)}")
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as out:
-                df_result.to_excel(out.name, index=False)
-                return out.name
+            logger.info(f"[metal-loss/mass-assess] Processed {len(df_result)} rows")
+            buf = io.BytesIO()
+            df_result.to_excel(buf, index=False)
+            return buf.getvalue(), summary
         finally:
             if tmp_path.exists():
                 os.unlink(tmp_path)
 
     try:
-        out_path = await asyncio.to_thread(_do_mass_assess)
+        xlsx_bytes, summary = await asyncio.to_thread(_do_mass_assess)
         stamp = datetime.now().strftime("%Y%m%d")
-        return FileResponse(
-            path=out_path,
-            filename=f"Mass_Metal_Loss_Assessment_{stamp}.xlsx",
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": f"attachment; filename=Mass_Metal_Loss_Assessment_{stamp}.xlsx"},
-        )
+        return JSONResponse({
+            "summary": summary,
+            "filename": f"Mass_Metal_Loss_Assessment_{stamp}.xlsx",
+            "file_b64": base64.b64encode(xlsx_bytes).decode("ascii"),
+        })
     except HTTPException:
         raise
     except Exception as e:

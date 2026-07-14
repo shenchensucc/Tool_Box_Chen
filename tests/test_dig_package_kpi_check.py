@@ -1,6 +1,7 @@
 """Smoke tests for tools/dig_package_kpi (registry flatten + progress math)."""
 
 import importlib.util
+import sys
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,9 @@ def _load_check_kpi():
     spec = importlib.util.spec_from_file_location("check_kpi", _PKG / "check_kpi.py")
     mod = importlib.util.module_from_spec(spec)
     assert spec and spec.loader
+    # Register before exec_module so @dataclass can resolve cls.__module__
+    # (Python 3.13 looks the module up in sys.modules during class processing).
+    sys.modules["check_kpi"] = mod
     spec.loader.exec_module(mod)
     return mod
 

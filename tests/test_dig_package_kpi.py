@@ -16,8 +16,10 @@ def _load_check_kpi():
         mod = importlib.util.module_from_spec(spec)
         assert spec.loader is not None
         sys.path.insert(0, str(_CHECK_KPI.parent))
-        spec.loader.exec_module(mod)
+        # Register before exec_module so @dataclass can resolve cls.__module__
+        # (Python 3.13 looks the module up in sys.modules during class processing).
         sys.modules["dig_package_check_kpi_mod"] = mod
+        spec.loader.exec_module(mod)
     return sys.modules["dig_package_check_kpi_mod"]
 
 
